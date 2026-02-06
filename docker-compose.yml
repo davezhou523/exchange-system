@@ -1,0 +1,108 @@
+
+services:
+  # Redis服务
+  redis:
+    image: redis:7.2-alpine
+    container_name: exchange-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command:
+      - redis-server
+      - --appendonly yes
+      - --requirepass 123456
+    networks:
+      - exchange-network
+    restart: unless-stopped
+
+  # MySQL服务
+  mysql:
+    image: mysql:8.0
+    container_name: exchange-mysql
+    ports:
+      - "3307:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: exchange_mysql_root_password
+      MYSQL_DATABASE: exchange
+      MYSQL_USER: zz
+      MYSQL_PASSWORD: 123abc
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - exchange-network
+    restart: unless-stopped
+
+  # Etcd服务
+  # Etcd服务（使用docker hub官方镜像）
+  etcd:
+    image: gcr.io/etcd-development/etcd:v3.5.10
+    container_name: exchange-etcd
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    command:
+      - /usr/local/bin/etcd
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --initial-cluster=default=http://etcd:2380
+      - --initial-cluster-token=etcd-cluster-1
+      - --initial-cluster-state=new
+      - --data-dir=/etcd-data
+    volumes:
+      - etcd-data:/etcd-data
+    networks:
+      - exchange-network
+    restart: unless-stopped
+
+  # Prometheus服务
+  prometheus:
+    image: prom/prometheus:v2.49.0  # 使用完整版本号
+    container_name: exchange-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - prometheus-config:/etc/prometheus
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.console.libraries=/etc/prometheus/console_libraries
+      - --web.console.templates=/etc/prometheus/consoles
+      - --web.enable-lifecycle
+    networks:
+      - exchange-network
+    restart: unless-stopped
+
+  # Golang开发环境
+  golang:
+    image: golang:1.25.6-alpine
+    container_name: exchange-golang
+    working_dir: /app
+    volumes:
+      - ./:/app
+    ports:
+      - "8080:8080"
+      - "9000:9000"
+    environment:
+      - GO111MODULE=on
+      - GOPROXY=https://goproxy.cn,direct
+    networks:
+      - exchange-network
+    command: tail -f /dev/null
+    restart: unless-stopped
+
+# 网络配置
+networks:
+  exchange-network:
+    driver: bridge
+
+# 数据卷配置
+volumes:
+  redis-data:
+  mysql-data:
+  etcd-data:
+  prometheus-config:
+  prometheus-data:

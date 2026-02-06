@@ -1,0 +1,51 @@
+// rpc/account/account.proto
+syntax = "proto3";
+
+package account;
+
+option go_package = "./account";
+
+import "common/types/exchange.proto";
+
+message GetBalanceRequest {
+  string user_id = 1;
+  string currency = 2;
+}
+
+message GetBalanceResponse {
+  exchange.Balance balance = 1;
+}
+
+message FreezeRequest {
+  string user_id = 1;
+  string order_id = 2;
+  string currency = 3;
+  string amount = 4;
+}
+
+message FreezeResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message SettleRequest {
+  string trade_id = 1;
+  string buyer_id = 2;
+  string seller_id = 3;
+  string base_currency = 4;
+  string quote_currency = 5;
+  string price = 6;
+  string amount = 7;
+}
+
+message SettleResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+service Account {
+  rpc GetBalance(GetBalanceRequest) returns(GetBalanceResponse);
+  rpc Freeze(FreezeRequest) returns(FreezeResponse);
+  rpc Unfreeze(FreezeRequest) returns(FreezeResponse);
+  rpc Settle(SettleRequest) returns(SettleResponse);
+}

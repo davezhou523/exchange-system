@@ -1,0 +1,50 @@
+# etc/exchange-api.yaml
+Name: exchange-api
+Host: 0.0.0.0
+Port: 8888
+
+# 服务发现
+MatchingRpc:
+  Etcd:
+    Hosts:
+      - 127.0.0.1:2379
+    Key: matching.rpc
+AccountRpc:
+  Etcd:
+    Hosts:
+      - 127.0.0.1:2379
+    Key: account.rpc
+RiskRpc:
+  Etcd:
+    Hosts:
+      - 127.0.0.1:2379
+    Key: risk.rpc
+
+# Redis 配置
+Redis:
+  Host: 127.0.0.1:6379
+  Type: node
+  Pass: ""
+
+# MySQL 配置
+DataSource: root:password@tcp(127.0.0.1:3306)/exchange?charset=utf8mb4&parseTime=true&loc=Asia%2FShanghai
+
+# 日志配置
+Log:
+  Mode: file
+  Level: info
+
+# 限流配置
+Timeout: 3000
+# 添加 Prometheus 监控
+Metrics:
+  Host: 0.0.0.0
+  Port: 9091
+  Path: /metrics
+
+# 添加链路追踪
+Telemetry:
+  Name: exchange-api
+  Endpoint: http://jaeger:14268/api/traces
+  Sampler: 1.0
+  Batcher: jaeger

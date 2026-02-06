@@ -1,0 +1,90 @@
+syntax = "v1"
+
+info (
+	title:   "Exchange System API"
+	desc:    "数字货币交易所系统API"
+	version: "1.0"
+)
+
+type (
+	// 基础响应
+	BaseResp {
+		Code int    `json:"code"` // 状态码
+		Msg  string `json:"msg"` // 消息
+		Data string `json:"data"` // 数据
+	}
+	// 下单请求
+	PlaceOrderReq {
+		UserID        string `json:"user_id"` // 用户ID
+		Symbol        string `json:"symbol"` // 交易对
+		Side          string `json:"side"` // 买卖方向: buy/sell
+		Type          string `json:"type"` // 订单类型: limit/market
+		Price         string `json:"price"` // 价格
+		Amount        string `json:"amount"` // 数量
+		ClientOrderID string `json:"client_order_id,optional"` // 客户端订单ID
+	}
+	// 下单响应
+	PlaceOrderResp {
+		OrderID  string `json:"order_id"`
+		Status   string `json:"status"`
+		ErrorMsg string `json:"error_msg,optional"`
+	}
+	// 查询订单
+	GetOrderReq {
+		OrderID string `form:"order_id"`
+	}
+	GetOrderResp {
+		OrderID      string `json:"order_id"`
+		UserID       string `json:"user_id"`
+		Symbol       string `json:"symbol"`
+		Side         string `json:"side"`
+		Type         string `json:"type"`
+		Price        string `json:"price"`
+		Amount       string `json:"amount"`
+		FilledAmount string `json:"filled_amount"`
+		Status       string `json:"status"`
+		CreateTime   int64  `json:"create_time"`
+		UpdateTime   int64  `json:"update_time"`
+	}
+	// 查询订单簿
+	GetOrderBookReq {
+		Symbol string `form:"symbol"`
+		Depth  int    `form:"depth,optional,default=20"`
+	}
+	OrderLevel {
+		Price  string `json:"price"`
+		Amount string `json:"amount"`
+	}
+	GetOrderBookResp {
+		Bids      []OrderLevel `json:"bids"`
+		Asks      []OrderLevel `json:"asks"`
+		Timestamp int64        `json:\"timestamp\"`
+	}
+	// 查询余额
+	GetBalanceReq {
+		Currency string `form:"currency"`
+	}
+	GetBalanceResp {
+		Available string `json:"available"`
+		Locked    string `json:"locked"`
+		Total     string `json:"total"`
+	}
+)
+
+service exchange-api {
+	@handler PlaceOrder
+	post /api/v1/order (PlaceOrderReq) returns (PlaceOrderResp)
+
+	@handler CancelOrder
+	delete /api/v1/order/:order_id returns (BaseResp)
+
+	@handler GetOrder
+	get /api/v1/order/:order_id (GetOrderReq) returns (GetOrderResp)
+
+	@handler GetOrderBook
+	get /api/v1/depth (GetOrderBookReq) returns (GetOrderBookResp)
+
+	@handler GetBalance
+	get /api/v1/balance/:currency (GetBalanceReq) returns (GetBalanceResp)
+}
+

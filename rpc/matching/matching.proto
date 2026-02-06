@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package matching;
+
+option go_package = "exchange/rpc/matching/matching";
+// 导入公共类型
+import "common/types/exchange.proto";
+message OrderRequest {
+  exchange.Order order = 1;
+}
+
+message OrderResponse {
+  string order_id = 1;
+  string status = 2;
+  string error = 3;
+}
+
+message CancelOrderRequest {
+  string order_id = 1;
+  string user_id = 2;
+  string symbol = 3;
+}
+
+message CancelOrderResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message GetOrderBookRequest {
+  string symbol = 1;
+  int32 depth = 2;
+}
+
+message GetOrderBookResponse {
+  exchange.OrderBook order_book = 1;
+}
+
+service Matching {
+  rpc SubmitOrder(OrderRequest) returns(OrderResponse);
+  rpc CancelOrder(CancelOrderRequest) returns(CancelOrderResponse);
+  rpc GetOrderBook(GetOrderBookRequest) returns(GetOrderBookResponse);
+}
