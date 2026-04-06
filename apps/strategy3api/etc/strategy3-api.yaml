@@ -1,0 +1,5 @@
+Name: strategy3-api
+Host: 0.0.0.0
+Port: 8888
+Symbol: ETHUSDT
+InitialBalance: 10000
