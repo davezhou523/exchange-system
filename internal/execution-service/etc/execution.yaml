@@ -1,0 +1,25 @@
+Name: execution-service
+Host: 0.0.0.0
+Port: 8082
+
+Kafka:
+  Addrs:
+    - localhost:9092
+  Topics:
+    Signals: strategy-signals
+    Orders: execution-orders
+
+Binance:
+  Testnet: true
+  APIKey: "your-api-key"
+  SecretKey: "your-secret-key"
+  BaseURL: "https://demo-fapi.binance.com"
+
+Risk:
+  MaxPositionSize: 0.1
+  MaxLeverage: 10
+  StopLossPercent: 0.02
+
+Log:
+  Level: info
+  Mode: console

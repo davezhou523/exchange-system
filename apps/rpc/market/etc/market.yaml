@@ -1,0 +1,19 @@
+Name: market-rpc
+Host: 0.0.0.0
+Port: 9080
+
+Kafka:
+  Addrs:
+    - localhost:9092
+  Topic:
+    MarketData: market-data
+
+Binance:
+  WebSocketURL: wss://fstream.binance.com
+  Symbols:
+    - ETHUSDT
+    - BTCUSDT
+  Intervals:
+    - 15m
+    - 1h
+    - 4h

@@ -1,0 +1,24 @@
+Name: market-service
+Host: 0.0.0.0
+Port: 8080
+
+Kafka:
+  Addrs:
+    - localhost:9092
+  Topic:
+    MarketData: market-data
+
+Binance:
+  WebSocketURL: wss://fstream.binancefuture.com
+  Symbols:
+    - ETHUSDT
+    - BTCUSDT
+  Intervals:
+    - 1m
+    - 5m
+    - 15m
+    - 1h
+
+Log:
+  Level: info
+  Mode: console

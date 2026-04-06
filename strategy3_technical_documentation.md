@@ -3,15 +3,18 @@
 语言:golang 1.25
 框架:采用微服务架构go-zero
 ## 数据源
-合约模拟交易 API 基础端点：https://demo-fapi.binance.com
+U本位合约模拟交易 API 基础端点：https://demo-fapi.binance.com
+U本位合约模拟Websocket baseurl 为 "wss://fstream.binancefuture.com"
 合约 API 文档：https://developers.binance.com/docs/derivatives/
 从网站:binance.com 获取实时永续合约数据，时区UTC0,模拟交易3个月
 
 获取实时永续合约数据，时区UTC0
 接入模拟交易下单、模拟账户同步
 go-zero RPC/API 服务编排
+## 一、总体架构（go-zero版）
 ## 正确的数据流
-           WebSocket（Binance）
+           WebSocket（Binance） testnet的 Websocket baseurl 为 "wss://fstream.binancefuture.com"
+
                     ↓
           market-service
                     ↓
@@ -26,6 +29,193 @@ execution-service
 ↓
 Binance API
 
+### 你现在系统可以这样拆：
+gateway（API网关）
+↓
+├── market-service（行情）
+├── strategy-service（策略）
+├── risk-service（风控）
+├── execution-service（执行）
+├── account-service（账户）
+↓
+Kafka（事件总线）
+↓
+PostgreSQL / Redis
+
+## 二、项目总目录结构（推荐）
+trading-system/
+├── apps/
+│   ├── api/                  # 对外HTTP入口
+│   │   └── gateway/
+│   │       ├── etc/
+│   │       ├── internal/
+│   │       ├── gateway.api
+│   │       └── main.go
+│
+│   ├── rpc/                  # 内部服务
+│   │   ├── market/
+│   │   ├── strategy/
+│   │   ├── risk/
+│   │   ├── execution/
+│   │   └── account/
+│
+├── pkg/                      # 公共模块
+│   ├── kline/
+│   ├── indicator/
+│   ├── signal/
+│   ├── kafka/
+│   ├── logger/
+│   └── utils/
+│
+├── deploy/
+│   ├── docker-compose.yml
+│   └── k8s/
+│
+└── go.mod
+
+## 三、API网关设计（api/gateway）
+对外提供：
+手动下单
+查询账户
+查询持仓
+查询策略状态
+### gateway.api（go-zero定义）
+type (
+OrderReq {
+Symbol string `json:"symbol"`
+Side   string `json:"side"`
+Size   float64 `json:"size"`
+}
+
+    OrderResp {
+        OrderId string `json:"order_id"`
+    }
+)
+
+service gateway-api {
+@handler PlaceOrder
+post /order (OrderReq) returns (OrderResp)
+
+    @handler GetAccount
+    get /account returns (AccountResp)
+}
+
+### gateway职责
+HTTP请求 → RPC调用 → execution/account
+## 四、RPC服务结构（重点）
+#### 1️⃣ market-service
+apps/rpc/market/
+├── etc/
+├── internal/
+│   ├── logic/
+│   ├── svc/
+│   └── server/
+├── market.proto
+└── main.go
+#### market.proto
+service Market {
+rpc GetKlines(GetKlinesReq) returns (GetKlinesResp);
+}
+
+
+message GetKlinesReq {
+string symbol = 1;
+string timeframe = 2;
+}
+
+message GetKlinesResp {
+repeated Kline klines = 1;
+}
+实际上：
+实时数据走 Kafka
+RPC用于“补数据 / 查询”
+#### 2️⃣ strategy-service（核心）
+apps/rpc/strategy/
+├── internal/
+│   ├── logic/
+│   │   └── evaluate_logic.go
+│   ├── engine/        ← 你策略核心
+│   ├── consumer/      ← Kafka消费
+│   └── svc/
+├── strategy.proto
+└── main.go
+strategy职责：
+订阅 Kafka（kline）
+内存维护多周期数据
+计算 EMA / RSI / ATR
+输出 Signal（再发Kafka）
+#### 3️⃣ risk-service
+apps/rpc/risk/
+├── internal/
+│   ├── logic/
+│   ├── consumer/
+│   └── svc/
+└── main.go
+职责：
+订阅 Signal
+判断是否允许交易
+输出approved_signal
+
+#### 4️⃣ execution-service（最关键）
+apps/rpc/execution/
+├── internal/
+│   ├── logic/
+│   ├── client/      ← 交易所API封装
+│   ├── consumer/
+│   └── svc/
+└── main.go
+职责：
+
+接收 signal
+下单（Binance）
+管理订单状态
+#### 5️⃣ account-service
+apps/rpc/account/
+├── internal/
+│   ├── logic/
+│   ├── sync/        ← 同步交易所账户
+│   └── svc/
+└── main.go
+职责：
+
+持仓
+余额
+盈亏
+### 五、pkg公共模块设计（非常关键）
+1. kline
+type Kline struct {
+   Symbol string
+   TF     string
+   Open   float64
+   High   float64
+   Low    float64
+   Close  float64
+   }
+
+2. indicator
+   EMA()
+   RSI()
+   ATR()
+
+3. signal
+   type Signal struct {
+   Symbol string
+   Side   string
+   Entry  float64
+   }
+
+4. kafka
+封装：
+producer
+consumer
+### 六、服务通信方式（关键）
+不推荐 service → gRPC → service
+推荐 Kafka（事件驱动）
+数据流：
+market → Kafka(kline)
+strategy → Kafka(signal)
+risk → Kafka(approved_signal)
+execution → 下单
 
 
 API密钥

@@ -1,0 +1,15 @@
+Name: strategy-rpc
+Host: 0.0.0.0
+Port: 9081
+
+Kafka:
+  Addrs:
+    - localhost:9092
+  Topics:
+    MarketData: market-data
+    Signals: strategy-signals
+
+Strategy:
+  Symbol: ETHUSDT
+  Name: strategy3
+  RuntimeMode: websocket
