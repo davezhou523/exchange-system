@@ -43,35 +43,7 @@ Kafka（事件总线）
 PostgreSQL / Redis
 
 ## 二、项目总目录结构（推荐）
-trading-system/
-├── apps/
-│   ├── api/                  # 对外HTTP入口
-│   │   └── gateway/
-│   │       ├── etc/
-│   │       ├── internal/
-│   │       ├── gateway.api
-│   │       └── main.go
-│
-│   ├── rpc/                  # 内部服务
-│   │   ├── market/
-│   │   ├── strategy/
-│   │   ├── risk/
-│   │   ├── execution/
-│   │   └── account/
-│
-├── pkg/                      # 公共模块
-│   ├── kline/
-│   ├── indicator/
-│   ├── signal/
-│   ├── kafka/
-│   ├── logger/
-│   └── utils/
-│
-├── deploy/
-│   ├── docker-compose.yml
-│   └── k8s/
-│
-└── go.mod
+
 
 ## 三、API网关设计（api/gateway）
 对外提供：
