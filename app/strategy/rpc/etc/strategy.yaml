@@ -1,0 +1,26 @@
+Name: strategy-rpc
+Host: 0.0.0.0
+Port: 9081
+
+Kafka:
+  Addrs:
+    - localhost:9092
+  Topics:
+    MarketData: market-data
+    Signals: strategy-signals
+
+Strategies:
+  - name: "trend-following"
+    symbol: "ETHUSDT"
+    enabled: true
+    parameters:
+      ema_fast: 12
+      ema_slow: 26
+      rsi_period: 14
+      rsi_overbought: 70
+      rsi_oversold: 30
+
+Strategy:
+  Symbol: ETHUSDT
+  Name: strategy3
+  RuntimeMode: websocket

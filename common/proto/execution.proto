@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package execution;
+
+option go_package = "./execution";
+
+
+
+// 订单请求
+message OrderRequest {
+  string strategy_id = 1;
+  string symbol = 2;
+  string side = 3; // BUY, SELL
+  string position_side = 4; // LONG, SHORT, BOTH
+  double quantity = 5;
+  double price = 6;
+  string type = 7; // LIMIT, MARKET, STOP
+  double stop_price = 8;
+  bool reduce_only = 9;
+  bool close_position = 10;
+}
+
+// 订单状态
+message OrderStatus {
+  string order_id = 1;
+  string client_order_id = 2;
+  string symbol = 3;
+  string status = 4; // NEW, PARTIALLY_FILLED, FILLED, CANCELED, REJECTED
+  string side = 5;
+  double executed_quantity = 6;
+  double avg_price = 7;
+  double commission = 8;
+  string commission_asset = 9;
+  int64 transact_time = 10;
+  string error_message = 11;
+}
+
+// 账户信息
+message AccountInfo {
+  double total_wallet_balance = 1;
+  double total_unrealized_pnl = 2;
+  double total_margin_balance = 3;
+  double available_balance = 4;
+  double max_withdraw_amount = 5;
+  repeated Position positions = 6;
+}
+
+message Position {
+  string symbol = 1;
+  double position_amount = 2;
+  double entry_price = 3;
+  double mark_price = 4;
+  double unrealized_pnl = 5;
+  double liquidation_price = 6;
+  double leverage = 7;
+  string margin_type = 8;
+}
+
+service ExecutionService {
+  // 创建订单
+  rpc CreateOrder(OrderRequest) returns (OrderStatus) {}
+  // 取消订单
+  rpc CancelOrder(OrderCancelRequest) returns (OrderStatus) {}
+  // 获取订单状态
+  rpc GetOrderStatus(OrderQuery) returns (OrderStatus) {}
+  // 获取账户信息
+  rpc GetAccountInfo(AccountQuery) returns (AccountInfo) {}
+}
+
+message OrderCancelRequest {
+  string symbol = 1;
+  string order_id = 2;
+  string client_order_id = 3;
+}
+
+message OrderQuery {
+  string symbol = 1;
+  string order_id = 2;
+  string client_order_id = 3;
+}
+
+message AccountQuery {
+  bool include_positions = 1;
+}

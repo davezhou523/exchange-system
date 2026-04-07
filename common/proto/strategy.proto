@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package strategy;
+
+option go_package = "./strategy";
+
+
+
+// 交易信号
+message Signal {
+  string strategy_id = 1;
+  string symbol = 2;
+  string action = 3; // BUY, SELL, HOLD
+  string side = 4; // LONG, SHORT
+  double quantity = 5;
+  double entry_price = 6;
+  double stop_loss = 7;
+  repeated double take_profits = 8;
+  string reason = 9;
+  int64 timestamp = 10;
+}
+
+// 策略配置
+message StrategyConfig {
+  string symbol = 1;
+  string name = 2;
+  map<string, double> parameters = 3;
+  bool enabled = 4;
+}
+
+// 策略状态
+message StrategyStatus {
+  string strategy_id = 1;
+  string status = 2; // RUNNING, STOPPED, ERROR
+  string message = 3;
+  int64 last_update = 4;
+}
+
+service StrategyService {
+  // 启动策略
+  rpc StartStrategy(StrategyConfig) returns (StrategyStatus) {}
+  // 停止策略
+  rpc StopStrategy(StrategyRequest) returns (StrategyStatus) {}
+  // 获取策略状态
+  rpc GetStrategyStatus(StrategyRequest) returns (StrategyStatus) {}
+  // 获取策略信号流
+  rpc StreamSignals(StrategyRequest) returns (stream Signal) {}
+}
+
+message StrategyRequest {
+  string strategy_id = 1;
+}

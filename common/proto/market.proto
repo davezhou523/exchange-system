@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package market;
+
+option go_package = "./market";
+
+
+
+// K线数据类型
+message Kline {
+  string symbol = 1;
+  string interval = 2;
+  int64 open_time = 3;
+  double open = 4;
+  double high = 5;
+  double low = 6;
+  double close = 7;
+  double volume = 8;
+  int64 close_time = 9;
+  bool is_closed = 10;
+}
+
+// 深度数据
+message Depth {
+  string symbol = 1;
+  int64 timestamp = 2;
+  repeated DepthItem bids = 3;
+  repeated DepthItem asks = 4;
+}
+
+message DepthItem {
+  double price = 1;
+  double quantity = 2;
+}
+
+// 交易数据
+message Trade {
+  string symbol = 1;
+  int64 trade_id = 2;
+  double price = 3;
+  double quantity = 4;
+  int64 timestamp = 5;
+  bool is_buyer_maker = 6;
+}
+
+// 市场数据流消息
+message MarketData {
+  string type = 1; // "kline", "depth", "trade"
+  string symbol = 2;
+  oneof data {
+    Kline kline = 3;
+    Depth depth = 4;
+    Trade trade = 5;
+  }
+}
+
+service MarketService {
+  // 订阅市场数据流
+  rpc StreamMarketData(StreamRequest) returns (stream MarketData) {}
+}
+
+message StreamRequest {
+  repeated string symbols = 1;
+  repeated string types = 2; // kline, depth, trade
+}

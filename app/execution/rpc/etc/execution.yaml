@@ -1,0 +1,21 @@
+Name: execution-rpc
+Host: 0.0.0.0
+Port: 9082
+
+Kafka:
+  Addrs:
+    - localhost:9092
+  Topics:
+    Signals: strategy-signals
+    Orders: execution-orders
+
+Binance:
+  BaseURL: https://demo-fapi.binance.com
+  Testnet: true
+  APIKey: "your-api-key"
+  SecretKey: "your-secret-key"
+
+Risk:
+  MaxPositionSize: 0.55
+  MaxLeverage: 7
+  StopLossPercent: 0.02
