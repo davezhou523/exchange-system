@@ -1,0 +1,118 @@
+.
+├── app
+│   ├── account
+│   ├── api
+│   │   └── gateway
+│   │       ├── etc
+│   │       │   └── gateway.yaml
+│   │       ├── internal
+│   │       │   ├── config
+│   │       │   │   └── config.go
+│   │       │   ├── handler
+│   │       │   │   ├── accounthandler.go
+│   │       │   │   ├── evaluatehandler.go
+│   │       │   │   ├── routes.go
+│   │       │   │   └── statehandler.go
+│   │       │   └── svc
+│   │       │       └── servicecontext.go
+│   │       └── main.go
+│   ├── execution
+│   │   └── rpc
+│   │       ├── etc
+│   │       │   └── execution.yaml
+│   │       ├── execution.go
+│   │       ├── executionservice
+│   │       │   └── executionService.go
+│   │       └── internal
+│   │           ├── binance
+│   │           │   └── client.go
+│   │           ├── config
+│   │           │   └── config.go
+│   │           ├── kafka
+│   │           │   ├── consumer.go
+│   │           │   └── producer.go
+│   │           ├── logic
+│   │           │   ├── cancelOrderLogic.go
+│   │           │   ├── createOrderLogic.go
+│   │           │   ├── getAccountInfoLogic.go
+│   │           │   └── getOrderStatusLogic.go
+│   │           ├── server
+│   │           │   └── executionServiceServer.go
+│   │           └── svc
+│   │               └── serviceContext.go
+│   ├── market
+│   │   └── rpc
+│   │       ├── etc
+│   │       │   └── market.yaml
+│   │       ├── internal
+│   │       │   ├── config
+│   │       │   │   └── config.go
+│   │       │   ├── kafka
+│   │       │   │   └── producer.go
+│   │       │   ├── logic
+│   │       │   │   └── streamMarketDataLogic.go
+│   │       │   ├── server
+│   │       │   │   └── marketServiceServer.go
+│   │       │   ├── svc
+│   │       │   │   └── serviceContext.go
+│   │       │   └── websocket
+│   │       │       └── binance_client.go
+│   │       ├── market.go
+│   │       └── marketservice
+│   │           └── marketService.go
+│   └── strategy
+│       └── rpc
+│           ├── etc
+│           │   └── strategy.yaml
+│           ├── internal
+│           │   ├── config
+│           │   │   └── config.go
+│           │   ├── kafka
+│           │   │   ├── consumer.go
+│           │   │   └── producer.go
+│           │   ├── logic
+│           │   │   ├── getStrategyStatusLogic.go
+│           │   │   ├── startStrategyLogic.go
+│           │   │   ├── stopStrategyLogic.go
+│           │   │   └── streamSignalsLogic.go
+│           │   ├── server
+│           │   │   └── strategyServiceServer.go
+│           │   ├── strategy
+│           │   │   └── trend_following.go
+│           │   └── svc
+│           │       └── serviceContext.go
+│           ├── strategy.go
+│           └── strategyservice
+│               └── strategyService.go
+├── common
+│   ├── config
+│   ├── db
+│   ├── indicator
+│   │   └── indicator.go
+│   ├── logger
+│   ├── pb
+│   │   ├── execution
+│   │   │   ├── execution_grpc.pb.go
+│   │   │   └── execution.pb.go
+│   │   ├── market
+│   │   │   ├── market_grpc.pb.go
+│   │   │   └── market.pb.go
+│   │   └── strategy
+│   │       ├── strategy_grpc.pb.go
+│   │       └── strategy.pb.go
+│   ├── proto
+│   │   ├── execution.proto
+│   │   ├── market.proto
+│   │   └── strategy.proto
+│   └── utils
+├── deploy
+│   └── docker-compose.yml
+├── docs
+│   ├── generate
+│   └── strategy3_technical_documentation.md
+├── go.mod
+├── go.sum
+├── README.md
+└── tree.txt
+
+56 directories, 60 files
