@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"exchange-system/app/strategy/rpc/internal/kafka"
+	marketpb "exchange-system/common/pb/market"
 )
 
 type TrendFollowingStrategy struct {
@@ -27,6 +28,21 @@ func NewTrendFollowingStrategy(symbol string, params map[string]float64, produce
 		producer:       producer,
 		historicalData: make([]map[string]interface{}, 0),
 	}
+}
+
+func (s *TrendFollowingStrategy) OnKline(ctx context.Context, k *marketpb.Kline) error {
+	if k == nil || k.Symbol != s.symbol || !k.IsClosed {
+		return nil
+	}
+	data := map[string]interface{}{
+		"symbol":   k.Symbol,
+		"type":     "kline",
+		"interval": k.Interval,
+		"data": map[string]interface{}{
+			"c": fmt.Sprintf("%.8f", k.Close),
+		},
+	}
+	return s.HandleMarketData(ctx, data)
 }
 
 func (s *TrendFollowingStrategy) HandleMarketData(ctx context.Context, data map[string]interface{}) error {

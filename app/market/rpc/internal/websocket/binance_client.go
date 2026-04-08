@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"exchange-system/common/pb/market"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -117,16 +119,21 @@ func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []by
 	}
 
 	if strings.Contains(envelope.Stream, "kline") {
-		marketData := map[string]interface{}{
-			"type":      "kline",
-			"symbol":    envelope.Data.Symbol,
-			"interval":  envelope.Data.Interval,
-			"data":      envelope.Data,
-			"timestamp": time.Now().UnixMilli(),
+		k := market.Kline{
+			Symbol:    envelope.Data.Symbol,
+			Interval:  envelope.Data.Interval,
+			OpenTime:  envelope.Data.OpenTime,
+			Open:      envelope.Data.Open,
+			High:      envelope.Data.High,
+			Low:       envelope.Data.Low,
+			Close:     envelope.Data.Close,
+			Volume:    envelope.Data.Volume,
+			CloseTime: envelope.Data.CloseTime,
+			IsClosed:  envelope.Data.Closed,
 		}
 
-		if err := c.producer.SendMarketData(ctx, marketData); err != nil {
-			return fmt.Errorf("failed to send market data to Kafka: %v", err)
+		if err := c.producer.SendMarketData(ctx, &k); err != nil {
+			return fmt.Errorf("failed to send kline to Kafka: %v", err)
 		}
 	}
 

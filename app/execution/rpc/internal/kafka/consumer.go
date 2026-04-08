@@ -3,60 +3,86 @@ package kafka
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"fmt"
+
+	commonkafka "exchange-system/common/kafka"
+	strategypb "exchange-system/common/pb/strategy"
 
 	"github.com/Shopify/sarama"
+	"github.com/zeromicro/go-zero/core/logx"
 )
 
 type Consumer struct {
-	consumer sarama.Consumer
-	topic    string
+	group   sarama.ConsumerGroup
+	topic   string
+	groupID string
 }
 
-type SignalHandler func(data map[string]interface{}) error
+type SignalHandler func(signal *strategypb.Signal) error
 
-func NewConsumer(brokers []string, topic string) (*Consumer, error) {
-	config := sarama.NewConfig()
-	config.Consumer.Return.Errors = true
+func NewConsumer(brokers []string, groupID string, topic string) (*Consumer, error) {
+	if groupID == "" {
+		groupID = fmt.Sprintf("cg-%s", topic)
+	}
+	config := commonkafka.NewConsumerGroupConfig()
 
-	consumer, err := sarama.NewConsumer(brokers, config)
+	group, err := sarama.NewConsumerGroup(brokers, groupID, config)
 	if err != nil {
 		return nil, err
 	}
-
-	return &Consumer{consumer: consumer, topic: topic}, nil
+	return &Consumer{group: group, topic: topic, groupID: groupID}, nil
 }
 
 func (c *Consumer) StartConsuming(ctx context.Context, handler SignalHandler) error {
-	partitionConsumer, err := c.consumer.ConsumePartition(c.topic, 0, sarama.OffsetNewest)
-	if err != nil {
-		return err
+	if c == nil || c.group == nil {
+		return fmt.Errorf("consumer group not initialized")
+	}
+	if handler == nil {
+		return fmt.Errorf("handler is nil")
 	}
 
+	h := &signalGroupHandler{handler: handler}
 	go func() {
 		for {
-			select {
-			case <-ctx.Done():
-				_ = partitionConsumer.Close()
+			if err := c.group.Consume(ctx, []string{c.topic}, h); err != nil {
+				logx.WithContext(ctx).Errorf("kafka consume group=%s topic=%s error=%v", c.groupID, c.topic, err)
+			}
+			if ctx.Err() != nil {
 				return
-			case msg := <-partitionConsumer.Messages():
-				var data map[string]interface{}
-				if err := json.Unmarshal(msg.Value, &data); err != nil {
-					log.Printf("Failed to unmarshal message: %v", err)
-					continue
-				}
-				if err := handler(data); err != nil {
-					log.Printf("Error handling signal: %v", err)
-				}
-			case err := <-partitionConsumer.Errors():
-				log.Printf("Kafka consumer error: %v", err)
 			}
 		}
 	}()
+	return nil
+}
 
+type signalGroupHandler struct {
+	handler SignalHandler
+}
+
+func (h *signalGroupHandler) Setup(sarama.ConsumerGroupSession) error   { return nil }
+func (h *signalGroupHandler) Cleanup(sarama.ConsumerGroupSession) error { return nil }
+
+func (h *signalGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	for msg := range claim.Messages() {
+		if msg == nil {
+			continue
+		}
+		var sig strategypb.Signal
+		if err := json.Unmarshal(msg.Value, &sig); err != nil {
+			session.MarkMessage(msg, "")
+			continue
+		}
+		if err := h.handler(&sig); err != nil {
+			logx.WithContext(session.Context()).Errorf("handle signal failed: %v", err)
+		}
+		session.MarkMessage(msg, "")
+	}
 	return nil
 }
 
 func (c *Consumer) Close() error {
-	return c.consumer.Close()
+	if c == nil || c.group == nil {
+		return nil
+	}
+	return c.group.Close()
 }

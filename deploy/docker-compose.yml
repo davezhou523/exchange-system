@@ -1,39 +1,31 @@
 services:
   kafka1:
-    image: apache/kafka:3.8.1  # 官方镜像，内置 KRaft
+    image: apache/kafka:3.8.1
     container_name: kafka1
     hostname: kafka1
     ports:
-      - "19092:9092"           # 客户端访问端口
-      # - "19093:9093"           # Controller 内部通信端口
+      - "19092:19092"
     environment:
-      # 集群核心配置
-      KAFKA_CLUSTER_ID: "my-kafka-cluster"  # 集群唯一ID
-      KAFKA_NODE_ID: 1                     # 节点唯一ID
-      KAFKA_PROCESS_ROLES: "controller,broker"  # 节点角色
-      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka1:9093,2@kafka2:9093,3@kafka3:9093"  # Controller列表
+      KAFKA_CLUSTER_ID: "my-kafka-cluster"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "controller,broker"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka1:9093,2@kafka2:9093,3@kafka3:9093"
 
-      # 监听配置
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
-      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
-      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://192.168.10.14:19092"  # 客户端访问地址
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_LISTENERS: "INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:19092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka1:9092,EXTERNAL://kafka1:19092"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
 
-      # 存储配置
       KAFKA_METADATA_LOG_DIR: "/kafka/metadata"
       KAFKA_LOG_DIRS: "/kafka/data"
-
-      # 其他优化参数
-      KAFKA_MESSAGE_MAX_BYTES: 10485760 #单条消息最大尺寸10Mb
-      KAFKA_SOCKET_REQUEST_MAX_BYTES: 11534336 #Socket 请求缓冲区上限：处理网络请求的缓冲区大小，需 > message.max.bytes
-      KAFKA_REPLICA_FETCH_MAX_BYTES: 10485760 #副本同步数据上限10Mb
       KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
       KAFKA_DEFAULT_REPLICATION_FACTOR: 3
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
     volumes:
-      - ./kafka1/data:/kafka/data          # 数据目录
-      - ./kafka1/metadata:/kafka/metadata  # 元数据目录
-      - ./kafka1/logs:/kafka/logs  # 单独挂载日志目录
+      - ./kafka1/data:/kafka/data
+      - ./kafka1/metadata:/kafka/metadata
+      - ./kafka1/logs:/kafka/logs
     networks:
       - kafka-net
 
@@ -42,25 +34,23 @@ services:
     container_name: kafka2
     hostname: kafka2
     ports:
-      - "29092:9092"
+      - "29092:29092"
     environment:
       KAFKA_CLUSTER_ID: "my-kafka-cluster"
       KAFKA_NODE_ID: 2
       KAFKA_PROCESS_ROLES: "controller,broker"
       KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka1:9093,2@kafka2:9093,3@kafka3:9093"
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
-      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
-      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://192.168.10.14:29092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_LISTENERS: "INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka2:9092,EXTERNAL://kafka2:29092"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
       KAFKA_METADATA_LOG_DIR: "/kafka/metadata"
       KAFKA_LOG_DIRS: "/kafka/data"
       KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
-      KAFKA_MESSAGE_MAX_BYTES: 10485760 #单条消息最大尺寸10Mb
-      KAFKA_SOCKET_REQUEST_MAX_BYTES: 11534336 #Socket 请求缓冲区上限：处理网络请求的缓冲区大小，需 > message.max.bytes
-      KAFKA_REPLICA_FETCH_MAX_BYTES: 10485760 #副本同步数据上限10Mb
     volumes:
       - ./kafka2/data:/kafka/data
       - ./kafka2/metadata:/kafka/metadata
-      - ./kafka2/logs:/kafka/logs  # 单独挂载日志目录
+      - ./kafka2/logs:/kafka/logs
     networks:
       - kafka-net
 
@@ -69,28 +59,64 @@ services:
     container_name: kafka3
     hostname: kafka3
     ports:
-      - "39092:9092"
+      - "39092:39092"
     environment:
       KAFKA_CLUSTER_ID: "my-kafka-cluster"
       KAFKA_NODE_ID: 3
       KAFKA_PROCESS_ROLES: "controller,broker"
       KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka1:9093,2@kafka2:9093,3@kafka3:9093"
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
-      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
-      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://192.168.10.14:39092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_LISTENERS: "INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:39092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka3:9092,EXTERNAL://kafka3:39092"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
       KAFKA_METADATA_LOG_DIR: "/kafka/metadata"
       KAFKA_LOG_DIRS: "/kafka/data"
       KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
-      KAFKA_MESSAGE_MAX_BYTES: 10485760 #单条消息最大尺寸10Mb
-      KAFKA_SOCKET_REQUEST_MAX_BYTES: 11534336 #Socket 请求缓冲区上限：处理网络请求的缓冲区大小，需 > message.max.bytes
-      KAFKA_REPLICA_FETCH_MAX_BYTES: 10485760 #副本同步数据上限10Mb
     volumes:
       - ./kafka3/data:/kafka/data
       - ./kafka3/metadata:/kafka/metadata
-      - ./kafka3/logs:/kafka/logs  # 单独挂载日志目录
+      - ./kafka3/logs:/kafka/logs
+    networks:
+      - kafka-net
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.13
+    container_name: etcd
+    hostname: etcd
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    environment:
+      ETCD_NAME: etcd
+      ETCD_DATA_DIR: /etcd-data
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
+      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd:2380
+      ETCD_INITIAL_CLUSTER: etcd=http://etcd:2380
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_INITIAL_CLUSTER_TOKEN: exchange-system-etcd
+    volumes:
+      - etcd-data:/etcd-data
+    networks:
+      - kafka-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    hostname: redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
     networks:
       - kafka-net
 
 networks:
   kafka-net:
     driver: bridge
+
+volumes:
+  etcd-data:
+  redis-data:

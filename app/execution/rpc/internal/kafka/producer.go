@@ -3,9 +3,12 @@ package kafka
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"time"
+
+	commonkafka "exchange-system/common/kafka"
 
 	"github.com/Shopify/sarama"
+	"github.com/zeromicro/go-zero/core/logx"
 )
 
 type Producer struct {
@@ -14,10 +17,7 @@ type Producer struct {
 }
 
 func NewProducer(brokers []string, topic string) (*Producer, error) {
-	config := sarama.NewConfig()
-	config.Producer.RequiredAcks = sarama.WaitForAll
-	config.Producer.Retry.Max = 5
-	config.Producer.Return.Successes = true
+	config := commonkafka.NewProducerConfig()
 
 	producer, err := sarama.NewSyncProducer(brokers, config)
 	if err != nil {
@@ -34,13 +34,31 @@ func (p *Producer) SendMarketData(ctx context.Context, data interface{}) error {
 	}
 
 	msg := &sarama.ProducerMessage{Topic: p.topic, Value: sarama.ByteEncoder(jsonData)}
-	partition, offset, err := p.producer.SendMessage(msg)
-	if err != nil {
-		return err
+	if sym := commonkafka.ExtractSymbol(data); sym != "" {
+		msg.Key = sarama.StringEncoder(sym)
 	}
+	var lastErr error
+	for attempt := 0; attempt < 8; attempt++ {
+		if ctx != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+		}
 
-	log.Printf("Order result sent to topic %s, partition %d at offset %d", p.topic, partition, offset)
-	return nil
+		partition, offset, err := p.producer.SendMessage(msg)
+		if err == nil {
+			logx.WithContext(ctx).Debugf("kafka produced topic=%s partition=%d offset=%d", p.topic, partition, offset)
+			return nil
+		}
+		lastErr = err
+		if !commonkafka.ShouldRetryProduceErr(err) {
+			return err
+		}
+		time.Sleep(commonkafka.RetryBackoff(attempt))
+	}
+	return lastErr
 }
 
 func (p *Producer) Close() error {

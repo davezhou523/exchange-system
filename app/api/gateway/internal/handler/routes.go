@@ -10,20 +10,12 @@ import (
 
 func RegisterHandlers(server *rest.Server, serviceContext *svc.ServiceContext) {
 	server.AddRoutes([]rest.Route{
-		{
-			Method:  http.MethodPost,
-			Path:    "/strategy3/evaluate",
-			Handler: EvaluateHandler(serviceContext),
-		},
-		{
-			Method:  http.MethodGet,
-			Path:    "/strategy3/account",
-			Handler: AccountHandler(serviceContext),
-		},
-		{
-			Method:  http.MethodGet,
-			Path:    "/strategy3/state",
-			Handler: StateHandler(serviceContext),
-		},
+		{Method: http.MethodPost, Path: "/order", Handler: PlaceOrderHandler(serviceContext)},
+		{Method: http.MethodPost, Path: "/order/cancel", Handler: CancelOrderHandler(serviceContext)},
+		{Method: http.MethodGet, Path: "/order/status", Handler: OrderStatusHandler(serviceContext)},
+		{Method: http.MethodGet, Path: "/account", Handler: AccountHandler(serviceContext)},
+		{Method: http.MethodPost, Path: "/strategy/start", Handler: StartStrategyHandler(serviceContext)},
+		{Method: http.MethodPost, Path: "/strategy/stop", Handler: StopStrategyHandler(serviceContext)},
+		{Method: http.MethodGet, Path: "/strategy/status", Handler: StrategyStatusHandler(serviceContext)},
 	})
 }

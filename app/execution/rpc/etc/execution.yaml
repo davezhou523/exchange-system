@@ -1,13 +1,15 @@
 Name: execution-rpc
-Host: 0.0.0.0
-Port: 9082
+ListenOn: 0.0.0.0:9082
 
 Kafka:
   Addrs:
-    - localhost:9092
+    - kafka1:19092
+    - kafka2:29092
+    - kafka3:39092
+  Group: execution-rpc-signal
   Topics:
-    Signals: strategy-signals
-    Orders: execution-orders
+    Signal: signal
+    Orders: order
 
 Binance:
   BaseURL: https://demo-fapi.binance.com

@@ -8,6 +8,7 @@ import (
 	"exchange-system/app/execution/rpc/internal/binance"
 	"exchange-system/app/execution/rpc/internal/config"
 	"exchange-system/app/execution/rpc/internal/kafka"
+	strategypb "exchange-system/common/pb/strategy"
 )
 
 type ServiceContext struct {
@@ -17,6 +18,20 @@ type ServiceContext struct {
 	signalConsumer   *kafka.Consumer
 	orderProducer    *kafka.Producer
 	cancel           context.CancelFunc
+}
+
+func (s *ServiceContext) CreateOrder(ctx context.Context, symbol, side, positionSide string, quantity float64) (*binance.OrderResponse, error) {
+	if s == nil || s.executionService == nil {
+		return nil, fmt.Errorf("execution service not initialized")
+	}
+	return s.executionService.binanceClient.CreateOrder(ctx, symbol, side, positionSide, quantity)
+}
+
+func (s *ServiceContext) GetAccount(ctx context.Context) (*binance.AccountInfo, error) {
+	if s == nil || s.executionService == nil {
+		return nil, fmt.Errorf("execution service not initialized")
+	}
+	return s.executionService.binanceClient.GetAccountInfo(ctx)
 }
 
 type RiskConfig struct {
@@ -35,11 +50,14 @@ func NewExecutionService(binanceClient *binance.BinanceClient, riskConfig RiskCo
 	return &ExecutionService{binanceClient: binanceClient, riskConfig: riskConfig, orderProducer: orderProducer}
 }
 
-func (s *ExecutionService) HandleSignal(ctx context.Context, signal map[string]interface{}) error {
-	if err := s.riskCheck(ctx, signal); err != nil {
+func (s *ExecutionService) HandleSignal(ctx context.Context, sig *strategypb.Signal) error {
+	if sig == nil {
+		return nil
+	}
+	if err := s.riskCheck(ctx, sig); err != nil {
 		return err
 	}
-	orderResp, err := s.executeOrder(ctx, signal)
+	orderResp, err := s.executeOrder(ctx, sig)
 	if err != nil {
 		return err
 	}
@@ -47,26 +65,26 @@ func (s *ExecutionService) HandleSignal(ctx context.Context, signal map[string]i
 		"order_id":    orderResp.OrderID,
 		"symbol":      orderResp.Symbol,
 		"status":      orderResp.Status,
-		"side":        signal["side"],
-		"quantity":    signal["quantity"],
+		"side":        sig.GetSide(),
+		"quantity":    sig.GetQuantity(),
 		"avg_price":   orderResp.AvgPrice,
 		"timestamp":   orderResp.Time,
-		"strategy_id": signal["strategy_id"],
+		"strategy_id": sig.GetStrategyId(),
 	}
 	return s.orderProducer.SendMarketData(ctx, orderResult)
 }
 
-func (s *ExecutionService) riskCheck(ctx context.Context, signal map[string]interface{}) error {
+func (s *ExecutionService) riskCheck(ctx context.Context, sig *strategypb.Signal) error {
 	accountInfo, err := s.binanceClient.GetAccountInfo(ctx)
 	if err != nil {
 		return fmt.Errorf("get account info: %v", err)
 	}
-	quantity, ok := signal["quantity"].(float64)
-	if !ok {
+	quantity := sig.GetQuantity()
+	entryPrice := sig.GetEntryPrice()
+	if quantity <= 0 {
 		return fmt.Errorf("invalid quantity")
 	}
-	entryPrice, ok := signal["entry_price"].(float64)
-	if !ok {
+	if entryPrice <= 0 {
 		return fmt.Errorf("invalid entry_price")
 	}
 	positionSize := quantity * entryPrice
@@ -81,21 +99,15 @@ func (s *ExecutionService) riskCheck(ctx context.Context, signal map[string]inte
 	return nil
 }
 
-func (s *ExecutionService) executeOrder(ctx context.Context, signal map[string]interface{}) (*binance.OrderResponse, error) {
-	symbol, ok := signal["symbol"].(string)
-	if !ok {
+func (s *ExecutionService) executeOrder(ctx context.Context, sig *strategypb.Signal) (*binance.OrderResponse, error) {
+	symbol := sig.GetSymbol()
+	if symbol == "" {
 		return nil, fmt.Errorf("invalid symbol")
 	}
-	action, ok := signal["action"].(string)
-	if !ok {
-		return nil, fmt.Errorf("invalid action")
-	}
-	positionSide, ok := signal["side"].(string)
-	if !ok {
-		return nil, fmt.Errorf("invalid side")
-	}
-	quantity, ok := signal["quantity"].(float64)
-	if !ok {
+	action := sig.GetAction()
+	positionSide := sig.GetSide()
+	quantity := sig.GetQuantity()
+	if quantity <= 0 {
 		return nil, fmt.Errorf("invalid quantity")
 	}
 	orderSide := "SELL"
@@ -114,7 +126,15 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		return nil, err
 	}
 
-	signalConsumer, err := kafka.NewConsumer(c.Kafka.Addrs, c.Kafka.Topics.Signals)
+	groupID := c.Kafka.Group
+	if groupID == "" {
+		if c.Name != "" {
+			groupID = c.Name + "-signal"
+		} else {
+			groupID = "execution-signal"
+		}
+	}
+	signalConsumer, err := kafka.NewConsumer(c.Kafka.Addrs, groupID, c.Kafka.Topics.Signal)
 	if err != nil {
 		_ = orderProducer.Close()
 		cancel()
@@ -128,8 +148,8 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		StopLossPercent: c.Risk.StopLossPercent,
 	}, orderProducer)
 
-	if err := signalConsumer.StartConsuming(ctx, func(data map[string]interface{}) error {
-		return execService.HandleSignal(ctx, data)
+	if err := signalConsumer.StartConsuming(ctx, func(sig *strategypb.Signal) error {
+		return execService.HandleSignal(ctx, sig)
 	}); err != nil {
 		_ = signalConsumer.Close()
 		_ = orderProducer.Close()
@@ -138,7 +158,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	}
 
 	return &ServiceContext{
-		Config:          c,
+		Config:           c,
 		executionService: execService,
 		signalConsumer:   signalConsumer,
 		orderProducer:    orderProducer,

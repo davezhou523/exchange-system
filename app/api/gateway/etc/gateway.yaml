@@ -1,5 +1,12 @@
-Name: strategy3-api
+Name: gateway-api
 Host: 0.0.0.0
 Port: 8888
-Symbol: ETHUSDT
-InitialBalance: 10000
+
+Execution:
+  Target: 127.0.0.1:9082
+
+Strategy:
+  Target: 127.0.0.1:9081
+
+Market:
+  Target: 127.0.0.1:9080

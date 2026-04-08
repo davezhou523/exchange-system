@@ -2,27 +2,30 @@ package svc
 
 import (
 	"exchange-system/app/api/gateway/internal/config"
-	strategyengine "exchange-system/internal/strategy3/engine"
-	strategyruntime "exchange-system/internal/strategy3/runtime"
+	"exchange-system/common/pb/execution"
+	"exchange-system/common/pb/market"
+	"exchange-system/common/pb/strategy"
+
+	"github.com/zeromicro/go-zero/zrpc"
 )
 
 type ServiceContext struct {
-	Config  config.Config
-	Runtime *strategyruntime.Service
+	Config config.Config
+
+	Execution execution.ExecutionServiceClient
+	Strategy  strategy.StrategyServiceClient
+	Market    market.MarketServiceClient
 }
 
 func NewServiceContext(c config.Config) *ServiceContext {
-	symbol := c.Symbol
-	if symbol == "" {
-		symbol = "BTCUSDT"
-	}
-	initialBalance := c.InitialBalance
-	if initialBalance <= 0 {
-		initialBalance = 10000
-	}
+	execCli := zrpc.MustNewClient(c.Execution)
+	strategyCli := zrpc.MustNewClient(c.Strategy)
+	marketCli := zrpc.MustNewClient(c.Market)
 
 	return &ServiceContext{
-		Config:  c,
-		Runtime: strategyruntime.NewService(symbol, strategyengine.DefaultParams(), initialBalance),
+		Config:    c,
+		Execution: execution.NewExecutionServiceClient(execCli.Conn()),
+		Strategy:  strategy.NewStrategyServiceClient(strategyCli.Conn()),
+		Market:    market.NewMarketServiceClient(marketCli.Conn()),
 	}
 }

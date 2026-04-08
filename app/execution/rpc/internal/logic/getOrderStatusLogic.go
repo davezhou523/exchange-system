@@ -25,7 +25,8 @@ func NewGetOrderStatusLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Ge
 
 // 获取订单状态
 func (l *GetOrderStatusLogic) GetOrderStatus(in *execution.OrderQuery) (*execution.OrderStatus, error) {
-	// todo: add your logic here and delete this line
-
-	return &execution.OrderStatus{}, nil
+	return &execution.OrderStatus{
+		Status:       "REJECTED",
+		ErrorMessage: "GetOrderStatus not implemented",
+	}, nil
 }

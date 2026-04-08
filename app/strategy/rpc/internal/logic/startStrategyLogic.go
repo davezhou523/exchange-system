@@ -2,6 +2,7 @@ package logic
 
 import (
 	"context"
+	"time"
 
 	"exchange-system/app/strategy/rpc/internal/svc"
 	"exchange-system/common/pb/strategy"
@@ -25,7 +26,16 @@ func NewStartStrategyLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Sta
 
 // 启动策略
 func (l *StartStrategyLogic) StartStrategy(in *strategy.StrategyConfig) (*strategy.StrategyStatus, error) {
-	// todo: add your logic here and delete this line
-
-	return &strategy.StrategyStatus{}, nil
+	strategyId := in.GetSymbol()
+	if strategyId == "" {
+		strategyId = in.GetName()
+	}
+	in.Enabled = true
+	l.svcCtx.UpsertStrategy(in)
+	return &strategy.StrategyStatus{
+		StrategyId: strategyId,
+		Status:     "RUNNING",
+		Message:    "started",
+		LastUpdate: time.Now().UnixMilli(),
+	}, nil
 }

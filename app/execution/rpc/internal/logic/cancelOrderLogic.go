@@ -25,7 +25,8 @@ func NewCancelOrderLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Cance
 
 // 取消订单
 func (l *CancelOrderLogic) CancelOrder(in *execution.OrderCancelRequest) (*execution.OrderStatus, error) {
-	// todo: add your logic here and delete this line
-
-	return &execution.OrderStatus{}, nil
+	return &execution.OrderStatus{
+		Status:       "REJECTED",
+		ErrorMessage: "CancelOrder not implemented",
+	}, nil
 }

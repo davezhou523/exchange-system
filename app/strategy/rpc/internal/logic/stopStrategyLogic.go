@@ -2,6 +2,7 @@ package logic
 
 import (
 	"context"
+	"time"
 
 	"exchange-system/app/strategy/rpc/internal/svc"
 	"exchange-system/common/pb/strategy"
@@ -25,7 +26,12 @@ func NewStopStrategyLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Stop
 
 // 停止策略
 func (l *StopStrategyLogic) StopStrategy(in *strategy.StrategyRequest) (*strategy.StrategyStatus, error) {
-	// todo: add your logic here and delete this line
-
-	return &strategy.StrategyStatus{}, nil
+	strategyId := in.GetStrategyId()
+	l.svcCtx.StopStrategy(strategyId)
+	return &strategy.StrategyStatus{
+		StrategyId: strategyId,
+		Status:     "STOPPED",
+		Message:    "stopped",
+		LastUpdate: time.Now().UnixMilli(),
+	}, nil
 }

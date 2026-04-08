@@ -2,6 +2,7 @@ package logic
 
 import (
 	"context"
+	"strconv"
 
 	"exchange-system/app/execution/rpc/internal/svc"
 	"exchange-system/common/pb/execution"
@@ -25,7 +26,15 @@ func NewGetAccountInfoLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Ge
 
 // 获取账户信息
 func (l *GetAccountInfoLogic) GetAccountInfo(in *execution.AccountQuery) (*execution.AccountInfo, error) {
-	// todo: add your logic here and delete this line
-
-	return &execution.AccountInfo{}, nil
+	info, err := l.svcCtx.GetAccount(l.ctx)
+	if err != nil {
+		return nil, err
+	}
+	bal, err := strconv.ParseFloat(info.TotalWalletBalance, 64)
+	if err != nil {
+		return nil, err
+	}
+	return &execution.AccountInfo{
+		TotalWalletBalance: bal,
+	}, nil
 }

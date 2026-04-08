@@ -6,9 +6,10 @@ type Config struct {
 	zrpc.RpcServerConf
 	Kafka struct {
 		Addrs  []string
+		Group  string
 		Topics struct {
-			Signals string
-			Orders  string
+			Signal string
+			Orders string
 		}
 	}
 	Binance struct {

@@ -29,20 +29,31 @@ execution-service
 ↓
 Binance API
 
-### 你现在系统可以这样拆：
-gateway（API网关）
-↓
-├── market-service（行情）
-├── strategy-service（策略）
-├── risk-service（风控）
-├── execution-service（执行）
-├── account-service（账户）
-↓
-Kafka（事件总线）
-↓
-PostgreSQL / Redis
+### 创建Kafka主题
+./kafka-topics.sh --create --topic kline --bootstrap-server kafka1:9092
+./kafka-topics.sh --create --topic signal --bootstrap-server kafka1:9092
+./kafka-topics.sh --create --topic order --bootstrap-server kafka1:9092
 
-## 二、项目总目录结构（推荐）
+./kafka-topics.sh --list --bootstrap-server kafka1:9092
+
+./kafka-topics.sh --create \
+--topic kline \
+--bootstrap-server kafka1:9092 \
+--partitions 3 \
+--replication-factor 1
+发送测试消息（验证）
+./kafka-console-producer.sh \
+--topic kline \
+--bootstrap-server kafka1:9092
+数据结构:
+{"symbol":"ETHUSDT","tf":"1m","close":3000}
+
+消费者（Consumer）
+./kafka-console-consumer.sh 
+--topic kline \
+--from-beginning \
+--bootstrap-server kafka2:9092
+
 
 
 ## 三、API网关设计（api/gateway）
@@ -73,17 +84,27 @@ post /order (OrderReq) returns (OrderResp)
 }
 
 ### gateway职责
-HTTP请求 → RPC调用 → execution/account
+HTTP 请求 → gRPC（zrpc）调用 → execution / strategy / market
+
+### gRPC 正确使用场景（推荐）
+1️⃣ 控制层（非常适合）
+- 启动策略 / 停止策略 / 查询策略状态（strategy-service）
+- 手动下单 / 撤单（execution-service）
+
+2️⃣ 查询接口（同步、可缓存、可限流）
+- 获取账户、持仓（execution-service）
+- 获取订单状态（execution-service）
+- 获取 K 线历史 / 补数据（market-service）
+
+3️⃣ 低频调用（明确超时、幂等、可追踪）
+- 风控检查（risk-service）
+- 配置更新（strategy-service / risk-service）
+
+不建议用 gRPC 承载高频数据流（行情/信号/成交回报）。这类流式数据建议 Kafka 事件总线（可回放、可扩展、多消费者）。
+
 ## 四、RPC服务结构（重点）
 #### 1️⃣ market-service
-apps/rpc/market/
-├── etc/
-├── internal/
-│   ├── logic/
-│   ├── svc/
-│   └── server/
-├── market.proto
-└── main.go
+
 #### market.proto
 service Market {
 rpc GetKlines(GetKlinesReq) returns (GetKlinesResp);
@@ -102,58 +123,34 @@ repeated Kline klines = 1;
 实时数据走 Kafka
 RPC用于“补数据 / 查询”
 #### 2️⃣ strategy-service（核心）
-apps/rpc/strategy/
-├── internal/
-│   ├── logic/
-│   │   └── evaluate_logic.go
-│   ├── engine/        ← 你策略核心
-│   ├── consumer/      ← Kafka消费
-│   └── svc/
-├── strategy.proto
-└── main.go
+
 strategy职责：
 订阅 Kafka（kline）
 内存维护多周期数据
 计算 EMA / RSI / ATR
 输出 Signal（再发Kafka）
 #### 3️⃣ risk-service
-apps/rpc/risk/
-├── internal/
-│   ├── logic/
-│   ├── consumer/
-│   └── svc/
-└── main.go
+
 职责：
 订阅 Signal
 判断是否允许交易
 输出approved_signal
 
 #### 4️⃣ execution-service（最关键）
-apps/rpc/execution/
-├── internal/
-│   ├── logic/
-│   ├── client/      ← 交易所API封装
-│   ├── consumer/
-│   └── svc/
-└── main.go
+
 职责：
 
 接收 signal
 下单（Binance）
 管理订单状态
 #### 5️⃣ account-service
-apps/rpc/account/
-├── internal/
-│   ├── logic/
-│   ├── sync/        ← 同步交易所账户
-│   └── svc/
-└── main.go
+
 职责：
 
 持仓
 余额
 盈亏
-### 五、pkg公共模块设计（非常关键）
+### 五、common公共模块设计（非常关键）
 1. kline
 type Kline struct {
    Symbol string
@@ -181,20 +178,455 @@ type Kline struct {
 producer
 consumer
 ### 六、服务通信方式（关键）
-不推荐 service → gRPC → service
-推荐 Kafka（事件驱动）
-数据流：
+- 高频数据流：Kafka（事件驱动，解耦、可扩展、可回放）
+- 控制/查询：gRPC（低频、强约束、可设置超时/重试/限流）
+
+数据流（推荐）：
 market → Kafka(kline)
 strategy → Kafka(signal)
 risk → Kafka(approved_signal)
 execution → 下单
 
+package model
 
-API密钥
-key:
-XyN1sqCupDx2KjLsVF3oMrveIPL9SrJoBcSBGZRLuzSlA4u19ujPtVczjXHLBizF
-secret:
-8CORcIvrHqwotRofKmIqbNl2AVcUe57HniekMXRd3lUva64hD24grPMS8lWzIy0I
+import "time"
+
+type Candle struct {
+	OpenTime  time.Time
+	CloseTime time.Time
+	Open      float64
+	High      float64
+	Low       float64
+	Close     float64
+	Volume    float64
+	Closed    bool
+}
+
+type Params struct {
+	H4EmaFast int
+	H4EmaSlow int
+
+	H1EmaFast   int
+	H1EmaSlow   int
+	H1RsiPeriod int
+	H1RsiLongLo float64
+	H1RsiLongHi float64
+	H1RsiShortLo float64
+	H1RsiShortHi float64
+
+	M15EmaPeriod int
+	M15AtrPeriod int
+	M15RsiPeriod int
+
+	RiskPerTrade         float64
+	MaxPositionSize      float64
+	DeepPullbackScale    float64
+	PullbackDeepBand     float64
+	StopLossAtrMultiplier float64
+
+	MinHoldingBars      int
+	EmaExitConfirmBars  int
+	EmaExitBufferAtr    float64
+
+	RequireBothEntrySignals bool
+	M15BreakoutLookback     int
+	M15RsiBiasLong          float64
+	M15RsiBiasShort         float64
+
+	Leverage          float64
+	MaxLeverageRatio  float64
+	MaxPositions      int
+	MaxConsecutiveLosses int
+	MaxDailyLossPct     float64
+	MaxDrawdownPct      float64
+	DrawdownPositionScale float64
+}
+
+type Snapshot struct {
+	Symbol    string
+	H4        []Candle
+	H1        []Candle
+	M15       []Candle
+	Timestamp time.Time
+}
+
+type Account struct {
+	Equity        float64
+	AvailableCash float64
+}
+
+type Action string
+
+const (
+	ActionHold Action = "HOLD"
+	ActionBuy  Action = "BUY"
+	ActionSell Action = "SELL"
+)
+
+type Side string
+
+const (
+	SideNone  Side = ""
+	SideLong  Side = "LONG"
+	SideShort Side = "SHORT"
+)
+
+type State struct {
+	CurrentSide Side
+	EntryPrice  float64
+	StopLoss    float64
+	TakeProfits []float64
+
+	BarsSinceEntry      int
+	ConsecutiveLosses   int
+	MaxEquity           float64
+	CurrentDrawdownPct  float64
+	LastUpdate          time.Time
+}
+
+type Decision struct {
+	Action    Action
+	Side      Side
+	Quantity  float64
+	EntryPrice float64
+	StopLoss  float64
+	TakeProfits []float64
+	Reason    string
+	Timestamp time.Time
+
+	UpdatedState State
+}
+package model
+
+import "time"
+
+type Candle struct {
+	OpenTime  time.Time
+	CloseTime time.Time
+	Open      float64
+	High      float64
+	Low       float64
+	Close     float64
+	Volume    float64
+	Closed    bool
+}
+
+type Params struct {
+	H4EmaFast int
+	H4EmaSlow int
+
+	H1EmaFast   int
+	H1EmaSlow   int
+	H1RsiPeriod int
+	H1RsiLongLo float64
+	H1RsiLongHi float64
+	H1RsiShortLo float64
+	H1RsiShortHi float64
+
+	M15EmaPeriod int
+	M15AtrPeriod int
+	M15RsiPeriod int
+
+	RiskPerTrade         float64
+	MaxPositionSize      float64
+	DeepPullbackScale    float64
+	PullbackDeepBand     float64
+	StopLossAtrMultiplier float64
+
+	MinHoldingBars      int
+	EmaExitConfirmBars  int
+	EmaExitBufferAtr    float64
+
+	RequireBothEntrySignals bool
+	M15BreakoutLookback     int
+	M15RsiBiasLong          float64
+	M15RsiBiasShort         float64
+
+	Leverage          float64
+	MaxLeverageRatio  float64
+	MaxPositions      int
+	MaxConsecutiveLosses int
+	MaxDailyLossPct     float64
+	MaxDrawdownPct      float64
+	DrawdownPositionScale float64
+}
+
+type Snapshot struct {
+	Symbol    string
+	H4        []Candle
+	H1        []Candle
+	M15       []Candle
+	Timestamp time.Time
+}
+
+type Account struct {
+	Equity        float64
+	AvailableCash float64
+}
+
+type Action string
+
+const (
+	ActionHold Action = "HOLD"
+	ActionBuy  Action = "BUY"
+	ActionSell Action = "SELL"
+)
+
+type Side string
+
+const (
+	SideNone  Side = ""
+	SideLong  Side = "LONG"
+	SideShort Side = "SHORT"
+)
+
+type State struct {
+	CurrentSide Side
+	EntryPrice  float64
+	StopLoss    float64
+	TakeProfits []float64
+
+	BarsSinceEntry      int
+	ConsecutiveLosses   int
+	MaxEquity           float64
+	CurrentDrawdownPct  float64
+	LastUpdate          time.Time
+}
+
+type Decision struct {
+	Action    Action
+	Side      Side
+	Quantity  float64
+	EntryPrice float64
+	StopLoss  float64
+	TakeProfits []float64
+	Reason    string
+	Timestamp time.Time
+
+	UpdatedState State
+}
+package model
+
+import "time"
+
+type Candle struct {
+	OpenTime  time.Time
+	CloseTime time.Time
+	Open      float64
+	High      float64
+	Low       float64
+	Close     float64
+	Volume    float64
+	Closed    bool
+}
+
+type Params struct {
+	H4EmaFast int
+	H4EmaSlow int
+
+	H1EmaFast   int
+	H1EmaSlow   int
+	H1RsiPeriod int
+	H1RsiLongLo float64
+	H1RsiLongHi float64
+	H1RsiShortLo float64
+	H1RsiShortHi float64
+
+	M15EmaPeriod int
+	M15AtrPeriod int
+	M15RsiPeriod int
+
+	RiskPerTrade         float64
+	MaxPositionSize      float64
+	DeepPullbackScale    float64
+	PullbackDeepBand     float64
+	StopLossAtrMultiplier float64
+
+	MinHoldingBars      int
+	EmaExitConfirmBars  int
+	EmaExitBufferAtr    float64
+
+	RequireBothEntrySignals bool
+	M15BreakoutLookback     int
+	M15RsiBiasLong          float64
+	M15RsiBiasShort         float64
+
+	Leverage          float64
+	MaxLeverageRatio  float64
+	MaxPositions      int
+	MaxConsecutiveLosses int
+	MaxDailyLossPct     float64
+	MaxDrawdownPct      float64
+	DrawdownPositionScale float64
+}
+
+type Snapshot struct {
+	Symbol    string
+	H4        []Candle
+	H1        []Candle
+	M15       []Candle
+	Timestamp time.Time
+}
+
+type Account struct {
+	Equity        float64
+	AvailableCash float64
+}
+
+type Action string
+
+const (
+	ActionHold Action = "HOLD"
+	ActionBuy  Action = "BUY"
+	ActionSell Action = "SELL"
+)
+
+type Side string
+
+const (
+	SideNone  Side = ""
+	SideLong  Side = "LONG"
+	SideShort Side = "SHORT"
+)
+
+type State struct {
+	CurrentSide Side
+	EntryPrice  float64
+	StopLoss    float64
+	TakeProfits []float64
+
+	BarsSinceEntry      int
+	ConsecutiveLosses   int
+	MaxEquity           float64
+	CurrentDrawdownPct  float64
+	LastUpdate          time.Time
+}
+
+type Decision struct {
+	Action    Action
+	Side      Side
+	Quantity  float64
+	EntryPrice float64
+	StopLoss  float64
+	TakeProfits []float64
+	Reason    string
+	Timestamp time.Time
+
+	UpdatedState State
+}
+package model
+
+import "time"
+
+type Candle struct {
+	OpenTime  time.Time
+	CloseTime time.Time
+	Open      float64
+	High      float64
+	Low       float64
+	Close     float64
+	Volume    float64
+	Closed    bool
+}
+
+type Params struct {
+	H4EmaFast int
+	H4EmaSlow int
+
+	H1EmaFast   int
+	H1EmaSlow   int
+	H1RsiPeriod int
+	H1RsiLongLo float64
+	H1RsiLongHi float64
+	H1RsiShortLo float64
+	H1RsiShortHi float64
+
+	M15EmaPeriod int
+	M15AtrPeriod int
+	M15RsiPeriod int
+
+	RiskPerTrade         float64
+	MaxPositionSize      float64
+	DeepPullbackScale    float64
+	PullbackDeepBand     float64
+	StopLossAtrMultiplier float64
+
+	MinHoldingBars      int
+	EmaExitConfirmBars  int
+	EmaExitBufferAtr    float64
+
+	RequireBothEntrySignals bool
+	M15BreakoutLookback     int
+	M15RsiBiasLong          float64
+	M15RsiBiasShort         float64
+
+	Leverage          float64
+	MaxLeverageRatio  float64
+	MaxPositions      int
+	MaxConsecutiveLosses int
+	MaxDailyLossPct     float64
+	MaxDrawdownPct      float64
+	DrawdownPositionScale float64
+}
+
+type Snapshot struct {
+	Symbol    string
+	H4        []Candle
+	H1        []Candle
+	M15       []Candle
+	Timestamp time.Time
+}
+
+type Account struct {
+	Equity        float64
+	AvailableCash float64
+}
+
+type Action string
+
+const (
+	ActionHold Action = "HOLD"
+	ActionBuy  Action = "BUY"
+	ActionSell Action = "SELL"
+)
+
+type Side string
+
+const (
+	SideNone  Side = ""
+	SideLong  Side = "LONG"
+	SideShort Side = "SHORT"
+)
+
+type State struct {
+	CurrentSide Side
+	EntryPrice  float64
+	StopLoss    float64
+	TakeProfits []float64
+
+	BarsSinceEntry      int
+	ConsecutiveLosses   int
+	MaxEquity           float64
+	CurrentDrawdownPct  float64
+	LastUpdate          time.Time
+}
+
+type Decision struct {
+	Action    Action
+	Side      Side
+	Quantity  float64
+	EntryPrice float64
+	StopLoss  float64
+	TakeProfits []float64
+	Reason    string
+	Timestamp time.Time
+
+	UpdatedState State
+}
+
+API 密钥
+key: （通过配置文件/环境变量注入，不要写入代码仓库）
+secret: （通过配置文件/环境变量注入，不要写入代码仓库）
 
 ## 概述
 策略是一个基于多时间周期分析的趋势跟踪策略，采用"4H趋势判断 + 1H回调确认 + 15M入场信号"的交易框架。

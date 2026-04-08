@@ -2,6 +2,8 @@ package logic
 
 import (
 	"context"
+	"strconv"
+	"strings"
 
 	"exchange-system/app/execution/rpc/internal/svc"
 	"exchange-system/common/pb/execution"
@@ -25,7 +27,46 @@ func NewCreateOrderLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Creat
 
 // 创建订单
 func (l *CreateOrderLogic) CreateOrder(in *execution.OrderRequest) (*execution.OrderStatus, error) {
-	// todo: add your logic here and delete this line
+	symbol := strings.TrimSpace(in.GetSymbol())
+	side := strings.ToUpper(strings.TrimSpace(in.GetSide()))
+	positionSide := strings.ToUpper(strings.TrimSpace(in.GetPositionSide()))
+	qty := in.GetQuantity()
 
-	return &execution.OrderStatus{}, nil
+	if symbol == "" {
+		return &execution.OrderStatus{Status: "REJECTED", ErrorMessage: "symbol is required"}, nil
+	}
+	if side != "BUY" && side != "SELL" {
+		return &execution.OrderStatus{Status: "REJECTED", ErrorMessage: "side must be BUY or SELL"}, nil
+	}
+	if qty <= 0 {
+		return &execution.OrderStatus{Status: "REJECTED", ErrorMessage: "quantity must be positive"}, nil
+	}
+	if positionSide == "" {
+		if side == "BUY" {
+			positionSide = "LONG"
+		} else {
+			positionSide = "SHORT"
+		}
+	}
+
+	resp, err := l.svcCtx.CreateOrder(l.ctx, symbol, side, positionSide, qty)
+	if err != nil {
+		return &execution.OrderStatus{Status: "REJECTED", ErrorMessage: err.Error()}, nil
+	}
+	return &execution.OrderStatus{
+		OrderId:          strconv.FormatInt(resp.OrderID, 10),
+		Symbol:           resp.Symbol,
+		Status:           resp.Status,
+		Side:             side,
+		AvgPrice:         parseFloat(resp.AvgPrice),
+		TransactTime:     resp.Time,
+		ErrorMessage:     "",
+		ClientOrderId:    "",
+		ExecutedQuantity: qty,
+	}, nil
+}
+
+func parseFloat(v string) float64 {
+	f, _ := strconv.ParseFloat(v, 64)
+	return f
 }

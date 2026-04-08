@@ -2,6 +2,7 @@ package logic
 
 import (
 	"context"
+	"time"
 
 	"exchange-system/app/strategy/rpc/internal/svc"
 	"exchange-system/common/pb/strategy"
@@ -25,7 +26,17 @@ func NewGetStrategyStatusLogic(ctx context.Context, svcCtx *svc.ServiceContext) 
 
 // 获取策略状态
 func (l *GetStrategyStatusLogic) GetStrategyStatus(in *strategy.StrategyRequest) (*strategy.StrategyStatus, error) {
-	// todo: add your logic here and delete this line
-
-	return &strategy.StrategyStatus{}, nil
+	strategyId := in.GetStrategyId()
+	status := "STOPPED"
+	msg := "not running"
+	if l.svcCtx.HasStrategy(strategyId) {
+		status = "RUNNING"
+		msg = "ok"
+	}
+	return &strategy.StrategyStatus{
+		StrategyId: strategyId,
+		Status:     status,
+		Message:    msg,
+		LastUpdate: time.Now().UnixMilli(),
+	}, nil
 }
