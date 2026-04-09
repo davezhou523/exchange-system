@@ -14,5 +14,6 @@ type Config struct {
 		WebSocketURL string
 		Symbols      []string
 		Intervals    []string
+		Proxy        string
 	}
 }

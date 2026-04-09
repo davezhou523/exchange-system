@@ -17,38 +17,28 @@ type ServiceContext struct {
 }
 
 func NewServiceContext(c config.Config) (*ServiceContext, error) {
-	_, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 
 	producer, err := kafka.NewProducer(c.Kafka.Addrs, c.Kafka.Topics.Kline)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	//
-	//wsClient := websocket.NewBinanceWebSocketClient(
-	//	c.Binance.WebSocketURL,
-	//	c.Binance.Symbols,
-	//	c.Binance.Intervals,
-	//	producer,
-	//)
-	//
-	//if err := wsClient.Connect(ctx); err != nil {
-	//	_ = producer.Close()
-	//	cancel()
-	//	return nil, err
-	//}
-	//
-	//if err := wsClient.StartStreaming(ctx); err != nil {
-	//	_ = wsClient.Close()
-	//	_ = producer.Close()
-	//	cancel()
-	//	return nil, err
-	//}
+
+	wsClient := websocket.NewBinanceWebSocketClient(
+		c.Binance.WebSocketURL,
+		c.Binance.Proxy,
+		c.Binance.Symbols,
+		c.Binance.Intervals,
+		producer,
+	)
+
+	wsClient.StartInBackground(ctx)
 
 	return &ServiceContext{
 		Config:         c,
 		marketProducer: producer,
-		wsClient:       nil,
+		wsClient:       wsClient,
 		cancel:         cancel,
 	}, nil
 }

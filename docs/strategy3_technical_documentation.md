@@ -54,6 +54,8 @@ Binance API
 --from-beginning \
 --bootstrap-server kafka2:9092
 
+2026/04/09 22:28:25 Market data sent to topic=kline partition=0 offset=392 data=
+{"symbol":"BTCUSDT","interval":"1m","open_time":1775744880000,"open":70523.9,"high":70531.8,"low":70504,"close":70504.7,"volume":44.836,"close_time":1775744939999,"event_time":1775744904600,"first_trade_id":7542726887,"last_trade_id":7542728218,"num_trades":1330,"quote_volume":3161566.8425,"taker_buy_volume":16.386,"taker_buy_quote":1155449.3835}
 
 
 ## 三、API网关设计（api/gateway）

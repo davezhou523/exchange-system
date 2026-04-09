@@ -56,7 +56,7 @@ func (p *Producer) SendMarketData(ctx context.Context, data interface{}) error {
 
 		partition, offset, err := p.producer.SendMessage(msg)
 		if err == nil {
-			log.Printf("Market data sent to topic=%s partition=%d offset=%d", p.topic, partition, offset)
+			log.Printf("Market data sent to topic=%s partition=%d offset=%d data=%s", p.topic, partition, offset, string(jsonData))
 			return nil
 		}
 		lastErr = err

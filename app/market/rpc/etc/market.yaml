@@ -3,9 +3,9 @@ ListenOn: 0.0.0.0:9080
 
 Kafka:
   Addrs:
-    - kafka1:19092
-    - kafka2:29092
-    - kafka3:39092
+    - kafka1:9092
+#    - kafka2:29092
+#    - kafka3:39092
   Topics:
     Kline: kline
 
@@ -15,6 +15,5 @@ Binance:
     - ETHUSDT
     - BTCUSDT
   Intervals:
-    - 15m
-    - 1h
-    - 4h
+    - 1m
+  Proxy: socks5://127.0.0.1:1080

@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +18,7 @@ import (
 
 type BinanceWebSocketClient struct {
 	baseURL   string
+	proxyURL  string
 	dialer    *websocket.Dialer
 	conn      *websocket.Conn
 	producer  KafkaProducer
@@ -27,43 +31,120 @@ type KafkaProducer interface {
 }
 
 type KlineData struct {
-	Symbol    string  `json:"s"`
-	Interval  string  `json:"i"`
-	OpenTime  int64   `json:"t"`
-	CloseTime int64   `json:"T"`
-	Open      float64 `json:"o,string"`
-	High      float64 `json:"h,string"`
-	Low       float64 `json:"l,string"`
-	Close     float64 `json:"c,string"`
-	Volume    float64 `json:"v,string"`
-	Closed    bool    `json:"x"`
+	Symbol         string    `json:"s"`
+	Interval       string    `json:"i"`
+	OpenTime       int64     `json:"t"`
+	CloseTime      int64     `json:"T"`
+	Open           flexFloat `json:"o"`
+	High           flexFloat `json:"h"`
+	Low            flexFloat `json:"l"`
+	Close          flexFloat `json:"c"`
+	Volume         flexFloat `json:"v"`
+	Closed         bool      `json:"x"`
+	FirstTradeID   int64     `json:"f"`
+	LastTradeID    int64     `json:"L"`
+	NumTrades      flexInt   `json:"n"`
+	QuoteVolume    flexFloat `json:"q"`
+	TakerBuyVolume flexFloat `json:"V"`
+	TakerBuyQuote  flexFloat `json:"Q"`
+}
+
+// flexFloat can unmarshal from both a JSON string ("1800.00") and a JSON number (1800.00).
+type flexFloat float64
+
+func (f *flexFloat) UnmarshalJSON(data []byte) error {
+	// Try string first
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		v, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return err
+		}
+		*f = flexFloat(v)
+		return nil
+	}
+	// Fallback to number
+	var v float64
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	*f = flexFloat(v)
+	return nil
+}
+
+// flexInt can unmarshal from both a JSON string ("123") and a JSON number (123).
+type flexInt int64
+
+func (i *flexInt) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return err
+		}
+		*i = flexInt(v)
+		return nil
+	}
+	var v int64
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	*i = flexInt(v)
+	return nil
 }
 
 type StreamEnvelope struct {
-	Stream string    `json:"stream"`
-	Data   KlineData `json:"data"`
+	Stream string `json:"stream"`
+	Data   struct {
+		EventType string    `json:"e"`
+		EventTime flexInt   `json:"E"`
+		Kline     KlineData `json:"k"`
+	} `json:"data"`
 }
 
-func NewBinanceWebSocketClient(baseURL string, symbols, intervals []string, producer KafkaProducer) *BinanceWebSocketClient {
+func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []string, producer KafkaProducer) *BinanceWebSocketClient {
+	dialer := &websocket.Dialer{
+		HandshakeTimeout: 15 * time.Second,
+	}
+
+	if proxyURL != "" {
+		proxy, err := url.Parse(proxyURL)
+		if err != nil {
+			log.Printf("Invalid proxy URL %s: %v, connecting without proxy", proxyURL, err)
+		} else {
+			dialer.Proxy = httpProxyFunc(proxy)
+			log.Printf("Using proxy: %s", proxyURL)
+		}
+	}
+
 	return &BinanceWebSocketClient{
 		baseURL:   baseURL,
-		dialer:    websocket.DefaultDialer,
+		proxyURL:  proxyURL,
+		dialer:    dialer,
 		producer:  producer,
 		symbols:   symbols,
 		intervals: intervals,
 	}
 }
 
-func (c *BinanceWebSocketClient) Connect(ctx context.Context) error {
+func httpProxyFunc(proxy *url.URL) func(*http.Request) (*url.URL, error) {
+	return func(_ *http.Request) (*url.URL, error) {
+		return proxy, nil
+	}
+}
+
+func (c *BinanceWebSocketClient) buildStreamURL() string {
 	streams := make([]string, 0)
 	for _, symbol := range c.symbols {
 		for _, interval := range c.intervals {
 			streams = append(streams, fmt.Sprintf("%s@kline_%s", strings.ToLower(symbol), interval))
 		}
 	}
+	return fmt.Sprintf("%s/stream?streams=%s", strings.TrimRight(c.baseURL, "/"), strings.Join(streams, "/"))
+}
 
-	target := fmt.Sprintf("%s/stream?streams=%s", strings.TrimRight(c.baseURL, "/"), strings.Join(streams, "/"))
-
+func (c *BinanceWebSocketClient) Connect(ctx context.Context) error {
+	target := c.buildStreamURL()
 	log.Printf("Connecting to Binance WebSocket: %s", target)
 
 	conn, _, err := c.dialer.DialContext(ctx, target, nil)
@@ -77,39 +158,65 @@ func (c *BinanceWebSocketClient) Connect(ctx context.Context) error {
 		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
 	})
 
+	log.Printf("WebSocket connected successfully")
 	return nil
 }
 
-func (c *BinanceWebSocketClient) StartStreaming(ctx context.Context) error {
-	if c.conn == nil {
-		return fmt.Errorf("WebSocket not connected")
-	}
-
+// StartInBackground launches the WebSocket connection and streaming loop in a
+// background goroutine. If the initial connection fails it retries
+// automatically, so the calling service can start without blocking.
+func (c *BinanceWebSocketClient) StartInBackground(ctx context.Context) {
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
-				_ = c.conn.Close()
 				return
 			default:
-				_, message, err := c.conn.ReadMessage()
-				if err != nil {
-					log.Printf("WebSocket read error: %v", err)
-					time.Sleep(5 * time.Second)
-					if err := c.reconnect(ctx); err != nil {
-						log.Printf("Failed to reconnect: %v", err)
-					}
+			}
+
+			if err := c.Connect(ctx); err != nil {
+				log.Printf("WebSocket connect failed: %v, retrying in 10s...", err)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(10 * time.Second):
 					continue
 				}
+			}
 
-				if err := c.handleMessage(ctx, message); err != nil {
-					log.Printf("Error handling message: %v", err)
-				}
+			c.readLoop(ctx) // blocks until error
+
+			// brief pause before reconnecting
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(3 * time.Second):
 			}
 		}
 	}()
+}
 
-	return nil
+// readLoop reads messages from the WebSocket connection until an error occurs.
+func (c *BinanceWebSocketClient) readLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			_ = c.conn.Close()
+			return
+		default:
+		}
+
+		_, message, err := c.conn.ReadMessage()
+		if err != nil {
+			log.Printf("WebSocket read error: %v", err)
+			_ = c.conn.Close()
+			return
+		}
+
+		if err := c.handleMessage(ctx, message); err != nil {
+			log.Printf("Error handling message: %v", err)
+		}
+	}
 }
 
 func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []byte) error {
@@ -119,17 +226,32 @@ func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []by
 	}
 
 	if strings.Contains(envelope.Stream, "kline") {
+		kd := envelope.Data.Kline
 		k := market.Kline{
-			Symbol:    envelope.Data.Symbol,
-			Interval:  envelope.Data.Interval,
-			OpenTime:  envelope.Data.OpenTime,
-			Open:      envelope.Data.Open,
-			High:      envelope.Data.High,
-			Low:       envelope.Data.Low,
-			Close:     envelope.Data.Close,
-			Volume:    envelope.Data.Volume,
-			CloseTime: envelope.Data.CloseTime,
-			IsClosed:  envelope.Data.Closed,
+			Symbol:         kd.Symbol,
+			Interval:       kd.Interval,
+			OpenTime:       kd.OpenTime,
+			Open:           float64(kd.Open),
+			High:           float64(kd.High),
+			Low:            float64(kd.Low),
+			Close:          float64(kd.Close),
+			Volume:         float64(kd.Volume),
+			CloseTime:      kd.CloseTime,
+			IsClosed:       kd.Closed,
+			EventTime:      int64(envelope.Data.EventTime),
+			FirstTradeId:   kd.FirstTradeID,
+			LastTradeId:    kd.LastTradeID,
+			NumTrades:      int32(kd.NumTrades),
+			QuoteVolume:    float64(kd.QuoteVolume),
+			TakerBuyVolume: float64(kd.TakerBuyVolume),
+			TakerBuyQuote:  float64(kd.TakerBuyQuote),
+		}
+
+		if k.Interval == "1m" {
+			openTime := time.UnixMilli(k.OpenTime).Format("15:04:05")
+			closeTime := time.UnixMilli(k.CloseTime).Format("15:04:05")
+			log.Printf("[1m kline] %s | %s-%s | O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f QV=%.4f trades=%d closed=%v",
+				k.Symbol, openTime, closeTime, k.Open, k.High, k.Low, k.Close, k.Volume, k.QuoteVolume, k.NumTrades, k.IsClosed)
 		}
 
 		if err := c.producer.SendMarketData(ctx, &k); err != nil {
@@ -138,11 +260,6 @@ func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []by
 	}
 
 	return nil
-}
-
-func (c *BinanceWebSocketClient) reconnect(ctx context.Context) error {
-	_ = c.conn.Close()
-	return c.Connect(ctx)
 }
 
 func (c *BinanceWebSocketClient) Close() error {
