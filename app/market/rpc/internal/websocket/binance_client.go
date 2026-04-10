@@ -17,13 +17,18 @@ import (
 )
 
 type BinanceWebSocketClient struct {
-	baseURL   string
-	proxyURL  string
-	dialer    *websocket.Dialer
-	conn      *websocket.Conn
-	producer  KafkaProducer
-	symbols   []string
-	intervals []string
+	baseURL    string
+	proxyURL   string
+	dialer     *websocket.Dialer
+	conn       *websocket.Conn
+	producer   KafkaProducer
+	symbols    []string
+	intervals  []string
+	aggregator KlineAggregator
+}
+
+type KlineAggregator interface {
+	OnKline(ctx context.Context, k *market.Kline)
 }
 
 type KafkaProducer interface {
@@ -102,7 +107,7 @@ type StreamEnvelope struct {
 	} `json:"data"`
 }
 
-func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []string, producer KafkaProducer) *BinanceWebSocketClient {
+func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []string, producer KafkaProducer, aggregator KlineAggregator) *BinanceWebSocketClient {
 	dialer := &websocket.Dialer{
 		HandshakeTimeout: 15 * time.Second,
 	}
@@ -118,12 +123,13 @@ func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []st
 	}
 
 	return &BinanceWebSocketClient{
-		baseURL:   baseURL,
-		proxyURL:  proxyURL,
-		dialer:    dialer,
-		producer:  producer,
-		symbols:   symbols,
-		intervals: intervals,
+		baseURL:    baseURL,
+		proxyURL:   proxyURL,
+		dialer:     dialer,
+		producer:   producer,
+		symbols:    symbols,
+		intervals:  intervals,
+		aggregator: aggregator,
 	}
 }
 
@@ -247,15 +253,18 @@ func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []by
 			TakerBuyQuote:  float64(kd.TakerBuyQuote),
 		}
 
-		if k.Interval == "1m" {
-			openTime := time.UnixMilli(k.OpenTime).Format("15:04:05")
-			closeTime := time.UnixMilli(k.CloseTime).Format("15:04:05")
-			log.Printf("[1m kline] %s | %s-%s | O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f QV=%.4f trades=%d closed=%v",
-				k.Symbol, openTime, closeTime, k.Open, k.High, k.Low, k.Close, k.Volume, k.QuoteVolume, k.NumTrades, k.IsClosed)
-		}
+		openTime := time.UnixMilli(k.OpenTime).Format("15:04:05")
+		closeTime := time.UnixMilli(k.CloseTime).Format("15:04:05")
+		log.Printf("[%s kline] %s | %s-%s | O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f QV=%.4f trades=%d closed=%v",
+			k.Interval, k.Symbol, openTime, closeTime, k.Open, k.High, k.Low, k.Close, k.Volume, k.QuoteVolume, k.NumTrades, k.IsClosed)
 
-		if err := c.producer.SendMarketData(ctx, &k); err != nil {
-			return fmt.Errorf("failed to send kline to Kafka: %v", err)
+		if k.IsClosed {
+			if err := c.producer.SendMarketData(ctx, &k); err != nil {
+				return fmt.Errorf("failed to send kline to Kafka: %v", err)
+			}
+			if c.aggregator != nil {
+				c.aggregator.OnKline(ctx, &k)
+			}
 		}
 	}
 

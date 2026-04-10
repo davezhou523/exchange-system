@@ -13,7 +13,6 @@ Binance:
   WebSocketURL: wss://fstream.binance.com
   Symbols:
     - ETHUSDT
-    - BTCUSDT
   Intervals:
     - 1m
   Proxy: socks5://127.0.0.1:1080

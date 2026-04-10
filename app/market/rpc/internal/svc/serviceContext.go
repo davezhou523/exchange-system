@@ -3,6 +3,7 @@ package svc
 import (
 	"context"
 
+	"exchange-system/app/market/rpc/internal/aggregator"
 	"exchange-system/app/market/rpc/internal/config"
 	"exchange-system/app/market/rpc/internal/kafka"
 	"exchange-system/app/market/rpc/internal/websocket"
@@ -13,6 +14,7 @@ type ServiceContext struct {
 
 	marketProducer *kafka.Producer
 	wsClient       *websocket.BinanceWebSocketClient
+	agg            *aggregator.KlineAggregator
 	cancel         context.CancelFunc
 }
 
@@ -25,12 +27,15 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		return nil, err
 	}
 
+	agg := aggregator.NewKlineAggregator(aggregator.StandardIntervals, producer)
+
 	wsClient := websocket.NewBinanceWebSocketClient(
 		c.Binance.WebSocketURL,
 		c.Binance.Proxy,
 		c.Binance.Symbols,
 		c.Binance.Intervals,
 		producer,
+		agg,
 	)
 
 	wsClient.StartInBackground(ctx)
@@ -39,6 +44,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		Config:         c,
 		marketProducer: producer,
 		wsClient:       wsClient,
+		agg:            agg,
 		cancel:         cancel,
 	}, nil
 }
@@ -49,6 +55,9 @@ func (s *ServiceContext) Close() error {
 	}
 	if s.cancel != nil {
 		s.cancel()
+	}
+	if s.agg != nil {
+		s.agg.FlushAll(context.Background())
 	}
 	var firstErr error
 	if s.wsClient != nil {
