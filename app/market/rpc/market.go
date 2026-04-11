@@ -213,7 +213,7 @@ func runReplayKlineLog(c config.Config, path string, speed time.Duration) error 
 	}
 	defer func() { _ = producer.Close() }()
 
-	agg := aggregator.NewKlineAggregator(aggregator.StandardIntervals, producer)
+	agg := aggregator.NewKlineAggregator(aggregator.StandardIntervals, producer, "")
 	ctx := context.Background()
 
 	totalSent := 0

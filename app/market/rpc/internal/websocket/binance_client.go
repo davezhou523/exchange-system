@@ -19,6 +19,27 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// rawKlineLogEntry mirrors the protobuf field order for deterministic JSON output.
+type rawKlineLogEntry struct {
+	Symbol         string  `json:"symbol"`
+	Interval       string  `json:"interval"`
+	OpenTime       string  `json:"openTime"`
+	Open           float64 `json:"open"`
+	High           float64 `json:"high"`
+	Low            float64 `json:"low"`
+	Close          float64 `json:"close"`
+	Volume         float64 `json:"volume"`
+	CloseTime      string  `json:"closeTime"`
+	IsClosed       bool    `json:"isClosed"`
+	EventTime      string  `json:"eventTime"`
+	FirstTradeId   int64   `json:"firstTradeId"`
+	LastTradeId    int64   `json:"lastTradeId"`
+	NumTrades      int32   `json:"numTrades"`
+	QuoteVolume    float64 `json:"quoteVolume"`
+	TakerBuyVolume float64 `json:"takerBuyVolume"`
+	TakerBuyQuote  float64 `json:"takerBuyQuote"`
+}
+
 type BinanceWebSocketClient struct {
 	baseURL      string
 	proxyURL     string
@@ -296,12 +317,27 @@ func (c *BinanceWebSocketClient) Close() error {
 	return nil
 }
 
+// formatFloat formats a float64 to string with 2 decimal places.
+func formatFloat(f float64) float64 {
+	return float64(int64(f*100+0.5)) / 100
+}
+
 // writeKlineLog appends a closed 1m kline as JSON line to a daily log file.
 // Format: data/kline/ETHUSDT/2026-04-11.jsonl
 func (c *BinanceWebSocketClient) writeKlineLog(k *market.Kline) {
 	if c.klineLogDir == "" || k.Interval != "1m" {
 		return
 	}
+
+	// Round float fields to 2 decimal places for cleaner logs
+	k.Volume = formatFloat(k.Volume)
+	k.QuoteVolume = formatFloat(k.QuoteVolume)
+	k.TakerBuyVolume = formatFloat(k.TakerBuyVolume)
+	k.TakerBuyQuote = formatFloat(k.TakerBuyQuote)
+	k.Open = formatFloat(k.Open)
+	k.High = formatFloat(k.High)
+	k.Low = formatFloat(k.Low)
+	k.Close = formatFloat(k.Close)
 
 	dateStr := time.UnixMilli(k.CloseTime).Format("2006-01-02")
 	dir := filepath.Join(c.klineLogDir, k.Symbol)
@@ -330,19 +366,24 @@ func (c *BinanceWebSocketClient) writeKlineLog(k *market.Kline) {
 		c.klineLogDate[key] = f
 	}
 
-	entry := map[string]interface{}{
-		"symbol":      k.Symbol,
-		"interval":    k.Interval,
-		"openTime":    k.OpenTime,
-		"closeTime":   k.CloseTime,
-		"open":        k.Open,
-		"high":        k.High,
-		"low":         k.Low,
-		"close":       k.Close,
-		"volume":      k.Volume,
-		"quoteVolume": k.QuoteVolume,
-		"numTrades":   k.NumTrades,
-		"isClosed":    k.IsClosed,
+	entry := rawKlineLogEntry{
+		Symbol:         k.Symbol,
+		Interval:       k.Interval,
+		OpenTime:       time.UnixMilli(k.OpenTime).UTC().Format("2006-01-02T15:04:05.000Z"),
+		Open:           k.Open,
+		High:           k.High,
+		Low:            k.Low,
+		Close:          k.Close,
+		Volume:         k.Volume,
+		CloseTime:      time.UnixMilli(k.CloseTime).UTC().Format("2006-01-02T15:04:05.000Z"),
+		IsClosed:       k.IsClosed,
+		EventTime:      time.UnixMilli(k.EventTime).UTC().Format("2006-01-02T15:04:05.000Z"),
+		FirstTradeId:   k.FirstTradeId,
+		LastTradeId:    k.LastTradeId,
+		NumTrades:      k.NumTrades,
+		QuoteVolume:    k.QuoteVolume,
+		TakerBuyVolume: k.TakerBuyVolume,
+		TakerBuyQuote:  k.TakerBuyQuote,
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {

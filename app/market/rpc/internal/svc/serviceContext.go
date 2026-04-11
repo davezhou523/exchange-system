@@ -27,7 +27,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		return nil, err
 	}
 
-	agg := aggregator.NewKlineAggregator(aggregator.StandardIntervals, producer)
+	agg := aggregator.NewKlineAggregator(aggregator.StandardIntervals, producer, c.KlineLogDir)
 
 	wsClient := websocket.NewBinanceWebSocketClient(
 		c.Binance.WebSocketURL,
