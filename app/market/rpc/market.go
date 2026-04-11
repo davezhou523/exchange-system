@@ -208,8 +208,8 @@ func runReplayKlineLog(c config.Config, path string, speed time.Duration) error 
 	ctx := context.Background()
 
 	totalSent := 0
-	for _, f := range matches {
-		sent, err := replayFile(ctx, f, speed, producer, agg)
+	for _, fp := range matches {
+		sent, err := replayKlineFile(ctx, fp, speed, producer, agg)
 		if err != nil {
 			return err
 		}
@@ -221,7 +221,7 @@ func runReplayKlineLog(c config.Config, path string, speed time.Duration) error 
 	return nil
 }
 
-func replayFile(ctx context.Context, path string, speed time.Duration, producer *kafka.Producer, agg *aggregator.KlineAggregator) (int, error) {
+func replayKlineFile(ctx context.Context, path string, speed time.Duration, producer *kafka.Producer, agg *aggregator.KlineAggregator) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, fmt.Errorf("open %s: %v", path, err)
