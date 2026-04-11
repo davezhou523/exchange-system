@@ -26,3 +26,5 @@ Strategy:
   Symbol: ETHUSDT
   Name: strategy3
   RuntimeMode: websocket
+
+KlineLogDir: data/kline

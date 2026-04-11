@@ -40,7 +40,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 			groupID = "strategy-kline"
 		}
 	}
-	marketConsumer, err := kafka.NewConsumer(c.Kafka.Addrs, groupID, c.Kafka.Topics.Kline)
+	marketConsumer, err := kafka.NewConsumer(c.Kafka.Addrs, groupID, c.Kafka.Topics.Kline, c.KlineLogDir)
 	if err != nil {
 		_ = signalProducer.Close()
 		cancel()

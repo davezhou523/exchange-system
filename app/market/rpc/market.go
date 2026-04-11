@@ -37,6 +37,15 @@ var (
 	replaySpeed  = flag.Duration("replay-speed", 0, "replay interval between klines (0 = no delay)")
 )
 
+//# 回放单个文件
+//go run market.go -replay data/kline/ETHUSDT/2026-04-11.jsonl
+//
+//# 回放某天所有symbol
+//go run market.go -replay "data/kline/*/2026-04-11.jsonl"
+//
+//# 慢速回放（每条间隔100ms）
+//go run market.go -replay data/kline/ETHUSDT/2026-04-11.jsonl -replay-speed=100ms
+
 func main() {
 	flag.Parse()
 
