@@ -281,8 +281,13 @@ func (a *KlineAggregator) emitKline(ctx context.Context, symbol, interval string
 
 	openStr := time.UnixMilli(k.OpenTime).Format("2006-01-02 15:04:05")
 	closeStr := time.UnixMilli(k.CloseTime).Format("15:04:05")
-	log.Printf("[aggregated %s] %s | %s-%s | O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f QV=%.4f trades=%d",
-		k.Interval, k.Symbol, openStr, closeStr, k.Open, k.High, k.Low, k.Close, k.Volume, k.QuoteVolume, k.NumTrades)
+	if interval == "15m" {
+		log.Printf("[agg 15m] %s | %s-%s | O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f QV=%.4f trades=%d",
+			k.Symbol, openStr, closeStr, k.Open, k.High, k.Low, k.Close, k.Volume, k.QuoteVolume, k.NumTrades)
+	} else {
+		log.Printf("[aggregated %s] %s | %s-%s | O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f QV=%.4f trades=%d",
+			k.Interval, k.Symbol, openStr, closeStr, k.Open, k.High, k.Low, k.Close, k.Volume, k.QuoteVolume, k.NumTrades)
+	}
 
 	if err := a.producer.SendMarketData(ctx, k); err != nil {
 		a.metrics.KafkaSendErrors.Add(1)

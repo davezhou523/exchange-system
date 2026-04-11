@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	commonkafka "exchange-system/common/kafka"
 	"exchange-system/common/pb/market"
@@ -42,12 +43,54 @@ func (c *Consumer) StartConsuming(ctx context.Context, handler MarketDataHandler
 		return fmt.Errorf("handler is nil")
 	}
 
-	h := &marketKlineGroupHandler{handler: handler}
+	h := &marketKlineGroupHandler{handler: handler, groupID: c.groupID, topic: c.topic}
+
 	go func() {
+		lastTransientLog := time.Time{}
 		for {
-			if err := c.group.Consume(ctx, []string{c.topic}, h); err != nil {
-				log.Printf("kafka consume group=%s topic=%s error=%v", c.groupID, c.topic, err)
+			select {
+			case <-ctx.Done():
+				return
+			case err, ok := <-c.group.Errors():
+				if !ok {
+					return
+				}
+				if err == nil {
+					continue
+				}
+				if commonkafka.ShouldRetryConsumeErr(err) {
+					if lastTransientLog.IsZero() || time.Since(lastTransientLog) >= 10*time.Second {
+						log.Printf("kafka consumer-group transient error group=%s topic=%s err=%v", c.groupID, c.topic, err)
+						lastTransientLog = time.Now()
+					}
+					continue
+				}
+				log.Printf("kafka consumer-group error group=%s topic=%s err=%v", c.groupID, c.topic, err)
 			}
+		}
+	}()
+
+	go func() {
+		attempt := 0
+		for {
+			err := c.group.Consume(ctx, []string{c.topic}, h)
+			if err != nil {
+				log.Printf("kafka consume loop error group=%s topic=%s err=%v", c.groupID, c.topic, err)
+				if commonkafka.ShouldRetryConsumeErr(err) {
+					sleep := commonkafka.RetryBackoff(attempt)
+					if sleep < 2*time.Second {
+						sleep = 2 * time.Second
+					}
+					time.Sleep(sleep)
+					if attempt < 8 {
+						attempt++
+					}
+				} else {
+					time.Sleep(500 * time.Millisecond)
+				}
+				continue
+			}
+			attempt = 0
 			if ctx.Err() != nil {
 				return
 			}
@@ -58,24 +101,41 @@ func (c *Consumer) StartConsuming(ctx context.Context, handler MarketDataHandler
 
 type marketKlineGroupHandler struct {
 	handler MarketDataHandler
+	groupID string
+	topic   string
 }
 
-func (h *marketKlineGroupHandler) Setup(sarama.ConsumerGroupSession) error   { return nil }
-func (h *marketKlineGroupHandler) Cleanup(sarama.ConsumerGroupSession) error { return nil }
+func (h *marketKlineGroupHandler) Setup(s sarama.ConsumerGroupSession) error {
+	log.Printf("kafka consumer-group setup group=%s topic=%s member=%s generation=%d claims=%v", h.groupID, h.topic, s.MemberID(), s.GenerationID(), s.Claims())
+	return nil
+}
+
+func (h *marketKlineGroupHandler) Cleanup(s sarama.ConsumerGroupSession) error {
+	log.Printf("kafka consumer-group cleanup group=%s topic=%s member=%s generation=%d", h.groupID, h.topic, s.MemberID(), s.GenerationID())
+	return nil
+}
 
 func (h *marketKlineGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
 	for msg := range claim.Messages() {
 		if msg == nil {
 			continue
 		}
+
+		key := ""
+		if len(msg.Key) > 0 {
+			key = string(msg.Key)
+		}
+		log.Printf("kafka consumed group=%s topic=%s partition=%d offset=%d key=%q ts=%s bytes=%d",
+			h.groupID, msg.Topic, msg.Partition, msg.Offset, key, msg.Timestamp.In(time.Local).Format(time.RFC3339Nano), len(msg.Value))
+
 		var k market.Kline
 		if err := json.Unmarshal(msg.Value, &k); err != nil {
-			log.Printf("Failed to unmarshal message: %v", err)
+			log.Printf("kafka unmarshal failed group=%s topic=%s partition=%d offset=%d err=%v", h.groupID, msg.Topic, msg.Partition, msg.Offset, err)
 			session.MarkMessage(msg, "")
 			continue
 		}
 		if err := h.handler(&k); err != nil {
-			log.Printf("Error handling market data: %v", err)
+			log.Printf("kafka handler failed group=%s topic=%s partition=%d offset=%d symbol=%s interval=%s err=%v", h.groupID, msg.Topic, msg.Partition, msg.Offset, k.Symbol, k.Interval, err)
 		}
 		session.MarkMessage(msg, "")
 	}

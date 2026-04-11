@@ -7,6 +7,7 @@ import (
 	"time"
 
 	commonkafka "exchange-system/common/kafka"
+	marketpb "exchange-system/common/pb/market"
 
 	"github.com/Shopify/sarama"
 )
@@ -17,9 +18,13 @@ type Producer struct {
 }
 
 func NewProducer(brokers []string, topic string) (*Producer, error) {
+	return NewProducerWithContext(context.Background(), brokers, topic)
+}
+
+func NewProducerWithContext(ctx context.Context, brokers []string, topic string) (*Producer, error) {
 	config := commonkafka.NewProducerConfig()
 
-	producer, err := sarama.NewSyncProducer(brokers, config)
+	producer, err := commonkafka.NewSyncProducerWithRetry(ctx, brokers, config)
 	if err != nil {
 		return nil, err
 	}
@@ -56,6 +61,13 @@ func (p *Producer) SendMarketData(ctx context.Context, data interface{}) error {
 
 		partition, offset, err := p.producer.SendMessage(msg)
 		if err == nil {
+			if k, ok := data.(*marketpb.Kline); ok && k != nil && k.Interval == "15m" {
+				openStr := time.UnixMilli(k.OpenTime).Format("2006-01-02 15:04:05")
+				closeStr := time.UnixMilli(k.CloseTime).Format("15:04:05")
+				log.Printf("[kafka 15m] topic=%s partition=%d offset=%d %s | %s-%s | O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f",
+					p.topic, partition, offset, k.Symbol, openStr, closeStr, k.Open, k.High, k.Low, k.Close, k.Volume)
+				return nil
+			}
 			log.Printf("Market data sent to topic=%s partition=%d offset=%d data=%s", p.topic, partition, offset, string(jsonData))
 			return nil
 		}

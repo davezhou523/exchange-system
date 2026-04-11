@@ -19,7 +19,7 @@ type Producer struct {
 func NewProducer(brokers []string, topic string) (*Producer, error) {
 	config := commonkafka.NewProducerConfig()
 
-	producer, err := sarama.NewSyncProducer(brokers, config)
+	producer, err := commonkafka.NewSyncProducerWithRetry(context.Background(), brokers, config)
 	if err != nil {
 		return nil, err
 	}

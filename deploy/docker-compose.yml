@@ -4,6 +4,7 @@ services:
     container_name: kafka1
     hostname: kafka1
     ports:
+      - "9092:9092"
       - "19092:19092"
     environment:
       KAFKA_CLUSTER_ID: "my-kafka-cluster"
@@ -47,6 +48,9 @@ services:
       KAFKA_METADATA_LOG_DIR: "/kafka/metadata"
       KAFKA_LOG_DIRS: "/kafka/data"
       KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
     volumes:
       - ./kafka2/data:/kafka/data
       - ./kafka2/metadata:/kafka/metadata
@@ -72,6 +76,9 @@ services:
       KAFKA_METADATA_LOG_DIR: "/kafka/metadata"
       KAFKA_LOG_DIRS: "/kafka/data"
       KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
     volumes:
       - ./kafka3/data:/kafka/data
       - ./kafka3/metadata:/kafka/metadata

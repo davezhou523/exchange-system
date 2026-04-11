@@ -21,7 +21,7 @@ type ServiceContext struct {
 func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	producer, err := kafka.NewProducer(c.Kafka.Addrs, c.Kafka.Topics.Kline)
+	producer, err := kafka.NewProducerWithContext(ctx, c.Kafka.Addrs, c.Kafka.Topics.Kline)
 	if err != nil {
 		cancel()
 		return nil, err
