@@ -225,7 +225,7 @@ func runReplayKlineLog(c config.Config, path string, speed time.Duration) error 
 		totalSent += sent
 	}
 
-	agg.FlushAll(ctx)
+	agg.Stop()
 	log.Printf("[replay] done: total 1m klines=%d", totalSent)
 	return nil
 }

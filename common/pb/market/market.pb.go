@@ -42,6 +42,7 @@ type Kline struct {
 	TakerBuyVolume float64                `protobuf:"fixed64,16,opt,name=taker_buy_volume,json=takerBuyVolume,proto3" json:"taker_buy_volume,omitempty"` // 主动买入成交量
 	TakerBuyQuote  float64                `protobuf:"fixed64,17,opt,name=taker_buy_quote,json=takerBuyQuote,proto3" json:"taker_buy_quote,omitempty"`    // 主动买入成交额
 	IsDirty        bool                   `protobuf:"varint,18,opt,name=is_dirty,json=isDirty,proto3" json:"is_dirty,omitempty"`                         // 数据不完整标记(有缺口/不完整)，数据层可发，策略层应禁止交易
+	IsTradable     bool                   `protobuf:"varint,19,opt,name=is_tradable,json=isTradable,proto3" json:"is_tradable,omitempty"`                // 策略是否可交易(!is_dirty)，数据层设定，策略层直接判断
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -198,6 +199,13 @@ func (x *Kline) GetTakerBuyQuote() float64 {
 func (x *Kline) GetIsDirty() bool {
 	if x != nil {
 		return x.IsDirty
+	}
+	return false
+}
+
+func (x *Kline) GetIsTradable() bool {
+	if x != nil {
+		return x.IsTradable
 	}
 	return false
 }
@@ -601,7 +609,9 @@ const file_common_proto_market_proto_rawDesc = "" +
 	"num_trades\x18\x0e \x01(\x05R\tnumTrades\x12!\n" +
 	"\fquote_volume\x18\x0f \x01(\x01R\vquoteVolume\x12(\n" +
 	"\x10taker_buy_volume\x18\x10 \x01(\x01R\x0etakerBuyVolume\x12&\n" +
-	"\x0ftaker_buy_quote\x18\x11 \x01(\x01R\rtakerBuyQuote\"\x8b\x01\n" +
+	"\x0ftaker_buy_quote\x18\x11 \x01(\x01R\rtakerBuyQuote\x12\x1b\n" +
+	"\tis_dirty\x18\x12 \x01(\bR\bisDirty\x12\x1f\n" +
+	"\nis_tradable\x18\x13 \x01(\bR\nisTradable\"\x8b\x01\n" +
 	"\x05Depth\x12\x16\n" +
 	"\x06symbol\x18\x01 \x01(\tR\x06symbol\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12%\n" +

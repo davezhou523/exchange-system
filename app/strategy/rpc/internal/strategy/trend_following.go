@@ -46,10 +46,11 @@ func (s *TrendFollowingStrategy) OnKline(ctx context.Context, k *marketpb.Kline)
 	// Dirty data has gaps or incomplete periods — still feed to strategy for indicator calculation,
 	// but mark it so that signal generation can skip trading
 	data := map[string]interface{}{
-		"symbol":   k.Symbol,
-		"type":     "kline",
-		"interval": k.Interval,
-		"isDirty":  k.IsDirty,
+		"symbol":     k.Symbol,
+		"type":       "kline",
+		"interval":   k.Interval,
+		"isDirty":    k.IsDirty,
+		"isTradable": k.IsTradable,
 		"data": map[string]interface{}{
 			"c": fmt.Sprintf("%.8f", k.Close),
 		},
@@ -81,10 +82,10 @@ func (s *TrendFollowingStrategy) HandleMarketData(ctx context.Context, data map[
 }
 
 func (s *TrendFollowingStrategy) generateSignal() (map[string]interface{}, error) {
-	// Check if latest kline is dirty (has gaps or incomplete data)
+	// Check if latest kline is not tradable (has gaps or incomplete data)
 	latestData := s.historicalData[len(s.historicalData)-1]
-	if isDirty, _ := latestData["isDirty"].(bool); isDirty {
-		log.Printf("[策略] %s 跳过dirty数据，禁止交易：数据不完整（缺口/不完整周期），指标可能被污染",
+	if isTradable, ok := latestData["isTradable"].(bool); !ok || !isTradable {
+		log.Printf("[策略] %s 跳过不可交易数据，禁止交易：数据不完整（缺口/不完整周期），指标可能被污染",
 			s.symbol)
 		return nil, nil
 	}
@@ -281,7 +282,7 @@ type signalLogEntry struct {
 	TakeProfits []float64              `json:"takeProfits"`
 	Reason      string                 `json:"reason"`
 	Indicators  map[string]interface{} `json:"indicators"`
-	IsDirty     bool                   `json:"isDirty"`
+	IsTradable  bool                   `json:"isTradable"`
 }
 
 // writeSignalLog appends a signal as JSON line to a daily log file.
@@ -329,11 +330,11 @@ func (s *TrendFollowingStrategy) writeSignalLog(signal map[string]interface{}) {
 		takeProfits = tp
 	}
 
-	// Check if latest data is dirty
-	isDirty := false
+	// Check if latest data is tradable
+	isTradable := true
 	if len(s.historicalData) > 0 {
-		if dirty, ok := s.historicalData[len(s.historicalData)-1]["isDirty"].(bool); ok {
-			isDirty = dirty
+		if tradable, ok := s.historicalData[len(s.historicalData)-1]["isTradable"].(bool); ok {
+			isTradable = tradable
 		}
 	}
 
@@ -349,7 +350,7 @@ func (s *TrendFollowingStrategy) writeSignalLog(signal map[string]interface{}) {
 		TakeProfits: takeProfits,
 		Reason:      reason,
 		Indicators:  indicators,
-		IsDirty:     isDirty,
+		IsTradable:  isTradable,
 	}
 
 	data, err := json.Marshal(entry)

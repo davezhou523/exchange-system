@@ -58,7 +58,7 @@ func (s *ServiceContext) Close() error {
 		s.cancel()
 	}
 	if s.agg != nil {
-		s.agg.FlushAll(context.Background())
+		s.agg.Stop()
 	}
 	var firstErr error
 	if s.wsClient != nil {

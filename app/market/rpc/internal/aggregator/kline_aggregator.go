@@ -82,6 +82,14 @@ func (a *KlineAggregator) OnKline(ctx context.Context, k *market.Kline) {
 	if k.Interval != "1m" || !k.IsClosed {
 		return
 	}
+
+	// Reject new klines after Stop() has been called
+	select {
+	case <-a.ctx.Done():
+		return
+	default:
+	}
+
 	a.metrics.Received1m.Add(1)
 
 	w := a.getOrCreateWorker(k.Symbol)
@@ -92,24 +100,22 @@ func (a *KlineAggregator) OnKline(ctx context.Context, k *market.Kline) {
 	}
 }
 
-// FlushAll waits for all pending klines to be processed, then emits incomplete buckets.
-func (a *KlineAggregator) FlushAll(ctx context.Context) {
-	// Close all worker channels so goroutines finish current work
-	a.mu.Lock()
-	for _, w := range a.workers {
-		close(w.ch)
-	}
-	a.mu.Unlock()
+// Stop gracefully shuts down all workers and emits incomplete buckets.
+// After Stop, no more klines will be accepted via OnKline.
+func (a *KlineAggregator) Stop() {
+	// Signal all workers to stop via context cancellation
+	a.cancel()
 
+	// Wait for all workers to drain their channels and finish
 	a.wg.Wait()
 
-	// Now emit incomplete buckets
+	// Emit any remaining incomplete buckets
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, w := range a.workers {
 		for _, iv := range a.intervals {
 			if b, ok := w.buckets[iv.Name]; ok && b.initialized {
-				a.emitKline(ctx, w.symbol, iv.Name, b)
+				a.emitKline(context.Background(), w.symbol, iv.Name, b)
 			}
 		}
 	}
@@ -170,8 +176,27 @@ func (a *KlineAggregator) getOrCreateWorker(symbol string) *symbolWorker {
 func (w *symbolWorker) run() {
 	defer w.agg.wg.Done()
 
-	for k := range w.ch {
-		w.processKline(k)
+	for {
+		select {
+		case k, ok := <-w.ch:
+			if !ok {
+				return
+			}
+			w.processKline(k)
+		case <-w.agg.ctx.Done():
+			// Drain remaining items in channel before exiting
+			for {
+				select {
+				case k, ok := <-w.ch:
+					if !ok {
+						return
+					}
+					w.processKline(k)
+				default:
+					return
+				}
+			}
+		}
 	}
 }
 
@@ -303,9 +328,8 @@ type klineLogEntry struct {
 	TakerBuyVolume float64 `json:"takerBuyVolume"`
 	TakerBuyQuote  float64 `json:"takerBuyQuote"`
 	IsDirty        bool    `json:"isDirty"`
+	IsTradable     bool    `json:"isTradable"`
 }
-
-// --- bucket ---
 
 type bucket struct {
 	Open           float64
@@ -348,7 +372,8 @@ func (a *KlineAggregator) emitKline(ctx context.Context, symbol, interval string
 		LastTradeId:    b.LastTradeID,
 		IsClosed:       true,
 		IsDirty:        b.dirty,
-		EventTime:      b.CloseTime, // Use closeTime as eventTime for aggregated klines (period confirmation time)
+		IsTradable:     !b.dirty,
+		EventTime:      time.Now().UnixMilli(), // 实际生成时间，非 CloseTime（避免延迟分析/Kafka lag 判断错误）
 	}
 
 	openStr := time.UnixMilli(k.OpenTime).Format("2006-01-02 15:04:05")
@@ -441,6 +466,7 @@ func (a *KlineAggregator) writeKlineLog(k *market.Kline) {
 		TakerBuyVolume: k.TakerBuyVolume,
 		TakerBuyQuote:  k.TakerBuyQuote,
 		IsDirty:        k.IsDirty,
+		IsTradable:     k.IsTradable,
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {

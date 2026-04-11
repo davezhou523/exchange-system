@@ -200,6 +200,7 @@ type klineLogEntry struct {
 	TakerBuyVolume float64 `json:"takerBuyVolume"`
 	TakerBuyQuote  float64 `json:"takerBuyQuote"`
 	IsDirty        bool    `json:"isDirty"`
+	IsTradable     bool    `json:"isTradable"`
 }
 
 // formatFloat formats a float64 to 2 decimal places.
@@ -270,6 +271,7 @@ func (c *Consumer) writeKlineLog(k *market.Kline) {
 		TakerBuyVolume: k.TakerBuyVolume,
 		TakerBuyQuote:  k.TakerBuyQuote,
 		IsDirty:        k.IsDirty,
+		IsTradable:     k.IsTradable,
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {
