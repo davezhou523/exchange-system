@@ -36,6 +36,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		c.Binance.Intervals,
 		producer,
 		agg,
+		c.KlineLogDir,
 	)
 
 	wsClient.StartInBackground(ctx)

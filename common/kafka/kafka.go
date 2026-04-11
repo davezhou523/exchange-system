@@ -143,11 +143,11 @@ func NewConsumerGroupConfig() *sarama.Config {
 	cfg.Consumer.Offsets.AutoCommit.Interval = 1 * time.Second
 	cfg.Consumer.Offsets.Retry.Max = 10
 
-	cfg.Consumer.Group.Session.Timeout = 30 * time.Second
-	cfg.Consumer.Group.Heartbeat.Interval = 3 * time.Second
-	cfg.Consumer.Group.Rebalance.Timeout = 60 * time.Second
+	cfg.Consumer.Group.Session.Timeout = 45 * time.Second
+	cfg.Consumer.Group.Heartbeat.Interval = 5 * time.Second
+	cfg.Consumer.Group.Rebalance.Timeout = 90 * time.Second
 	cfg.Consumer.Group.Rebalance.Retry.Max = 10
-	cfg.Consumer.Group.Rebalance.Retry.Backoff = 1 * time.Second
+	cfg.Consumer.Group.Rebalance.Retry.Backoff = 2 * time.Second
 	cfg.Consumer.Group.Rebalance.GroupStrategies = []sarama.BalanceStrategy{sarama.BalanceStrategyRange}
 
 	cfg.Metadata.Full = true

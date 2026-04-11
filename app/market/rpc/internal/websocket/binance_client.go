@@ -7,8 +7,11 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"exchange-system/common/pb/market"
@@ -17,14 +20,17 @@ import (
 )
 
 type BinanceWebSocketClient struct {
-	baseURL    string
-	proxyURL   string
-	dialer     *websocket.Dialer
-	conn       *websocket.Conn
-	producer   KafkaProducer
-	symbols    []string
-	intervals  []string
-	aggregator KlineAggregator
+	baseURL      string
+	proxyURL     string
+	dialer       *websocket.Dialer
+	conn         *websocket.Conn
+	producer     KafkaProducer
+	symbols      []string
+	intervals    []string
+	aggregator   KlineAggregator
+	klineLogDir  string
+	klineLogMu   sync.Mutex
+	klineLogDate map[string]*os.File // "2006-01-02" -> file
 }
 
 type KlineAggregator interface {
@@ -107,7 +113,7 @@ type StreamEnvelope struct {
 	} `json:"data"`
 }
 
-func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []string, producer KafkaProducer, aggregator KlineAggregator) *BinanceWebSocketClient {
+func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []string, producer KafkaProducer, aggregator KlineAggregator, klineLogDir string) *BinanceWebSocketClient {
 	dialer := &websocket.Dialer{
 		HandshakeTimeout: 15 * time.Second,
 	}
@@ -123,13 +129,15 @@ func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []st
 	}
 
 	return &BinanceWebSocketClient{
-		baseURL:    baseURL,
-		proxyURL:   proxyURL,
-		dialer:     dialer,
-		producer:   producer,
-		symbols:    symbols,
-		intervals:  intervals,
-		aggregator: aggregator,
+		baseURL:      baseURL,
+		proxyURL:     proxyURL,
+		dialer:       dialer,
+		producer:     producer,
+		symbols:      symbols,
+		intervals:    intervals,
+		aggregator:   aggregator,
+		klineLogDir:  klineLogDir,
+		klineLogDate: make(map[string]*os.File),
 	}
 }
 
@@ -255,10 +263,13 @@ func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []by
 
 		openTime := time.UnixMilli(k.OpenTime).Format("15:04:05")
 		closeTime := time.UnixMilli(k.CloseTime).Format("15:04:05")
-		log.Printf("[%s kline] %s | %s-%s | O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f QV=%.4f trades=%d closed=%v",
-			k.Interval, k.Symbol, openTime, closeTime, k.Open, k.High, k.Low, k.Close, k.Volume, k.QuoteVolume, k.NumTrades, k.IsClosed)
 
 		if k.IsClosed {
+			log.Printf("[%s kline] %s | %s-%s | O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f QV=%.4f trades=%d closed=%v",
+				k.Interval, k.Symbol, openTime, closeTime, k.Open, k.High, k.Low, k.Close, k.Volume, k.QuoteVolume, k.NumTrades, k.IsClosed)
+
+			c.writeKlineLog(&k)
+
 			if err := c.producer.SendMarketData(ctx, &k); err != nil {
 				return fmt.Errorf("failed to send kline to Kafka: %v", err)
 			}
@@ -272,8 +283,73 @@ func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []by
 }
 
 func (c *BinanceWebSocketClient) Close() error {
+	c.klineLogMu.Lock()
+	for _, f := range c.klineLogDate {
+		_ = f.Close()
+	}
+	c.klineLogDate = nil
+	c.klineLogMu.Unlock()
+
 	if c.conn != nil {
 		return c.conn.Close()
 	}
 	return nil
+}
+
+// writeKlineLog appends a closed 1m kline as JSON line to a daily log file.
+// Format: data/kline/ETHUSDT/2026-04-11.jsonl
+func (c *BinanceWebSocketClient) writeKlineLog(k *market.Kline) {
+	if c.klineLogDir == "" || k.Interval != "1m" {
+		return
+	}
+
+	dateStr := time.UnixMilli(k.CloseTime).Format("2006-01-02")
+	dir := filepath.Join(c.klineLogDir, k.Symbol)
+
+	c.klineLogMu.Lock()
+	defer c.klineLogMu.Unlock()
+
+	if c.klineLogDate == nil {
+		return
+	}
+
+	key := k.Symbol + "/" + dateStr
+	f, ok := c.klineLogDate[key]
+	if !ok {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			log.Printf("[kline-log] failed to create dir %s: %v", dir, err)
+			return
+		}
+		path := filepath.Join(dir, dateStr+".jsonl")
+		var err error
+		f, err = os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			log.Printf("[kline-log] failed to open %s: %v", path, err)
+			return
+		}
+		c.klineLogDate[key] = f
+	}
+
+	entry := map[string]interface{}{
+		"symbol":      k.Symbol,
+		"interval":    k.Interval,
+		"openTime":    k.OpenTime,
+		"closeTime":   k.CloseTime,
+		"open":        k.Open,
+		"high":        k.High,
+		"low":         k.Low,
+		"close":       k.Close,
+		"volume":      k.Volume,
+		"quoteVolume": k.QuoteVolume,
+		"numTrades":   k.NumTrades,
+		"isClosed":    k.IsClosed,
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		log.Printf("[kline-log] marshal failed: %v", err)
+		return
+	}
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		log.Printf("[kline-log] write failed: %v", err)
+	}
 }

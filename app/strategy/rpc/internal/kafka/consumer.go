@@ -94,6 +94,8 @@ func (c *Consumer) StartConsuming(ctx context.Context, handler MarketDataHandler
 			if ctx.Err() != nil {
 				return
 			}
+			// Prevent rebalance storm: small cooldown after each Consume cycle
+			time.Sleep(2 * time.Second)
 		}
 	}()
 	return nil
@@ -125,8 +127,6 @@ func (h *marketKlineGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSessi
 		if len(msg.Key) > 0 {
 			key = string(msg.Key)
 		}
-		log.Printf("kafka consumed group=%s topic=%s partition=%d offset=%d key=%q ts=%s bytes=%d",
-			h.groupID, msg.Topic, msg.Partition, msg.Offset, key, msg.Timestamp.In(time.Local).Format(time.RFC3339Nano), len(msg.Value))
 
 		var k market.Kline
 		if err := json.Unmarshal(msg.Value, &k); err != nil {
@@ -134,6 +134,12 @@ func (h *marketKlineGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSessi
 			session.MarkMessage(msg, "")
 			continue
 		}
+
+		openTime := time.UnixMilli(k.OpenTime).Format("15:04:05")
+		closeTime := time.UnixMilli(k.CloseTime).Format("15:04:05")
+		log.Printf("[kafka consume] %s %s | %s-%s | O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f closed=%v | partition=%d offset=%d key=%q",
+			k.Interval, k.Symbol, openTime, closeTime, k.Open, k.High, k.Low, k.Close, k.Volume, k.IsClosed,
+			msg.Partition, msg.Offset, key)
 		if err := h.handler(&k); err != nil {
 			log.Printf("kafka handler failed group=%s topic=%s partition=%d offset=%d symbol=%s interval=%s err=%v", h.groupID, msg.Topic, msg.Partition, msg.Offset, k.Symbol, k.Interval, err)
 		}

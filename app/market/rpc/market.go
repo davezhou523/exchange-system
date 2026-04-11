@@ -1,13 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"time"
 
+	"exchange-system/app/market/rpc/internal/aggregator"
 	"exchange-system/app/market/rpc/internal/config"
 	"exchange-system/app/market/rpc/internal/kafka"
 	"exchange-system/app/market/rpc/internal/server"
@@ -28,6 +33,8 @@ var (
 	mockInterval = flag.Duration("mock-interval", 0, "mock kafka producer send interval (0 means align to kline tf)")
 	mockSymbol   = flag.String("mock-symbol", "MOCKUSDT", "mock kline symbol")
 	mockKlineTF  = flag.String("mock-interval-tf", "1m", "mock kline interval(tf)")
+	replayFile   = flag.String("replay", "", "replay 1m kline log file (jsonl) and produce 15m/1h/4h aggregated klines to kafka")
+	replaySpeed  = flag.Duration("replay-speed", 0, "replay interval between klines (0 = no delay)")
 )
 
 func main() {
@@ -39,6 +46,13 @@ func main() {
 	if *mockKafka {
 		if err := runMockKafkaProducer(c, *mockCount, *mockInterval, *mockSymbol, *mockKlineTF); err != nil {
 			log.Fatalf("mock kafka producer failed: %v", err)
+		}
+		return
+	}
+
+	if *replayFile != "" {
+		if err := runReplayKlineLog(c, *replayFile, *replaySpeed); err != nil {
+			log.Fatalf("replay failed: %v", err)
 		}
 		return
 	}
@@ -171,4 +185,116 @@ func parseTFDuration(tf string) (time.Duration, error) {
 	default:
 		return 0, fmt.Errorf("unsupported tf: %s", tf)
 	}
+}
+
+func runReplayKlineLog(c config.Config, path string, speed time.Duration) error {
+	// Support glob pattern, e.g. "data/kline/ETHUSDT/*.jsonl"
+	matches, err := filepath.Glob(path)
+	if err != nil {
+		return fmt.Errorf("invalid path %s: %v", path, err)
+	}
+	if len(matches) == 0 {
+		// treat as single file
+		matches = []string{path}
+	}
+
+	producer, err := kafka.NewProducer(c.Kafka.Addrs, c.Kafka.Topics.Kline)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = producer.Close() }()
+
+	agg := aggregator.NewKlineAggregator(aggregator.StandardIntervals, producer)
+	ctx := context.Background()
+
+	totalSent := 0
+	for _, f := range matches {
+		sent, err := replayFile(ctx, f, speed, producer, agg)
+		if err != nil {
+			return err
+		}
+		totalSent += sent
+	}
+
+	agg.FlushAll(ctx)
+	log.Printf("[replay] done: total 1m klines=%d", totalSent)
+	return nil
+}
+
+func replayFile(ctx context.Context, path string, speed time.Duration, producer *kafka.Producer, agg *aggregator.KlineAggregator) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, fmt.Errorf("open %s: %v", path, err)
+	}
+	defer f.Close()
+
+	log.Printf("[replay] reading %s", path)
+
+	sent := 0
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		var entry struct {
+			Symbol      string  `json:"symbol"`
+			Interval    string  `json:"interval"`
+			OpenTime    int64   `json:"openTime"`
+			CloseTime   int64   `json:"closeTime"`
+			Open        float64 `json:"open"`
+			High        float64 `json:"high"`
+			Low         float64 `json:"low"`
+			Close       float64 `json:"close"`
+			Volume      float64 `json:"volume"`
+			QuoteVolume float64 `json:"quoteVolume"`
+			NumTrades   int32   `json:"numTrades"`
+			IsClosed    bool    `json:"isClosed"`
+		}
+		if err := json.Unmarshal(line, &entry); err != nil {
+			log.Printf("[replay] unmarshal failed: %v", err)
+			continue
+		}
+
+		if entry.Interval != "1m" || !entry.IsClosed {
+			continue
+		}
+
+		k := &market.Kline{
+			Symbol:      entry.Symbol,
+			Interval:    entry.Interval,
+			OpenTime:    entry.OpenTime,
+			CloseTime:   entry.CloseTime,
+			Open:        entry.Open,
+			High:        entry.High,
+			Low:         entry.Low,
+			Close:       entry.Close,
+			Volume:      entry.Volume,
+			QuoteVolume: entry.QuoteVolume,
+			NumTrades:   entry.NumTrades,
+			IsClosed:    true,
+		}
+
+		// send raw 1m to kafka
+		if err := producer.SendMarketData(ctx, k); err != nil {
+			log.Printf("[replay] kafka send failed: %v", err)
+		}
+
+		// feed aggregator to produce 15m/1h/4h
+		agg.OnKline(ctx, k)
+
+		sent++
+		if speed > 0 {
+			time.Sleep(speed)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return sent, fmt.Errorf("scan %s: %v", path, err)
+	}
+	return sent, nil
 }

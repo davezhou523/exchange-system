@@ -16,4 +16,5 @@ type Config struct {
 		Intervals    []string
 		Proxy        string
 	}
+	KlineLogDir string `json:",default=data/kline"`
 }
