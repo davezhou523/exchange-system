@@ -1,6 +1,6 @@
 /logs/
 kafka1
-kafka1
+kafka2
 kafka3
 .idea
 .DS_Store
@@ -16,7 +16,6 @@ tests/e2e/reports
 selenium-debug.log
 
 # Editor directories and files
-.idea
 .vscode
 *.suo
 *.ntvs*
