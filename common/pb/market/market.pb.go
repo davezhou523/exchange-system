@@ -41,6 +41,7 @@ type Kline struct {
 	QuoteVolume    float64                `protobuf:"fixed64,15,opt,name=quote_volume,json=quoteVolume,proto3" json:"quote_volume,omitempty"`            // 成交额
 	TakerBuyVolume float64                `protobuf:"fixed64,16,opt,name=taker_buy_volume,json=takerBuyVolume,proto3" json:"taker_buy_volume,omitempty"` // 主动买入成交量
 	TakerBuyQuote  float64                `protobuf:"fixed64,17,opt,name=taker_buy_quote,json=takerBuyQuote,proto3" json:"taker_buy_quote,omitempty"`    // 主动买入成交额
+	IsDirty        bool                   `protobuf:"varint,18,opt,name=is_dirty,json=isDirty,proto3" json:"is_dirty,omitempty"`                         // 数据不完整标记(有缺口/不完整)，数据层可发，策略层应禁止交易
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -192,6 +193,13 @@ func (x *Kline) GetTakerBuyQuote() float64 {
 		return x.TakerBuyQuote
 	}
 	return 0
+}
+
+func (x *Kline) GetIsDirty() bool {
+	if x != nil {
+		return x.IsDirty
+	}
+	return false
 }
 
 // 深度数据

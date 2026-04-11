@@ -20,7 +20,8 @@ type Config struct {
 		}
 	}
 
-	KlineLogDir string
+	KlineLogDir  string
+	SignalLogDir string
 
 	Strategies []StrategyConfig
 

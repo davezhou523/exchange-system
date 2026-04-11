@@ -3,7 +3,6 @@ package aggregator
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -140,11 +139,10 @@ func (a *KlineAggregator) GetMetrics() Metrics {
 // --- per-symbol worker ---
 
 type symbolWorker struct {
-	symbol   string
-	ch       chan *market.Kline
-	buckets  map[string]*bucket // interval name -> bucket (for completed periods)
-	buffer1m []*market.Kline    // buffer for collecting 1m klines for multi-period aggregation
-	agg      *KlineAggregator
+	symbol  string
+	ch      chan *market.Kline
+	buckets map[string]*bucket // interval name -> bucket (incremental aggregation)
+	agg     *KlineAggregator
 }
 
 func (a *KlineAggregator) getOrCreateWorker(symbol string) *symbolWorker {
@@ -156,11 +154,10 @@ func (a *KlineAggregator) getOrCreateWorker(symbol string) *symbolWorker {
 	}
 
 	w := &symbolWorker{
-		symbol:   symbol,
-		ch:       make(chan *market.Kline, 256),
-		buckets:  make(map[string]*bucket),
-		buffer1m: make([]*market.Kline, 0),
-		agg:      a,
+		symbol:  symbol,
+		ch:      make(chan *market.Kline, 256),
+		buckets: make(map[string]*bucket),
+		agg:     a,
 	}
 	a.workers[symbol] = w
 
@@ -179,35 +176,37 @@ func (w *symbolWorker) run() {
 }
 
 func (w *symbolWorker) processKline(k *market.Kline) {
-	// Always update 1m bucket immediately (if we were maintaining one)
-	// But for multi-period aggregation, we buffer 1m klines first
-
-	// Add to 1m buffer for multi-period aggregation
-	w.buffer1m = append(w.buffer1m, k)
-
-	// Process each target interval
+	// Process each target interval with O(1) incremental aggregation
 	for _, iv := range w.agg.intervals {
 		requiredMinutes := int(iv.Duration / time.Minute)
 
 		if requiredMinutes == 1 {
-			// 1m interval - process immediately (though we don't maintain 1m buckets in aggregator)
 			continue
 		}
 
-		// For multi-period intervals, check if we have enough 1m klines
-		if len(w.buffer1m) < requiredMinutes {
-			// Not enough data yet, skip processing this interval
-			continue
-		}
-
-		// Calculate current period based on the latest kline
+		// Calculate current period based on the latest kline's openTime
 		latestPeriodOpenTime := alignToInterval(k.OpenTime, iv.Duration)
-		latestPeriodCloseTime := latestPeriodOpenTime + iv.Duration.Milliseconds() - 1
 
 		// Check if we already have a bucket for this period
 		b, exists := w.buckets[iv.Name]
 
-		// --- Gap detection ---
+		// --- Time-driven: flush bucket when kline crosses period boundary ---
+		if exists && b.initialized && latestPeriodOpenTime != b.OpenTime {
+			// Previous period is complete (time-wise), emit it
+			if b.count < requiredMinutes {
+				b.dirty = true
+				log.Printf("[aggregator] INCOMPLETE: %s %s | period=%s | collected=%d/%d | missing=%d | dirty=true",
+					w.symbol, iv.Name,
+					time.UnixMilli(b.OpenTime).UTC().Format("2006-01-02T15:04:05"),
+					b.count, requiredMinutes, requiredMinutes-b.count)
+			}
+			w.agg.emitKline(context.Background(), w.symbol, iv.Name, b)
+			delete(w.buckets, iv.Name)
+			b = nil
+			exists = false
+		}
+
+		// --- Gap detection: kline jumps far ahead (more than one period) ---
 		if exists && b.initialized {
 			expectedNext := b.CloseTime + 1
 			if k.OpenTime > expectedNext {
@@ -215,35 +214,73 @@ func (w *symbolWorker) processKline(k *market.Kline) {
 				gapDuration := time.Duration(k.OpenTime-expectedNext) * time.Millisecond
 				log.Printf("[aggregator] GAP: %s %s — expected openTime=%d got=%d gap=%v",
 					w.symbol, iv.Name, expectedNext, k.OpenTime, gapDuration)
-				w.agg.emitKline(context.Background(), w.symbol, iv.Name, b)
+				if b.count > 0 {
+					b.dirty = true
+					w.agg.emitKline(context.Background(), w.symbol, iv.Name, b)
+				}
 				delete(w.buckets, iv.Name)
 				b = nil
 				exists = false
 			}
 		}
 
-		// --- Flush completed bucket when period changes ---
-		if exists && b.initialized && latestPeriodOpenTime != b.OpenTime {
-			w.agg.emitKline(context.Background(), w.symbol, iv.Name, b)
-			delete(w.buckets, iv.Name)
-			b = nil
-			exists = false
-		}
-
-		// --- Create or update bucket ---
-		if !exists || b == nil {
-			// We have enough 1m klines, create the multi-period bucket
-			// createMultiPeriodBucket already aggregates ALL 1m klines in the period,
-			// no further incremental updates needed.
-			if err := w.createMultiPeriodBucket(iv, latestPeriodOpenTime, latestPeriodCloseTime); err != nil {
-				log.Printf("[aggregator] Failed to create %s bucket for %s: %v", iv.Name, w.symbol, err)
-				continue
+		// --- Continuity check within current period: verify consecutive 1m klines ---
+		if exists && b.initialized && b.count > 0 {
+			expectedOpenTime := b.prevOpenTime + 60000
+			if k.OpenTime != expectedOpenTime {
+				w.agg.metrics.GapsDetected.Add(1)
+				log.Printf("[aggregator] CONTINUITY GAP: %s %s — expected openTime=%d got=%d gap=%dms | marking dirty",
+					w.symbol, iv.Name, expectedOpenTime, k.OpenTime, k.OpenTime-expectedOpenTime)
+				// Mark dirty but continue aggregating (data layer can still emit, strategy layer should skip)
+				b.dirty = true
 			}
 		}
-	}
 
-	// Clean up old 1m klines from buffer (keep only what we might need for future periods)
-	w.cleanupBuffer()
+		// --- Create or incrementally update bucket ---
+		if !exists || b == nil {
+			b = &bucket{
+				Open:           k.Open,
+				High:           k.High,
+				Low:            k.Low,
+				Close:          k.Close,
+				Volume:         k.Volume,
+				QuoteVolume:    k.QuoteVolume,
+				TakerBuyVolume: k.TakerBuyVolume,
+				TakerBuyQuote:  k.TakerBuyQuote,
+				NumTrades:      k.NumTrades,
+				FirstTradeID:   k.FirstTradeId,
+				LastTradeID:    k.LastTradeId,
+				OpenTime:       latestPeriodOpenTime,
+				CloseTime:      latestPeriodOpenTime + iv.Duration.Milliseconds() - 1,
+				prevOpenTime:   k.OpenTime,
+				count:          1,
+				initialized:    true,
+			}
+			w.buckets[iv.Name] = b
+		} else {
+			// Incremental update: O(1) per kline per interval
+			if k.High > b.High {
+				b.High = k.High
+			}
+			if k.Low < b.Low {
+				b.Low = k.Low
+			}
+			b.Close = k.Close
+			b.Volume += k.Volume
+			b.QuoteVolume += k.QuoteVolume
+			b.TakerBuyVolume += k.TakerBuyVolume
+			b.TakerBuyQuote += k.TakerBuyQuote
+			b.NumTrades += k.NumTrades
+			if k.FirstTradeId < b.FirstTradeID {
+				b.FirstTradeID = k.FirstTradeId
+			}
+			if k.LastTradeId > b.LastTradeID {
+				b.LastTradeID = k.LastTradeId
+			}
+			b.prevOpenTime = k.OpenTime
+			b.count++
+		}
+	}
 }
 
 // klineLogEntry mirrors the protobuf field order for deterministic JSON output.
@@ -265,6 +302,7 @@ type klineLogEntry struct {
 	QuoteVolume    float64 `json:"quoteVolume"`
 	TakerBuyVolume float64 `json:"takerBuyVolume"`
 	TakerBuyQuote  float64 `json:"takerBuyQuote"`
+	IsDirty        bool    `json:"isDirty"`
 }
 
 // --- bucket ---
@@ -283,6 +321,9 @@ type bucket struct {
 	LastTradeID    int64
 	OpenTime       int64
 	CloseTime      int64
+	prevOpenTime   int64 // openTime of the last 1m kline added (for continuity check)
+	count          int   // number of 1m klines aggregated so far
+	dirty          bool  // true if bucket has gaps or incomplete data
 	initialized    bool
 }
 
@@ -306,6 +347,8 @@ func (a *KlineAggregator) emitKline(ctx context.Context, symbol, interval string
 		FirstTradeId:   b.FirstTradeID,
 		LastTradeId:    b.LastTradeID,
 		IsClosed:       true,
+		IsDirty:        b.dirty,
+		EventTime:      b.CloseTime, // Use closeTime as eventTime for aggregated klines (period confirmation time)
 	}
 
 	openStr := time.UnixMilli(k.OpenTime).Format("2006-01-02 15:04:05")
@@ -397,6 +440,7 @@ func (a *KlineAggregator) writeKlineLog(k *market.Kline) {
 		QuoteVolume:    k.QuoteVolume,
 		TakerBuyVolume: k.TakerBuyVolume,
 		TakerBuyQuote:  k.TakerBuyQuote,
+		IsDirty:        k.IsDirty,
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {
@@ -405,133 +449,6 @@ func (a *KlineAggregator) writeKlineLog(k *market.Kline) {
 	}
 	if _, err := f.Write(append(data, '\n')); err != nil {
 		log.Printf("[agg-log] write failed: %v", err)
-	}
-}
-
-// createMultiPeriodBucket creates a bucket for multi-period aggregation (15m, 1h, 4h)
-// by aggregating the required number of 1m klines from the buffer.
-func (w *symbolWorker) createMultiPeriodBucket(iv IntervalDef, periodOpenTime, periodCloseTime int64) error {
-	requiredMinutes := int(iv.Duration / time.Minute)
-
-	// Find 1m klines that belong to this period
-	var periodKlines []*market.Kline
-	for _, k := range w.buffer1m {
-		kPeriodOpen := alignToInterval(k.OpenTime, iv.Duration)
-		if kPeriodOpen == periodOpenTime {
-			periodKlines = append(periodKlines, k)
-		}
-	}
-
-	// Check if we have enough klines for this period
-	if len(periodKlines) < requiredMinutes {
-		return fmt.Errorf("insufficient data: have %d, need %d", len(periodKlines), requiredMinutes)
-	}
-
-	// Sort klines by openTime to ensure chronological order
-	for i := 0; i < len(periodKlines)-1; i++ {
-		for j := i + 1; j < len(periodKlines); j++ {
-			if periodKlines[i].OpenTime > periodKlines[j].OpenTime {
-				periodKlines[i], periodKlines[j] = periodKlines[j], periodKlines[i]
-			}
-		}
-	}
-
-	// Check continuity: each kline should be exactly 1 minute (60000ms) after the previous
-	for i := 1; i < len(periodKlines); i++ {
-		prev := periodKlines[i-1]
-		curr := periodKlines[i]
-		gap := curr.OpenTime - prev.OpenTime
-		if gap != 60000 { // 1 minute in milliseconds
-			w.agg.metrics.GapsDetected.Add(1)
-			log.Printf("[aggregator] CONTINUITY GAP: %s %s period=%d openTime[%d]=%d -> [%d]=%d gap=%dms expected=60000ms",
-				w.symbol, iv.Name, periodOpenTime, i-1, prev.OpenTime, i, curr.OpenTime, gap)
-			return fmt.Errorf("continuity gap detected: expected 60000ms between klines, got %dms", gap)
-		}
-	}
-
-	// Use only the required number of klines (in case we have more due to late arrivals)
-	if len(periodKlines) > requiredMinutes {
-		periodKlines = periodKlines[:requiredMinutes]
-	}
-
-	// Re-check continuity after truncation to ensure we still have continuous data
-	for i := 1; i < len(periodKlines); i++ {
-		prev := periodKlines[i-1]
-		curr := periodKlines[i]
-		gap := curr.OpenTime - prev.OpenTime
-		if gap != 60000 {
-			w.agg.metrics.GapsDetected.Add(1)
-			log.Printf("[aggregator] CONTINUITY GAP AFTER TRUNCATION: %s %s period=%d openTime[%d]=%d -> [%d]=%d gap=%dms",
-				w.symbol, iv.Name, periodOpenTime, i-1, prev.OpenTime, i, curr.OpenTime, gap)
-			return fmt.Errorf("continuity gap after truncation: expected 60000ms, got %dms", gap)
-		}
-	}
-
-	// Aggregate the klines
-	firstKline := periodKlines[0]
-	lastKline := periodKlines[len(periodKlines)-1]
-
-	b := &bucket{
-		Open:           firstKline.Open,
-		High:           firstKline.High,
-		Low:            firstKline.Low,
-		Close:          lastKline.Close,
-		Volume:         0,
-		QuoteVolume:    0,
-		TakerBuyVolume: 0,
-		TakerBuyQuote:  0,
-		NumTrades:      0,
-		FirstTradeID:   firstKline.FirstTradeId,
-		LastTradeID:    lastKline.LastTradeId,
-		OpenTime:       periodOpenTime,
-		CloseTime:      periodCloseTime,
-		initialized:    true,
-	}
-
-	// Aggregate all klines in the period
-	for _, k := range periodKlines {
-		if k.High > b.High {
-			b.High = k.High
-		}
-		if k.Low < b.Low {
-			b.Low = k.Low
-		}
-		b.Volume += k.Volume
-		b.QuoteVolume += k.QuoteVolume
-		b.TakerBuyVolume += k.TakerBuyVolume
-		b.TakerBuyQuote += k.TakerBuyQuote
-		b.NumTrades += k.NumTrades
-		if k.FirstTradeId < b.FirstTradeID {
-			b.FirstTradeID = k.FirstTradeId
-		}
-		if k.LastTradeId > b.LastTradeID {
-			b.LastTradeID = k.LastTradeId
-		}
-	}
-
-	w.buckets[iv.Name] = b
-	return nil
-}
-
-// cleanupBuffer removes old 1m klines that are no longer needed for future period calculations.
-func (w *symbolWorker) cleanupBuffer() {
-	if len(w.buffer1m) == 0 {
-		return
-	}
-
-	// Keep at least the maximum required minutes worth of data
-	maxRequiredMinutes := 0
-	for _, iv := range w.agg.intervals {
-		requiredMinutes := int(iv.Duration / time.Minute)
-		if requiredMinutes > maxRequiredMinutes {
-			maxRequiredMinutes = requiredMinutes
-		}
-	}
-
-	// Keep twice the maximum required to handle out-of-order arrivals
-	keepCount := maxRequiredMinutes * 2
-	if len(w.buffer1m) > keepCount {
-		w.buffer1m = w.buffer1m[len(w.buffer1m)-keepCount:]
 	}
 }
 

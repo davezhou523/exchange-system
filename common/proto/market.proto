@@ -25,6 +25,7 @@ message Kline {
   double quote_volume = 15;     // 成交额
   double taker_buy_volume = 16; // 主动买入成交量
   double taker_buy_quote = 17;  // 主动买入成交额
+  bool is_dirty = 18;           // 数据不完整标记(有缺口/不完整)，数据层可发，策略层应禁止交易
 }
 
 // 深度数据

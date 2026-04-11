@@ -115,7 +115,7 @@ func (s *ServiceContext) upsertStrategyLocked(cfg *strategypb.StrategyConfig) {
 		delete(s.strategies, cfg.Symbol)
 		return
 	}
-	s.strategies[cfg.Symbol] = strategyengine.NewTrendFollowingStrategy(cfg.Symbol, cfg.Parameters, s.signalProducer)
+	s.strategies[cfg.Symbol] = strategyengine.NewTrendFollowingStrategy(cfg.Symbol, cfg.Parameters, s.signalProducer, s.Config.SignalLogDir)
 }
 
 func (s *ServiceContext) StopStrategy(strategyID string) {

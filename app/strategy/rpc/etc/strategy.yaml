@@ -28,3 +28,4 @@ Strategy:
   RuntimeMode: websocket
 
 KlineLogDir: data/kline
+SignalLogDir: data/signal
