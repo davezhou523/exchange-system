@@ -9,15 +9,60 @@ Kafka:
   Group: execution-rpc-signal
   Topics:
     Signal: signal
-    Orders: order
+    Order: order
 
-Binance:
-  BaseURL: https://demo-fapi.binance.com
-  Testnet: true
-  APIKey: "your-api-key"
-  SecretKey: "your-secret-key"
+# 交易所路由配置
+Exchange:
+  # 路由策略: direct=指定交易所 | simulated=模拟撮合 | by_symbol=按交易对路由
+  RouteStrategy: direct
+  # 默认交易所: binance | okx | simulated
+  DefaultExchange: binance
 
+  # 按交易对路由映射（RouteStrategy=by_symbol 时生效）
+  # SymbolRoutes:
+  #   ETHUSDT: binance
+  #   BTCUSDT: okx
+
+  # 币安配置
+  Binance:
+    BaseURL: https://demo-fapi.binance.com
+    Testnet: true
+    APIKey: "XdWkQMlWWMf5Ukr9CvKexKEpTT6MMmih2GeAJ6V9PzyGPzIs3nAuR3YEM5BL6lwU"
+    SecretKey: "BX3tSfEZhbU2RzEahnSVHRLDi1IjU5G4fCGczoe6JgZcGIVNTbS6Xz3614o5Wb5A"
+
+  # OKX 配置（暂未实现）
+  # OKX:
+  #   APIKey: ""
+  #   SecretKey: ""
+  #   Passphrase: ""
+  #   BaseURL: https://www.okx.com
+  #   Simulated: false
+
+  # 模拟撮合配置
+  Simulated:
+    Enabled: true
+    InitialBalance: 10000
+    SlippageBPS: 5              # 滑点 0.05%
+    SlippageModel: fixed        # fixed / random / volume
+    CommissionRate: 0.0004      # 手续费 0.04%
+    CommissionAsset: USDT
+    FillDelayMs: 0              # 成交延迟
+
+# 风控配置
 Risk:
-  MaxPositionSize: 0.55
-  MaxLeverage: 7
-  StopLossPercent: 0.02
+  MaxPositionSize: 0.55         # 单笔最大仓位占比 55%
+  MaxLeverage: 7.0              # 最大杠杆 7 倍
+  MaxDailyLossPct: 0.07         # 最大日亏损 7%
+  MaxDrawdownPct: 0.15          # 最大回撤 15%
+  MaxOpenPositions: 3           # 最大同时持仓数
+  MaxPositionExposure: 2.0      # 总敞口 200%
+  StopLossPercent: 0.02         # 止损 2%
+  MinOrderNotional: 5.0         # 最小下单金额 5 USDT
+
+# 幂等配置
+Idempotent:
+  TTLSeconds: 600               # 信号去重记录保留 10 分钟
+
+# 日志目录（JSONL 格式，每行一条 JSON）
+SignalLogDir: data/signal       # 收到的策略信号日志
+OrderLogDir: data/order         # 订单执行结果日志

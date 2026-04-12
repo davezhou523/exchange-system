@@ -12,22 +12,6 @@ U本位合约模拟Websocket baseurl 为 "wss://fstream.binancefuture.com"
 接入模拟交易下单、模拟账户同步
 go-zero RPC/API 服务编排
 ## 一、总体架构（go-zero版）
-## 正确的数据流
-           WebSocket（Binance） testnet的 Websocket baseurl 为 "wss://fstream.binancefuture.com"
-
-                    ↓
-          market-service
-                    ↓
-                Kafka  ←（核心总线）
-        ┌──────────┼──────────┐
-        ↓          ↓          ↓
-strategy-service  risk-service  storage-service
-↓
-Signal
-↓
-execution-service
-↓
-Binance API
 
 ### 创建Kafka主题
 ./kafka-topics.sh --create --topic kline --bootstrap-server kafka1:9092
@@ -112,10 +96,15 @@ strategy职责：
 #### 4️⃣ execution（最关键）
 
 职责：
-
-接收 signal
+接收信号 signal
 下单（Binance）
-管理订单状态
+仓位管理
+风控
+下单路由支持：Binance OKX 模拟撮合（回测 / 仿真）
+订单管理
+滑点 & 成交模拟（回测用
+幂等 & 防重复下单（很重要）
+
 #### 5️⃣ account
 
 ### 五、common公共模块设计（非常关键）

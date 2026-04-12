@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -162,6 +163,11 @@ const (
 	paramM15BreakoutLookback = "m15_breakout_lookback"      // 突破结构回顾期（默认6）
 	paramM15RsiBiasLong      = "m15_rsi_bias_long"          // 15M多头RSI偏置（默认52）
 	paramM15RsiBiasShort     = "m15_rsi_bias_short"         // 15M空头RSI偏置（默认48）
+
+	// 调试参数
+	paramDebugSkipPullback = "debug_skip_pullback"  // 跳过1H回调条件（默认0=不跳过，1=跳过）
+	paramDebugSkip4HTrend  = "debug_skip_4h_trend"  // 跳过4H趋势要求（默认0=不跳过，1=跳过，自动根据价格与EMA关系判断方向）
+	paramDebugSkip15MEntry = "debug_skip_15m_entry" // 跳过15M入场信号要求（默认0=不跳过，1=跳过，直接生成入场信号）
 
 	// 风险约束
 	paramMaxConsecutiveLosses = "max_consecutive_losses"  // 最大连续亏损（默认3）
@@ -494,6 +500,51 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 		return nil
 	}
 
+	// 调试模式：跳过4H趋势和1H回调，直接用15M指标判断方向并入场
+	skip4H := s.getParam(paramDebugSkip4HTrend, 0) > 0
+	skipPullback := s.getParam(paramDebugSkipPullback, 0) > 0
+	skip15M := s.getParam(paramDebugSkip15MEntry, 0) > 0
+
+	if skip4H && skipPullback {
+		// 快速调试路径：跳过4H和1H，直接用15M RSI判断方向
+		m15 := s.latest15m
+		if m15.Atr == 0 {
+			log.Printf("[策略] %s 15M指标未就绪（ATR=0），跳过入场", s.symbol)
+			return nil
+		}
+
+		// 根据15M RSI判断方向：RSI<50空头，RSI>=50多头
+		var trend trendDirection
+		var pullback pullbackResult
+		var entry entrySignal
+		if m15.Rsi < 50 {
+			trend = trendShort
+			pullback = pullbackShort
+			entry = entryShort
+		} else {
+			trend = trendLong
+			pullback = pullbackLong
+			entry = entryLong
+		}
+		log.Printf("[策略] %s 快速调试模式 | 15M RSI=%.2f → trend=%v pullback=%v entry=%v ATR=%.2f",
+			s.symbol, m15.Rsi, trend, pullback, entry, m15.Atr)
+
+		// 如果还需要跳过15M入场信号判断，上面已经赋值了entry，直接进入开仓
+		// 否则走正常的15M入场判断
+		if !skip15M {
+			entry = s.judge15MEntry(pullback)
+			if entry == entryNone {
+				log.Printf("[策略] %s 15M无入场 | pullback=%v RSI=%.2f ATR=%.2f",
+					s.symbol, pullback, m15.Rsi, m15.Atr)
+				return nil
+			}
+		}
+
+		return s.openPosition(ctx, k, trend, pullback, entry, m15)
+	}
+
+	// ========== 以下为正常三层过滤逻辑 ==========
+
 	// 第1层：4H趋势判断
 	// 检查 4H/1H 指标是否就绪（需要先收到对应周期的闭K线）
 	if s.latest4h.Ema21 == 0 || s.latest4h.Ema55 == 0 {
@@ -528,8 +579,11 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 		return nil
 	}
 
-	// 计算止损止盈
-	m15 := s.latest15m
+	return s.openPosition(ctx, k, trend, pullback, entry, s.latest15m)
+}
+
+// openPosition 计算止损止盈并发送入场信号
+func (s *TrendFollowingStrategy) openPosition(ctx context.Context, k *marketpb.Kline, trend trendDirection, pullback pullbackResult, entry entrySignal, m15 klineSnapshot) error {
 	atrMult := s.getParam(paramStopLossATRMult, 1.5)
 	stopDist := atrMult * m15.Atr
 
@@ -577,19 +631,29 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 		s.pos.side = sideShort
 	}
 
-	// 发送信号
+	// 计算风险收益比：TP1距离 / 止损距离
+	riskReward := 0.0
+	tpStopDist := math.Abs(m15.Close - stopLoss)
+	if tpStopDist > 0 {
+		riskReward = math.Abs(tp1-m15.Close) / tpStopDist
+	}
+
+	// 发送开仓信号
 	signal := map[string]interface{}{
 		"strategy_id":  fmt.Sprintf("trend-following-%s", s.symbol),
 		"symbol":       s.symbol,
 		"interval":     "15m",
 		"action":       action,
 		"side":         side,
+		"signal_type":  "OPEN",
 		"quantity":     quantity,
 		"entry_price":  m15.Close,
 		"stop_loss":    stopLoss,
 		"take_profits": []float64{tp1, tp2},
 		"reason":       reason,
 		"timestamp":    time.Now().UnixMilli(),
+		"atr":          m15.Atr,
+		"risk_reward":  riskReward,
 		"indicators": map[string]interface{}{
 			"h4_ema21":  s.latest4h.Ema21,
 			"h4_ema55":  s.latest4h.Ema55,
@@ -749,12 +813,15 @@ func (s *TrendFollowingStrategy) checkExitConditions(ctx context.Context, k *mar
 		"interval":     "15m",
 		"action":       exitAction,
 		"side":         side,
+		"signal_type":  "CLOSE",
 		"quantity":     0.01, // 出场用相同数量
 		"entry_price":  price,
 		"stop_loss":    s.pos.stopLoss,
 		"take_profits": []float64{s.pos.takeProfit1, s.pos.takeProfit2},
 		"reason":       exitReason,
 		"timestamp":    time.Now().UnixMilli(),
+		"atr":          m15.Atr,
+		"risk_reward":  0, // 出场信号无需风险收益比
 		"indicators": map[string]interface{}{
 			"m15_ema21": m15.Ema21,
 			"m15_rsi":   m15.Rsi,
@@ -1025,12 +1092,39 @@ func (s *TrendFollowingStrategy) writeSignalLog(signal map[string]interface{}, k
 		IsFinal:     k.IsFinal,
 	}
 
-	data, err := json.Marshal(entry)
-	if err != nil {
+	// 数值保留2位小数
+	entry.Quantity = round2(entry.Quantity)
+	entry.EntryPrice = round2(entry.EntryPrice)
+	entry.StopLoss = round2(entry.StopLoss)
+	for i, tp := range entry.TakeProfits {
+		entry.TakeProfits[i] = round2(tp)
+	}
+	if entry.Indicators != nil {
+		rounded := make(map[string]interface{}, len(entry.Indicators))
+		for k, v := range entry.Indicators {
+			if f, ok := v.(float64); ok {
+				rounded[k] = round2(f)
+			} else {
+				rounded[k] = v
+			}
+		}
+		entry.Indicators = rounded
+	}
+
+	// 禁用 HTML 转义，避免 < > & 被编码为 \u003c 等
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(entry); err != nil {
 		log.Printf("[signal-log] marshal failed: %v", err)
 		return
 	}
-	if _, err := f.Write(append(data, '\n')); err != nil {
+	if _, err := f.Write(buf.Bytes()); err != nil {
 		log.Printf("[signal-log] write failed: %v", err)
 	}
+}
+
+// round2 四舍五入保留2位小数
+func round2(v float64) float64 {
+	return math.Round(v*100) / 100
 }

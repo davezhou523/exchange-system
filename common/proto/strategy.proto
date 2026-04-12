@@ -6,18 +6,33 @@ option go_package = "./strategy";
 
 
 
-// 交易信号
+// 交易信号 — execution 只消费此消息，不消费原始K线
+//
+// 数据流：Market(Kline) → Strategy(分析+决策) → Signal → Execution(下单+风控)
+//
+// Signal 包含"可执行"信息：方向、数量、止损止盈、信号类型
+// 不包含：原始K线数据、中间指标计算过程
 message Signal {
-  string strategy_id = 1;
-  string symbol = 2;
-  string action = 3; // BUY, SELL, HOLD
-  string side = 4; // LONG, SHORT
-  double quantity = 5;
-  double entry_price = 6;
-  double stop_loss = 7;
-  repeated double take_profits = 8;
-  string reason = 9;
-  int64 timestamp = 10;
+  string strategy_id = 1;     // 策略ID，如 "trend-following-BTCUSDT"
+  string symbol = 2;          // 交易对，如 "BTCUSDT"
+  string action = 3;          // 动作：BUY, SELL, HOLD
+  string side = 4;            // 仓位方向：LONG, SHORT
+  double quantity = 5;        // 下单数量
+  double entry_price = 6;     // 入场/出场价格
+  double stop_loss = 7;       // 止损价
+  repeated double take_profits = 8; // 止盈价列表
+  string reason = 9;          // 信号原因描述（如"4H多头|1H回调|15M RSI突破"）
+  int64 timestamp = 10;       // 信号时间戳（毫秒）
+
+  // --- 以下为新增字段 ---
+
+  string signal_type = 11;    // 信号类型：OPEN=开仓, CLOSE=平仓, HOLD=持仓观察
+  string interval = 12;       // 信号周期，如 "15m"
+  double atr = 13;            // 当前ATR（execution用于计算滑点容忍度）
+  double risk_reward = 14;    // 风险收益比（如 2.0 表示盈亏比 1:2）
+
+  // 指标快照 — 供日志/审计用，execution 不做计算
+  map<string, double> indicators = 15; // 如 {"h4_ema21":68000, "m15_rsi":62.3, "m15_atr":350}
 }
 
 // 策略配置
