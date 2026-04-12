@@ -214,10 +214,10 @@ func runReplayKlineLog(c config.Config, path string, speed time.Duration) error 
 	defer func() { _ = producer.Close() }()
 
 	agg := aggregator.NewKlineAggregator(aggregator.StandardIntervals, producer, "", 0, aggregator.IndicatorParams{
-		EmaFastPeriod: 12,
-		EmaSlowPeriod: 26,
-		RsiPeriod:     14,
-		AtrPeriod:     14,
+		Ema21Period: 21,
+		Ema55Period: 55,
+		RsiPeriod:   14,
+		AtrPeriod:   14,
 	})
 	ctx := context.Background()
 

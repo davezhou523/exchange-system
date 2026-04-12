@@ -160,12 +160,18 @@ func (h *marketKlineGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSessi
 
 		openTime := time.UnixMilli(k.OpenTime).Format("15:04:05")
 		closeTime := time.UnixMilli(k.CloseTime).Format("15:04:05")
-		log.Printf("[kafka consume] %s %s | %s-%s | O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f closed=%v | partition=%d offset=%d key=%q",
-			k.Interval, k.Symbol, openTime, closeTime, k.Open, k.High, k.Low, k.Close, k.Volume, k.IsClosed,
+
+		// 聚合K线（非1m）打印指标值，便于验证指标是否正确传递
+		indicatorStr := ""
+		if k.Interval != "1m" && (k.Ema21 != 0 || k.Ema55 != 0 || k.Rsi != 0) {
+			indicatorStr = fmt.Sprintf(" EMA21=%.2f EMA55=%.2f RSI=%.2f ATR=%.2f final=%v", k.Ema21, k.Ema55, k.Rsi, k.Atr, k.IsFinal)
+		}
+		log.Printf("[kafka consume] %s %s | %s-%s | O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f closed=%v%s | partition=%d offset=%d key=%q",
+			k.Interval, k.Symbol, openTime, closeTime, k.Open, k.High, k.Low, k.Close, k.Volume, k.IsClosed, indicatorStr,
 			msg.Partition, msg.Offset, key)
 
-		// Save aggregated kline (15m/1h/4h) to log file for verification
-		if k.IsClosed && (k.Interval == "15m" || k.Interval == "1h" || k.Interval == "4h") {
+		// Save aggregated kline (3m/5m/15m/1h/4h) to log file for verification
+		if k.IsClosed && (k.Interval == "3m" || k.Interval == "5m" || k.Interval == "15m" || k.Interval == "1h" || k.Interval == "4h") {
 			h.consumer.writeKlineLog(&k)
 		}
 		if err := h.handler(&k); err != nil {
@@ -211,8 +217,9 @@ type klineLogEntry struct {
 	TakerBuyQuote  float64 `json:"takerBuyQuote"`
 	IsDirty        bool    `json:"isDirty"`
 	IsTradable     bool    `json:"isTradable"`
-	EmaFast        float64 `json:"emaFast"`
-	EmaSlow        float64 `json:"emaSlow"`
+	IsFinal        bool    `json:"isFinal"`
+	Ema21          float64 `json:"ema21"`
+	Ema55          float64 `json:"ema55"`
 	Rsi            float64 `json:"rsi"`
 	Atr            float64 `json:"atr"`
 }
@@ -238,8 +245,8 @@ func (c *Consumer) writeKlineLog(k *market.Kline) {
 	k.High = formatFloat(k.High)
 	k.Low = formatFloat(k.Low)
 	k.Close = formatFloat(k.Close)
-	k.EmaFast = formatFloat(k.EmaFast)
-	k.EmaSlow = formatFloat(k.EmaSlow)
+	k.Ema21 = formatFloat(k.Ema21)
+	k.Ema55 = formatFloat(k.Ema55)
 	k.Rsi = formatFloat(k.Rsi)
 	k.Atr = formatFloat(k.Atr)
 
@@ -290,8 +297,9 @@ func (c *Consumer) writeKlineLog(k *market.Kline) {
 		TakerBuyQuote:  k.TakerBuyQuote,
 		IsDirty:        k.IsDirty,
 		IsTradable:     k.IsTradable,
-		EmaFast:        k.EmaFast,
-		EmaSlow:        k.EmaSlow,
+		IsFinal:        k.IsFinal,
+		Ema21:          k.Ema21,
+		Ema55:          k.Ema55,
 		Rsi:            k.Rsi,
 		Atr:            k.Atr,
 	}

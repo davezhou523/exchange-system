@@ -11,21 +11,57 @@ Kafka:
     Kline: kline
     Signal: signal
 
+# 多时间周期趋势跟踪策略（Strategy3）
+# 架构：4H趋势判断 + 1H回调确认 + 15M入场信号
 Strategies:
   - name: "trend-following"
     symbol: "ETHUSDT"
     enabled: true
     parameters:
-      ema_fast: 12
-      ema_slow: 26
-      rsi_period: 14
-      rsi_overbought: 70
-      rsi_oversold: 30
+      # === 风险控制 ===
+      risk_per_trade: 0.03            # 单笔风险比例（3%）
+      max_position_size: 0.55         # 最大仓位规模（55%）
+      leverage: 7.0                   # 杠杆倍数
+      max_leverage_ratio: 0.92        # 最大杠杆使用率（92%）
+      equity: 10000                   # 账户权益（USD）
+
+      # === 止损止盈 ===
+      stop_loss_atr_multiplier: 1.5   # 止损距离 = ATR × 1.5
+      ema_exit_buffer_atr: 0.30       # EMA破位缓冲带 = 0.3 × ATR
+
+      # === 出场条件 ===
+      min_holding_bars: 5             # 最小持仓K线数（15m K线）
+      ema_exit_confirm_bars: 2        # EMA破位确认K线数
+
+      # === 回调判断 ===
+      deep_pullback_scale: 0.9        # 深回调仓位缩放系数
+      pullback_deep_band: 0.003       # 深回调判定带（0.3%）
+
+      # === 信号过滤 ===
+      require_both_entry_signals: 0   # 入场信号模式（0=OR, 1=AND）
+
+      # 1H RSI过滤
+      h1_rsi_long_low: 42            # 多头RSI下限
+      h1_rsi_long_high: 60           # 多头RSI上限
+      h1_rsi_short_low: 40           # 空头RSI下限
+      h1_rsi_short_high: 58          # 空头RSI上限
+
+      # 15M入场参数
+      m15_breakout_lookback: 6        # 突破结构回顾期
+      m15_rsi_bias_long: 52           # 多头RSI偏置阈值
+      m15_rsi_bias_short: 48          # 空头RSI偏置阈值
+
+      # === 风险约束 ===
+      max_consecutive_losses: 3        # 最大连续亏损次数
+      max_daily_loss_pct: 0.07        # 最大日亏损比例（7%）
+      max_drawdown_pct: 0.15          # 最大回撤比例（15%）
+      drawdown_position_scale: 0.5    # 回撤仓位缩放系数
+      max_positions: 1                 # 最大同时持仓数
 
 Strategy:
   Symbol: ETHUSDT
   Name: strategy3
-  RuntimeMode: websocket
+  RuntimeMode: kafka
 
 KlineLogDir: data/kline
 SignalLogDir: data/signal

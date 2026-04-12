@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package market;
 
-option go_package = "./market";
+option go_package = "exchange-system/common/pb/market";
 
 
 
@@ -27,12 +27,15 @@ message Kline {
   double taker_buy_quote = 17;  // 主动买入成交额
   bool is_dirty = 18;           // 数据不完整标记(有缺口/不完整)，数据层可发，策略层应禁止交易
   bool is_tradable = 19;        // 策略是否可交易(!is_dirty)，数据层设定，策略层直接判断
+  bool is_final = 20;           // 信号确定性标记：数据已通过watermark确认，指标不会再变化，策略层可安全下单
+                               // EmitWatermark模式：始终true（watermark保证数据完整性）
+                               // EmitImmediate模式：!dirty（bucket完成即发，dirty则可能被迟到数据修正）
 
   // 技术指标（由Aggregator增量计算，避免策略重复计算）
-  double ema_fast = 20;         // 快线EMA（如EMA12）
-  double ema_slow = 21;         // 慢线EMA（如EMA26）
-  double rsi = 22;              // RSI指标（如RSI14）
-  double atr = 23;              // ATR真实波动幅度（如ATR14）
+  double ema21 = 24;            // EMA21（Binance 标准快线）
+  double ema55 = 25;            // EMA55（Binance 标准慢线）
+  double rsi = 26;              // RSI指标（RSI14）
+  double atr = 27;              // ATR真实波动幅度（ATR14）
 }
 
 // 深度数据

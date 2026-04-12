@@ -9,6 +9,9 @@ import (
 	"exchange-system/app/market/rpc/internal/websocket"
 )
 
+// binanceAPIURL Binance Futures REST API 地址
+const binanceAPIURL = "https://fapi.binance.com"
+
 type ServiceContext struct {
 	Config config.Config
 
@@ -28,20 +31,20 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	}
 
 	agg := aggregator.NewKlineAggregator(aggregator.StandardIntervals, producer, c.KlineLogDir, c.WatermarkDelay, aggregator.IndicatorParams{
-		EmaFastPeriod: c.Indicators.EmaFastPeriod,
-		EmaSlowPeriod: c.Indicators.EmaSlowPeriod,
-		RsiPeriod:     c.Indicators.RsiPeriod,
-		AtrPeriod:     c.Indicators.AtrPeriod,
+		Ema21Period: c.Indicators.Ema21Period,
+		Ema55Period: c.Indicators.Ema55Period,
+		RsiPeriod:   c.Indicators.RsiPeriod,
+		AtrPeriod:   c.Indicators.AtrPeriod,
 	})
 
 	// 设置每个周期的独立指标参数（指标粒度与K线周期对齐）
 	intervalConfigs := make(map[string]aggregator.IntervalIndicatorConfig)
 	for name, cfg := range c.IntervalIndicators {
 		intervalConfigs[name] = aggregator.IntervalIndicatorConfig{
-			EmaFastPeriod: cfg.EmaFastPeriod,
-			EmaSlowPeriod: cfg.EmaSlowPeriod,
-			RsiPeriod:     cfg.RsiPeriod,
-			AtrPeriod:     cfg.AtrPeriod,
+			Ema21Period: cfg.Ema21Period,
+			Ema55Period: cfg.Ema55Period,
+			RsiPeriod:   cfg.RsiPeriod,
+			AtrPeriod:   cfg.AtrPeriod,
 		}
 	}
 	agg.SetIntervalIndicators(intervalConfigs)
@@ -73,6 +76,19 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	// 设置 watermark buffer 最大存活时间
 	agg.SetMaxWatermarkBufferAge(c.MaxWatermarkBufferAge)
 
+	// 设置 worker 空闲 GC（清理长时间无数据的 symbol worker，防内存泄漏）
+	agg.SetWorkerGC(c.WorkerGC.GCInterval, c.WorkerGC.MaxIdleTime)
+
+	// 设置历史数据预热：启动时从 Binance REST API 拉取历史K线填充 ring buffer
+	// 使 EMA/RSI/ATR 从第一根实时K线起就有正确值（而非冷启动的假值）
+	warmupper := aggregator.NewBinanceWarmupper(binanceAPIURL, c.Binance.Proxy)
+	agg.SetWarmupper(warmupper)
+	agg.SetWarmupPages(c.WarmupPages)
+
+	// 校验配置组合安全性：EmitImmediate + IndicatorClosed = 实盘未来函数风险
+	// 必须在 SetEmitMode + SetIndicatorMode 之后调用
+	agg.ValidateConfig()
+
 	wsClient := websocket.NewBinanceWebSocketClient(
 		c.Binance.WebSocketURL,
 		c.Binance.Proxy,
@@ -80,7 +96,6 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		c.Binance.Intervals,
 		producer,
 		agg,
-		c.KlineLogDir,
 	)
 
 	wsClient.StartInBackground(ctx)

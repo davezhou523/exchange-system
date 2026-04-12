@@ -1,6 +1,9 @@
 Name: market-rpc
 ListenOn: 0.0.0.0:9080
 Mode: dev
+Log:
+  Level: debug
+  Mode: file
 Kafka:
   Addrs:
     - kafka1:19092
@@ -13,6 +16,7 @@ KlineLogDir: data/kline
 
 # 水位线（watermark）：允许K线延迟到达的等待时间，类似 Flink/Spark Streaming
 # 使用交易所时间(event time)计算，非系统时间(processing time)
+# ⚠️ 建议 2~5 秒（crypto 推荐），0 = 乱序数据直接影响结果
 WatermarkDelay: 2s
 
 # watermark buffer 中 bucket 的最大存活时间，超时强制 flush（标记 dirty）
@@ -21,10 +25,10 @@ MaxWatermarkBufferAge: 5m
 
 # 指标默认参数（向后兼容，如果某周期未单独配置则使用此默认值）
 Indicators:
-  EmaFastPeriod: 12    # 快线EMA周期
-  EmaSlowPeriod: 26    # 慢线EMA周期
-  RsiPeriod: 14        # RSI周期
-  AtrPeriod: 14        # ATR周期
+  Ema21Period: 21     # EMA21（Binance 标准快线）
+  Ema55Period: 55     # EMA55（Binance 标准慢线）
+  RsiPeriod: 14       # RSI周期
+  AtrPeriod: 14       # ATR周期
 
 # 指标计算模式，控制当前K线是否参与指标计算
 # "closed"（默认）：当前K线参与计算，适合回测和收盘后下单
@@ -32,6 +36,8 @@ Indicators:
 #   - 实盘（收盘后下单）：正确
 # "previous"：只用历史K线，适合实盘未收盘提前信号
 #   - 实盘（未收盘提前信号）：更严格，无未来函数风险
+# ⚠️ 安全约束：EmitMode=immediate 时必须使用 IndicatorMode=previous
+#   否则 panic（实盘赚钱、回测爆炸的幻觉收益风险）
 IndicatorMode: closed
 
 # K线发射模式，控制 bucket 完成后的发射时机
@@ -41,6 +47,8 @@ IndicatorMode: closed
 # "immediate"：bucket 完成后立即发射，低延迟
 #   - 实盘交易信号、短周期策略（3m/5m）
 #   - 延迟 = 0，但可能因迟到数据导致 dirty 重发
+# ⚠️ 安全约束：EmitMode=immediate 时必须搭配 IndicatorMode=previous
+#   Immediate + Closed = 实盘未来函数（K线未收盘就算进指标 → 策略漂移）
 EmitMode: watermark
 
 # 延迟容忍窗口（Flink watermark + lateness 模型）
@@ -49,28 +57,53 @@ EmitMode: watermark
 # 默认 0 表示不丢弃任何迟到数据
 # AllowedLateness: 2m
 
+# Worker 空闲 GC：清理长时间无数据的 symbol worker
+# 适用于币对数量多、部分币对可能下架/停止交易的场景
+# 避免 worker 永远存在 → 内存和 goroutine 泄漏
+WorkerGC:
+  GCInterval: 5m      # GC 检查间隔（0=禁用GC）
+  MaxIdleTime: 30m    # worker 最大空闲时间，超过则清理
+
+# 预热分页数量，每页最多1500根K线（Binance API 限制）
+# 更多页 = 更多历史数据 = 递推指标更接近交易所真实值
+# 5页×1500=7500根：
+#   15m: 7500×15min ≈ 78.1天
+#   3m:  7500×3min  ≈ 15.6天
+#   1h:  7500×1h    ≈ 312.5天
+WarmupPages: 5
+
 # 每个周期独立配置指标参数（指标粒度与K线周期对齐）
 # 核心原则：15m K线的 EMA/RSI/ATR 用 15m 收盘价序列计算，而非用 1m 数据
 # 未配置的周期回退到 Indicators 默认值
 IntervalIndicators:
+  1m:
+    Ema21Period: 21
+    Ema55Period: 55
+    RsiPeriod: 14
+    AtrPeriod: 14
   3m:
-    EmaFastPeriod: 12
-    EmaSlowPeriod: 26
+    Ema21Period: 21
+    Ema55Period: 55
+    RsiPeriod: 14
+    AtrPeriod: 14
+  5m:
+    Ema21Period: 21
+    Ema55Period: 55
     RsiPeriod: 14
     AtrPeriod: 14
   15m:
-    EmaFastPeriod: 12
-    EmaSlowPeriod: 26
+    Ema21Period: 21
+    Ema55Period: 55
     RsiPeriod: 14
     AtrPeriod: 14
   1h:
-    EmaFastPeriod: 12
-    EmaSlowPeriod: 26
+    Ema21Period: 21
+    Ema55Period: 55
     RsiPeriod: 14
     AtrPeriod: 14
   4h:
-    EmaFastPeriod: 12
-    EmaSlowPeriod: 26
+    Ema21Period: 21
+    Ema55Period: 55
     RsiPeriod: 14
     AtrPeriod: 14
 

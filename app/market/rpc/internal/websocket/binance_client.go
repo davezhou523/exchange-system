@@ -7,11 +7,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"exchange-system/common/pb/market"
@@ -19,39 +16,15 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// rawKlineLogEntry mirrors the protobuf field order for deterministic JSON output.
-type rawKlineLogEntry struct {
-	Symbol         string  `json:"symbol"`
-	Interval       string  `json:"interval"`
-	OpenTime       string  `json:"openTime"`
-	Open           float64 `json:"open"`
-	High           float64 `json:"high"`
-	Low            float64 `json:"low"`
-	Close          float64 `json:"close"`
-	Volume         float64 `json:"volume"`
-	CloseTime      string  `json:"closeTime"`
-	IsClosed       bool    `json:"isClosed"`
-	EventTime      string  `json:"eventTime"`
-	FirstTradeId   int64   `json:"firstTradeId"`
-	LastTradeId    int64   `json:"lastTradeId"`
-	NumTrades      int32   `json:"numTrades"`
-	QuoteVolume    float64 `json:"quoteVolume"`
-	TakerBuyVolume float64 `json:"takerBuyVolume"`
-	TakerBuyQuote  float64 `json:"takerBuyQuote"`
-}
-
 type BinanceWebSocketClient struct {
-	baseURL      string
-	proxyURL     string
-	dialer       *websocket.Dialer
-	conn         *websocket.Conn
-	producer     KafkaProducer
-	symbols      []string
-	intervals    []string
-	aggregator   KlineAggregator
-	klineLogDir  string
-	klineLogMu   sync.Mutex
-	klineLogDate map[string]*os.File // "2006-01-02" -> file
+	baseURL    string
+	proxyURL   string
+	dialer     *websocket.Dialer
+	conn       *websocket.Conn
+	producer   KafkaProducer
+	symbols    []string
+	intervals  []string
+	aggregator KlineAggregator
 }
 
 type KlineAggregator interface {
@@ -134,7 +107,7 @@ type StreamEnvelope struct {
 	} `json:"data"`
 }
 
-func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []string, producer KafkaProducer, aggregator KlineAggregator, klineLogDir string) *BinanceWebSocketClient {
+func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []string, producer KafkaProducer, aggregator KlineAggregator) *BinanceWebSocketClient {
 	dialer := &websocket.Dialer{
 		HandshakeTimeout: 15 * time.Second,
 	}
@@ -150,15 +123,13 @@ func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []st
 	}
 
 	return &BinanceWebSocketClient{
-		baseURL:      baseURL,
-		proxyURL:     proxyURL,
-		dialer:       dialer,
-		producer:     producer,
-		symbols:      symbols,
-		intervals:    intervals,
-		aggregator:   aggregator,
-		klineLogDir:  klineLogDir,
-		klineLogDate: make(map[string]*os.File),
+		baseURL:    baseURL,
+		proxyURL:   proxyURL,
+		dialer:     dialer,
+		producer:   producer,
+		symbols:    symbols,
+		intervals:  intervals,
+		aggregator: aggregator,
 	}
 }
 
@@ -289,7 +260,8 @@ func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []by
 			log.Printf("[%s kline] %s | %s-%s | O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f QV=%.4f trades=%d closed=%v",
 				k.Interval, k.Symbol, openTime, closeTime, k.Open, k.High, k.Low, k.Close, k.Volume, k.QuoteVolume, k.NumTrades, k.IsClosed)
 
-			c.writeKlineLog(&k)
+			// 不再写入根级别日志（klineLogDir/SYMBOL/YYYY-MM-DD.jsonl）
+			// 1m K线经 aggregator 指标计算后会写入 klineLogDir/SYMBOL/1m/YYYY-MM-DD.jsonl，避免重复
 
 			if err := c.producer.SendMarketData(ctx, &k); err != nil {
 				return fmt.Errorf("failed to send kline to Kafka: %v", err)
@@ -304,93 +276,8 @@ func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []by
 }
 
 func (c *BinanceWebSocketClient) Close() error {
-	c.klineLogMu.Lock()
-	for _, f := range c.klineLogDate {
-		_ = f.Close()
-	}
-	c.klineLogDate = nil
-	c.klineLogMu.Unlock()
-
 	if c.conn != nil {
 		return c.conn.Close()
 	}
 	return nil
-}
-
-// formatFloat formats a float64 to string with 2 decimal places.
-func formatFloat(f float64) float64 {
-	return float64(int64(f*100+0.5)) / 100
-}
-
-// writeKlineLog appends a closed 1m kline as JSON line to a daily log file.
-// Format: data/kline/ETHUSDT/2026-04-11.jsonl
-func (c *BinanceWebSocketClient) writeKlineLog(k *market.Kline) {
-	if c.klineLogDir == "" || k.Interval != "1m" {
-		return
-	}
-
-	// Round float fields to 2 decimal places for cleaner logs
-	k.Volume = formatFloat(k.Volume)
-	k.QuoteVolume = formatFloat(k.QuoteVolume)
-	k.TakerBuyVolume = formatFloat(k.TakerBuyVolume)
-	k.TakerBuyQuote = formatFloat(k.TakerBuyQuote)
-	k.Open = formatFloat(k.Open)
-	k.High = formatFloat(k.High)
-	k.Low = formatFloat(k.Low)
-	k.Close = formatFloat(k.Close)
-
-	dateStr := time.UnixMilli(k.CloseTime).Format("2006-01-02")
-	dir := filepath.Join(c.klineLogDir, k.Symbol)
-
-	c.klineLogMu.Lock()
-	defer c.klineLogMu.Unlock()
-
-	if c.klineLogDate == nil {
-		return
-	}
-
-	key := k.Symbol + "/" + dateStr
-	f, ok := c.klineLogDate[key]
-	if !ok {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			log.Printf("[kline-log] failed to create dir %s: %v", dir, err)
-			return
-		}
-		path := filepath.Join(dir, dateStr+".jsonl")
-		var err error
-		f, err = os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-		if err != nil {
-			log.Printf("[kline-log] failed to open %s: %v", path, err)
-			return
-		}
-		c.klineLogDate[key] = f
-	}
-
-	entry := rawKlineLogEntry{
-		Symbol:         k.Symbol,
-		Interval:       k.Interval,
-		OpenTime:       time.UnixMilli(k.OpenTime).UTC().Format("2006-01-02T15:04:05.000Z"),
-		Open:           k.Open,
-		High:           k.High,
-		Low:            k.Low,
-		Close:          k.Close,
-		Volume:         k.Volume,
-		CloseTime:      time.UnixMilli(k.CloseTime).UTC().Format("2006-01-02T15:04:05.000Z"),
-		IsClosed:       k.IsClosed,
-		EventTime:      time.UnixMilli(k.EventTime).UTC().Format("2006-01-02T15:04:05.000Z"),
-		FirstTradeId:   k.FirstTradeId,
-		LastTradeId:    k.LastTradeId,
-		NumTrades:      k.NumTrades,
-		QuoteVolume:    k.QuoteVolume,
-		TakerBuyVolume: k.TakerBuyVolume,
-		TakerBuyQuote:  k.TakerBuyQuote,
-	}
-	data, err := json.Marshal(entry)
-	if err != nil {
-		log.Printf("[kline-log] marshal failed: %v", err)
-		return
-	}
-	if _, err := f.Write(append(data, '\n')); err != nil {
-		log.Printf("[kline-log] write failed: %v", err)
-	}
 }

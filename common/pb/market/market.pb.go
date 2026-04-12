@@ -43,11 +43,12 @@ type Kline struct {
 	TakerBuyQuote  float64                `protobuf:"fixed64,17,opt,name=taker_buy_quote,json=takerBuyQuote,proto3" json:"taker_buy_quote,omitempty"`    // 主动买入成交额
 	IsDirty        bool                   `protobuf:"varint,18,opt,name=is_dirty,json=isDirty,proto3" json:"is_dirty,omitempty"`                         // 数据不完整标记(有缺口/不完整)，数据层可发，策略层应禁止交易
 	IsTradable     bool                   `protobuf:"varint,19,opt,name=is_tradable,json=isTradable,proto3" json:"is_tradable,omitempty"`                // 策略是否可交易(!is_dirty)，数据层设定，策略层直接判断
+	IsFinal        bool                   `protobuf:"varint,20,opt,name=is_final,json=isFinal,proto3" json:"is_final,omitempty"`                         // 信号确定性标记：数据已通过watermark确认，指标不会再变化，策略层可安全下单
 	// 技术指标（由Aggregator增量计算，避免策略重复计算）
-	EmaFast       float64 `protobuf:"fixed64,20,opt,name=ema_fast,json=emaFast,proto3" json:"ema_fast,omitempty"` // 快线EMA（如EMA12）
-	EmaSlow       float64 `protobuf:"fixed64,21,opt,name=ema_slow,json=emaSlow,proto3" json:"ema_slow,omitempty"` // 慢线EMA（如EMA26）
-	Rsi           float64 `protobuf:"fixed64,22,opt,name=rsi,proto3" json:"rsi,omitempty"`                        // RSI指标（如RSI14）
-	Atr           float64 `protobuf:"fixed64,23,opt,name=atr,proto3" json:"atr,omitempty"`                        // ATR真实波动幅度（如ATR14）
+	Ema21         float64 `protobuf:"fixed64,24,opt,name=ema21,proto3" json:"ema21,omitempty"` // EMA21（Binance 标准快线）
+	Ema55         float64 `protobuf:"fixed64,25,opt,name=ema55,proto3" json:"ema55,omitempty"` // EMA55（Binance 标准慢线）
+	Rsi           float64 `protobuf:"fixed64,26,opt,name=rsi,proto3" json:"rsi,omitempty"`     // RSI指标（RSI14）
+	Atr           float64 `protobuf:"fixed64,27,opt,name=atr,proto3" json:"atr,omitempty"`     // ATR真实波动幅度（ATR14）
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -215,16 +216,23 @@ func (x *Kline) GetIsTradable() bool {
 	return false
 }
 
-func (x *Kline) GetEmaFast() float64 {
+func (x *Kline) GetIsFinal() bool {
 	if x != nil {
-		return x.EmaFast
+		return x.IsFinal
+	}
+	return false
+}
+
+func (x *Kline) GetEma21() float64 {
+	if x != nil {
+		return x.Ema21
 	}
 	return 0
 }
 
-func (x *Kline) GetEmaSlow() float64 {
+func (x *Kline) GetEma55() float64 {
 	if x != nil {
-		return x.EmaSlow
+		return x.Ema55
 	}
 	return 0
 }
@@ -620,7 +628,7 @@ var File_common_proto_market_proto protoreflect.FileDescriptor
 
 const file_common_proto_market_proto_rawDesc = "" +
 	"\n" +
-	"\x19common/proto/market.proto\x12\x06market\"\x8f\x05\n" +
+	"\x19common/proto/market.proto\x12\x06market\"\xa0\x05\n" +
 	"\x05Kline\x12\x16\n" +
 	"\x06symbol\x18\x01 \x01(\tR\x06symbol\x12\x1a\n" +
 	"\binterval\x18\x02 \x01(\tR\binterval\x12\x1b\n" +
@@ -646,10 +654,11 @@ const file_common_proto_market_proto_rawDesc = "" +
 	"\bis_dirty\x18\x12 \x01(\bR\aisDirty\x12\x1f\n" +
 	"\vis_tradable\x18\x13 \x01(\bR\n" +
 	"isTradable\x12\x19\n" +
-	"\bema_fast\x18\x14 \x01(\x01R\aemaFast\x12\x19\n" +
-	"\bema_slow\x18\x15 \x01(\x01R\aemaSlow\x12\x10\n" +
-	"\x03rsi\x18\x16 \x01(\x01R\x03rsi\x12\x10\n" +
-	"\x03atr\x18\x17 \x01(\x01R\x03atr\"\x8b\x01\n" +
+	"\bis_final\x18\x14 \x01(\bR\aisFinal\x12\x14\n" +
+	"\x05ema21\x18\x18 \x01(\x01R\x05ema21\x12\x14\n" +
+	"\x05ema55\x18\x19 \x01(\x01R\x05ema55\x12\x10\n" +
+	"\x03rsi\x18\x1a \x01(\x01R\x03rsi\x12\x10\n" +
+	"\x03atr\x18\x1b \x01(\x01R\x03atr\"\x8b\x01\n" +
 	"\x05Depth\x12\x16\n" +
 	"\x06symbol\x18\x01 \x01(\tR\x06symbol\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12%\n" +
@@ -677,8 +686,7 @@ const file_common_proto_market_proto_rawDesc = "" +
 	"\asymbols\x18\x01 \x03(\tR\asymbols\x12\x14\n" +
 	"\x05types\x18\x02 \x03(\tR\x05types2R\n" +
 	"\rMarketService\x12A\n" +
-	"\x10StreamMarketData\x12\x15.market.StreamRequest\x1a\x12.market.MarketData\"\x000\x01B\n" +
-	"Z\b./marketb\x06proto3"
+	"\x10StreamMarketData\x12\x15.market.StreamRequest\x1a\x12.market.MarketData\"\x000\x01B\"Z exchange-system/common/pb/marketb\x06proto3"
 
 var (
 	file_common_proto_market_proto_rawDescOnce sync.Once
