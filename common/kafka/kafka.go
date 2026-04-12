@@ -198,6 +198,34 @@ func ShouldRetryConsumeErr(err error) bool {
 	if strings.Contains(msg, "leader") && strings.Contains(msg, "election") {
 		return true
 	}
+	// 网络断连/DNS解析失败/broker断连 均视为临时错误，可重试
+	if strings.Contains(msg, "unreachable network") {
+		return true
+	}
+	if strings.Contains(msg, "getaddrinfow") || strings.Contains(msg, "getaddrinfo") {
+		return true
+	}
+	if strings.Contains(msg, "broker not connected") {
+		return true
+	}
+	if strings.Contains(msg, "wsarecv") || strings.Contains(msg, "wsasend") {
+		return true
+	}
+	if strings.Contains(msg, "connection refused") {
+		return true
+	}
+	if strings.Contains(msg, "no such host") {
+		return true
+	}
+	if strings.Contains(msg, "i/o timeout") {
+		return true
+	}
+	if strings.Contains(msg, "broken pipe") {
+		return true
+	}
+	if strings.Contains(msg, "connection reset") {
+		return true
+	}
 	return false
 }
 

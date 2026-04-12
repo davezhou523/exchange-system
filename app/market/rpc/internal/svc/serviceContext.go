@@ -27,7 +27,51 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		return nil, err
 	}
 
-	agg := aggregator.NewKlineAggregator(aggregator.StandardIntervals, producer, c.KlineLogDir)
+	agg := aggregator.NewKlineAggregator(aggregator.StandardIntervals, producer, c.KlineLogDir, c.WatermarkDelay, aggregator.IndicatorParams{
+		EmaFastPeriod: c.Indicators.EmaFastPeriod,
+		EmaSlowPeriod: c.Indicators.EmaSlowPeriod,
+		RsiPeriod:     c.Indicators.RsiPeriod,
+		AtrPeriod:     c.Indicators.AtrPeriod,
+	})
+
+	// 设置每个周期的独立指标参数（指标粒度与K线周期对齐）
+	intervalConfigs := make(map[string]aggregator.IntervalIndicatorConfig)
+	for name, cfg := range c.IntervalIndicators {
+		intervalConfigs[name] = aggregator.IntervalIndicatorConfig{
+			EmaFastPeriod: cfg.EmaFastPeriod,
+			EmaSlowPeriod: cfg.EmaSlowPeriod,
+			RsiPeriod:     cfg.RsiPeriod,
+			AtrPeriod:     cfg.AtrPeriod,
+		}
+	}
+	agg.SetIntervalIndicators(intervalConfigs)
+
+	// 设置指标计算模式
+	// "closed"：当前K线参与计算（默认，适合回测和收盘后下单）
+	// "previous"：只用历史K线（适合实盘未收盘提前信号）
+	switch c.IndicatorMode {
+	case "previous":
+		agg.SetIndicatorMode(aggregator.IndicatorPrevious)
+	default:
+		agg.SetIndicatorMode(aggregator.IndicatorClosed)
+	}
+
+	// 设置 K 线发射模式
+	// "watermark"：watermark 确认后才发射（默认，保证数据完整性）
+	// "immediate"：bucket 完成后立即发射（低延迟，适合交易信号）
+	switch c.EmitMode {
+	case "immediate":
+		agg.SetEmitMode(aggregator.EmitImmediate)
+	default:
+		agg.SetEmitMode(aggregator.EmitWatermark)
+	}
+
+	// 设置延迟容忍窗口（Flink watermark + lateness 模型）
+	// 超过 watermark + allowedLateness 的迟到数据将被丢弃
+	agg.SetAllowedLateness(c.AllowedLateness)
+
+	// 设置 watermark buffer 最大存活时间
+	agg.SetMaxWatermarkBufferAge(c.MaxWatermarkBufferAge)
 
 	wsClient := websocket.NewBinanceWebSocketClient(
 		c.Binance.WebSocketURL,

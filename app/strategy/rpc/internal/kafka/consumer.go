@@ -93,12 +93,22 @@ func (c *Consumer) StartConsuming(ctx context.Context, handler MarketDataHandler
 					if sleep < 2*time.Second {
 						sleep = 2 * time.Second
 					}
+					log.Printf("kafka consume retry group=%s topic=%s attempt=%d sleep=%v", c.groupID, c.topic, attempt, sleep)
 					time.Sleep(sleep)
 					if attempt < 8 {
 						attempt++
 					}
 				} else {
-					time.Sleep(500 * time.Millisecond)
+					// 非临时错误也做指数退避，避免疯狂重试打日志
+					sleep := commonkafka.RetryBackoff(attempt)
+					if sleep < 3*time.Second {
+						sleep = 3 * time.Second
+					}
+					log.Printf("kafka consume non-retryable error, backing off group=%s topic=%s attempt=%d sleep=%v", c.groupID, c.topic, attempt, sleep)
+					time.Sleep(sleep)
+					if attempt < 8 {
+						attempt++
+					}
 				}
 				continue
 			}
@@ -201,6 +211,10 @@ type klineLogEntry struct {
 	TakerBuyQuote  float64 `json:"takerBuyQuote"`
 	IsDirty        bool    `json:"isDirty"`
 	IsTradable     bool    `json:"isTradable"`
+	EmaFast        float64 `json:"emaFast"`
+	EmaSlow        float64 `json:"emaSlow"`
+	Rsi            float64 `json:"rsi"`
+	Atr            float64 `json:"atr"`
 }
 
 // formatFloat formats a float64 to 2 decimal places.
@@ -224,6 +238,10 @@ func (c *Consumer) writeKlineLog(k *market.Kline) {
 	k.High = formatFloat(k.High)
 	k.Low = formatFloat(k.Low)
 	k.Close = formatFloat(k.Close)
+	k.EmaFast = formatFloat(k.EmaFast)
+	k.EmaSlow = formatFloat(k.EmaSlow)
+	k.Rsi = formatFloat(k.Rsi)
+	k.Atr = formatFloat(k.Atr)
 
 	dateStr := time.UnixMilli(k.CloseTime).UTC().Format("2006-01-02")
 	dir := filepath.Join(c.klineLogDir, k.Symbol, k.Interval)
@@ -272,6 +290,10 @@ func (c *Consumer) writeKlineLog(k *market.Kline) {
 		TakerBuyQuote:  k.TakerBuyQuote,
 		IsDirty:        k.IsDirty,
 		IsTradable:     k.IsTradable,
+		EmaFast:        k.EmaFast,
+		EmaSlow:        k.EmaSlow,
+		Rsi:            k.Rsi,
+		Atr:            k.Atr,
 	}
 	data, err := json.Marshal(entry)
 	if err != nil {
