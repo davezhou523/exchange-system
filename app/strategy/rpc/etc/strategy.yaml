@@ -57,6 +57,15 @@ Strategies:
       debug_skip_pullback: 1          # 跳过1H回调条件（0=不跳过, 1=跳过）
       debug_skip_15m_entry: 1         # 跳过15M入场信号（0=不跳过, 1=直接生成入场信号）
 
+      # === 1m信号模式 ===
+      signal_mode: 1                  # 信号模式（0=15m默认, 1=1m分钟周期）
+      1m_atr_multiplier: 1.5          # 1m 止损ATR倍数
+      1m_breakout_lookback: 20        # 1m 突破结构回顾期
+      1m_rsi_bias_long: 55            # 1m 多头RSI偏置阈值
+      1m_rsi_bias_short: 45           # 1m 空头RSI偏置阈值
+      1m_min_holding_bars: 5          # 1m 最小持仓K线数
+      1m_ema_exit_buffer_atr: 0.30    # 1m EMA破位缓冲ATR倍数
+
       # === 风险约束（放宽）===
       max_consecutive_losses: 10       # 最大连续亏损次数（放宽：3→10）
       max_daily_loss_pct: 0.50        # 最大日亏损比例（放宽：7%→50%）

@@ -11,6 +11,7 @@ type Config struct {
 		Topics struct {
 			Signal string // 消费的策略信号 topic
 			Order  string // 生产的订单结果 topic
+			Kline  string // 消费的1m K线 topic（1m撮合模式下使用）
 		}
 	}
 
@@ -75,6 +76,7 @@ type SimulatedConfig struct {
 	CommissionRate  float64 // 手续费率
 	CommissionAsset string  // 手续费资产
 	FillDelayMs     int64   // 成交延迟毫秒
+	MatchMode       string  // 撮合模式: "instant"=即时成交 | "1m"=1m K线驱动撮合
 }
 
 // RiskConfig 风控配置

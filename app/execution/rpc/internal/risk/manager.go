@@ -104,10 +104,11 @@ func (m *Manager) CheckPreOrder(account *exchange.AccountResult, symbol, side st
 		return result
 	}
 
-	// 1. 仓位大小检查：下单金额 ≤ MaxPositionSize × 余额
+	// 1. 仓位大小检查：下单金额 ≤ MaxPositionSize × 余额（容差0.1%，避免浮点精度边界拒绝）
 	notional := quantity * price
 	positionLimit := balance * m.config.MaxPositionSize
-	if notional > positionLimit {
+	tolerance := positionLimit * 0.001 // 0.1% 容差
+	if notional > positionLimit+tolerance {
 		result.Fail(fmt.Sprintf("仓位超限: %.2f > %.2f (余额%.2f × %.0f%%)",
 			notional, positionLimit, balance, m.config.MaxPositionSize*100))
 	}

@@ -84,11 +84,13 @@ type TrendFollowingStrategy struct {
 	klines4h  []klineSnapshot
 	klines1h  []klineSnapshot
 	klines15m []klineSnapshot
+	klines1m  []klineSnapshot // 1m K线历史（1m信号模式下使用）
 
 	// 最新指标快照（每个周期只需保留最新的，由 OnKline 更新）
 	latest4h  klineSnapshot
 	latest1h  klineSnapshot
 	latest15m klineSnapshot
+	latest1m  klineSnapshot // 最新1m K线快照
 
 	// 持仓状态
 	pos position
@@ -178,6 +180,18 @@ const (
 
 	// 权益（简化：使用固定值，实际应从账户查询）
 	paramEquity = "equity"
+
+	// 1m信号模式参数
+	paramSignalMode         = "signal_mode"            // 信号模式: 0=15m(默认) | 1=1m分钟周期
+	param1mRsiPeriod        = "1m_rsi_period"          // 1m RSI周期（默认14）
+	param1mAtrMult          = "1m_atr_multiplier"      // 1m 止损ATR倍数（默认1.5）
+	param1mBreakoutLookback = "1m_breakout_lookback"   // 1m 突破回顾期（默认20）
+	param1mRsiOverbought    = "1m_rsi_overbought"      // 1m RSI超买阈值（默认70）
+	param1mRsiOversold      = "1m_rsi_oversold"        // 1m RSI超卖阈值（默认30）
+	param1mRsiBiasLong      = "1m_rsi_bias_long"       // 1m 多头RSI偏置（默认55）
+	param1mRsiBiasShort     = "1m_rsi_bias_short"      // 1m 空头RSI偏置（默认45）
+	param1mMinHoldingBars   = "1m_min_holding_bars"    // 1m 最小持仓K线数（默认5）
+	param1mEmaExitBufferATR = "1m_ema_exit_buffer_atr" // 1m EMA破位缓冲ATR倍数（默认0.3）
 )
 
 // ---------------------------------------------------------------------------
@@ -188,7 +202,9 @@ const (
 //
 // 处理流程：
 //  1. 更新对应周期的K线历史和指标快照
-//  2. 仅在 15m K线到达时执行策略判断（15m 是入场周期）
+//  2. 根据信号模式（signal_mode）决定触发周期：
+//     - 15m模式（默认）：仅在15m K线到达时执行策略判断
+//     - 1m模式：在1m K线到达时执行策略判断，用1m级别的价格和指标驱动入场/出场
 //  3. 先检查出场条件（持仓时），再检查入场条件（空仓时）
 func (s *TrendFollowingStrategy) OnKline(ctx context.Context, k *marketpb.Kline) error {
 	if k == nil || k.Symbol != s.symbol || !k.IsClosed {
@@ -230,12 +246,37 @@ func (s *TrendFollowingStrategy) OnKline(ctx context.Context, k *marketpb.Kline)
 		if len(s.klines15m) > 20 {
 			s.klines15m = s.klines15m[len(s.klines15m)-20:]
 		}
+	case "1m":
+		s.latest1m = snap
+		s.klines1m = append(s.klines1m, snap)
+		if len(s.klines1m) > 120 {
+			s.klines1m = s.klines1m[len(s.klines1m)-120:]
+		}
 	default:
 		return nil // 忽略其他周期
 	}
 
-	// 仅在 15m K线到达时执行策略判断
-	// 4h/1h K线仅用于更新指标快照，供15m入场时读取
+	// 判断信号模式：0=15m(默认) | 1=1m
+	signalMode := int(s.getParam(paramSignalMode, 0))
+
+	if signalMode == 1 {
+		// 1m信号模式：仅在1m K线到达时执行策略判断
+		if k.Interval != "1m" {
+			return nil
+		}
+		// isFinal 守卫：仅在 watermark 确认后的K线上交易
+		if !k.IsFinal {
+			return nil
+		}
+		// 持仓时 → 检查出场条件；空仓时 → 检查入场条件
+		if s.pos.side != sideNone {
+			return s.checkExitConditions1m(ctx, k)
+		}
+		return s.checkEntryConditions1m(ctx, k)
+	}
+
+	// 15m信号模式（默认）：仅在15m K线到达时执行策略判断
+	// 4h/1h/1m K线仅用于更新指标快照，供15m入场时读取
 	if k.Interval != "15m" {
 		return nil
 	}
@@ -980,6 +1021,18 @@ func (s *TrendFollowingStrategy) updateRiskState(pnl float64) {
 // 信号发送与日志
 // ---------------------------------------------------------------------------
 
+// fmtFloatOrNA 将 interface{} 格式化为浮点数字符串，nil 或零值时显示 "N/A"
+func fmtFloatOrNA(v interface{}) string {
+	if v == nil {
+		return "N/A"
+	}
+	f, ok := v.(float64)
+	if !ok {
+		return "N/A"
+	}
+	return fmt.Sprintf("%.2f", f)
+}
+
 // sendSignal 发送交易信号到 Kafka signal topic，并写入本地日志
 func (s *TrendFollowingStrategy) sendSignal(ctx context.Context, signal map[string]interface{}, k *marketpb.Kline) error {
 	action, _ := signal["action"].(string)
@@ -997,10 +1050,10 @@ func (s *TrendFollowingStrategy) sendSignal(ctx context.Context, signal map[stri
 
 	indicatorsStr := ""
 	if indicators != nil {
-		indicatorsStr = fmt.Sprintf("4H:EMA21=%.2f EMA55=%.2f | 1H:EMA21=%.2f RSI=%.2f | 15M:RSI=%.2f ATR=%.2f",
-			indicators["h4_ema21"], indicators["h4_ema55"],
-			indicators["h1_ema21"], indicators["h1_rsi"],
-			indicators["m15_rsi"], indicators["m15_atr"])
+		indicatorsStr = fmt.Sprintf("4H:EMA21=%s EMA55=%s | 1H:EMA21=%s RSI=%s | 15M:RSI=%s ATR=%s",
+			fmtFloatOrNA(indicators["h4_ema21"]), fmtFloatOrNA(indicators["h4_ema55"]),
+			fmtFloatOrNA(indicators["h1_ema21"]), fmtFloatOrNA(indicators["h1_rsi"]),
+			fmtFloatOrNA(indicators["m15_rsi"]), fmtFloatOrNA(indicators["m15_atr"]))
 	}
 
 	log.Printf("[策略信号] %s %s %s | 方向=%s | 价格=%.2f | 数量=%.4f | 止损=%.2f | 止盈=%s | %s | %s",
@@ -1127,4 +1180,459 @@ func (s *TrendFollowingStrategy) writeSignalLog(signal map[string]interface{}, k
 // round2 四舍五入保留2位小数
 func round2(v float64) float64 {
 	return math.Round(v*100) / 100
+}
+
+// ---------------------------------------------------------------------------
+// 1m分钟周期信号模式
+//
+// 使用1m K线作为入场/出场周期，利用1m级别的价格波动和指标生成交易信号。
+// 与15m模式相比，1m模式信号更频繁、响应更快，适合模拟测试和1m撮合引擎配合使用。
+//
+// 入场逻辑：
+//   1. 风控检查（连亏/日亏损限制）
+//   2. 方向判断：基于1m RSI + 15m/1h趋势确认
+//   3. 入场信号：1m结构突破 或 RSI穿越 + 偏置
+//   4. 止损止盈：ATR × N 动态计算
+//
+// 出场逻辑：
+//   1. 止损检查
+//   2. 止盈检查（TP1移动止损 / TP2全平）
+//   3. EMA破位出场（持仓≥N根1m K线后检查）
+// ---------------------------------------------------------------------------
+
+// checkEntryConditions1m 1m模式入场条件检查
+//
+// 入场流程：
+//  1. 风控限制检查
+//  2. 方向判断：
+//     - 调试模式：直接用1m RSI判断
+//     - 正常模式：4H趋势 → 1H回调 → 1M入场信号
+//  3. 计算仓位、止损、止盈
+//  4. 发送开仓信号
+func (s *TrendFollowingStrategy) checkEntryConditions1m(ctx context.Context, k *marketpb.Kline) error {
+	// 风控检查
+	if !s.checkRiskLimits() {
+		return nil
+	}
+
+	// 读取1m K线快照
+	m1 := s.latest1m
+	if m1.Atr == 0 {
+		log.Printf("[策略1m] %s 1m指标未就绪（ATR=0），跳过入场", s.symbol)
+		return nil
+	}
+
+	// 调试模式参数
+	skip4H := s.getParam(paramDebugSkip4HTrend, 0) > 0
+	skipPullback := s.getParam(paramDebugSkipPullback, 0) > 0
+	skip1mEntry := s.getParam(paramDebugSkip15MEntry, 0) > 0
+
+	if skip4H && skipPullback {
+		// 调试模式：跳过4H和1H，直接用1m RSI判断方向
+		var trend trendDirection
+		var pullback pullbackResult
+		var entry entrySignal
+
+		if m1.Rsi < 50 {
+			trend = trendShort
+			pullback = pullbackShort
+			entry = entryShort
+		} else {
+			trend = trendLong
+			pullback = pullbackLong
+			entry = entryLong
+		}
+
+		log.Printf("[策略1m] %s 快速调试模式 | RSI=%.2f → trend=%v pullback=%v entry=%v ATR=%.2f",
+			s.symbol, m1.Rsi, trend, pullback, entry, m1.Atr)
+
+		// 如果不跳过1m入场信号判断，则走正常1m入场判断
+		if !skip1mEntry {
+			entry = s.judge1MEntry(pullback)
+			if entry == entryNone {
+				return nil
+			}
+		}
+
+		return s.openPosition1m(ctx, k, trend, pullback, entry, m1)
+	}
+
+	// ========== 正常三层过滤逻辑（1m级别） ==========
+
+	// 第1层：4H趋势判断
+	if s.latest4h.Ema21 == 0 || s.latest4h.Ema55 == 0 {
+		log.Printf("[策略1m] %s 4H指标未就绪，跳过入场", s.symbol)
+		return nil
+	}
+	trend := s.judge4HTrend()
+	if trend == trendNone {
+		return nil
+	}
+
+	// 第2层：1H回调确认
+	if s.latest1h.Ema21 == 0 || s.latest1h.Ema55 == 0 {
+		log.Printf("[策略1m] %s 1H指标未就绪，跳过入场", s.symbol)
+		return nil
+	}
+	pullback := s.judge1HPullback(trend)
+	if pullback == pullbackNone {
+		return nil
+	}
+
+	// 第3层：1m入场信号
+	entry := s.judge1MEntry(pullback)
+	if entry == entryNone {
+		return nil
+	}
+
+	return s.openPosition1m(ctx, k, trend, pullback, entry, m1)
+}
+
+// judge1MEntry 判断1分钟入场信号
+//
+// 入场条件（OR模式默认）：
+//   - 结构突破：1m收盘价突破近N根K线的高低点
+//   - RSI信号：RSI穿越50中线 或 达到偏置阈值
+//
+// 多头入场：
+//   - 结构突破：1m收盘价 > 近期高点
+//   - RSI信号：RSI穿越50向上 或 RSI ≥ 多头偏置阈值
+//
+// 空头入场：
+//   - 结构突破：1m收盘价 < 近期低点
+//   - RSI信号：RSI穿越50向下 或 RSI ≤ 空头偏置阈值
+func (s *TrendFollowingStrategy) judge1MEntry(pullback pullbackResult) entrySignal {
+	m1 := s.latest1m
+	if m1.Rsi == 0 || m1.Atr == 0 {
+		return entryNone
+	}
+
+	lookback := int(s.getParam(param1mBreakoutLookback, 20))
+	rsiBiasLong := s.getParam(param1mRsiBiasLong, 55)
+	rsiBiasShort := s.getParam(param1mRsiBiasShort, 45)
+	requireBoth := s.getParam(paramRequireBothSignals, 0) > 0
+
+	// 计算近期高低点（排除当前K线）
+	var recentHigh, recentLow float64
+	if len(s.klines1m) > 1 {
+		start := len(s.klines1m) - 1 - lookback
+		if start < 0 {
+			start = 0
+		}
+		recentHigh = s.klines1m[start].High
+		recentLow = s.klines1m[start].Low
+		for i := start + 1; i < len(s.klines1m)-1; i++ {
+			if s.klines1m[i].High > recentHigh {
+				recentHigh = s.klines1m[i].High
+			}
+			if s.klines1m[i].Low < recentLow {
+				recentLow = s.klines1m[i].Low
+			}
+		}
+	} else {
+		return entryNone // 数据不足
+	}
+
+	// 前一根K线的RSI
+	var prevRsi float64
+	if len(s.klines1m) >= 2 {
+		prevRsi = s.klines1m[len(s.klines1m)-2].Rsi
+	}
+
+	if pullback == pullbackLong {
+		// 多头入场信号
+		breakoutUp := m1.Close > recentHigh      // 结构突破
+		rsiCross := m1.Rsi > 50 && prevRsi <= 50 // RSI穿越50向上
+		rsiBias := m1.Rsi >= rsiBiasLong         // RSI偏置
+
+		structureSignal := breakoutUp
+		rsiSignal := rsiCross || rsiBias
+
+		if requireBoth {
+			if structureSignal && rsiSignal {
+				return entryLong
+			}
+		} else {
+			if structureSignal || rsiSignal {
+				return entryLong
+			}
+		}
+	} else if pullback == pullbackShort {
+		// 空头入场信号
+		breakoutDown := m1.Close < recentLow     // 结构突破
+		rsiCross := m1.Rsi < 50 && prevRsi >= 50 // RSI穿越50向下
+		rsiBias := m1.Rsi <= rsiBiasShort        // RSI偏置
+
+		structureSignal := breakoutDown
+		rsiSignal := rsiCross || rsiBias
+
+		if requireBoth {
+			if structureSignal && rsiSignal {
+				return entryShort
+			}
+		} else {
+			if structureSignal || rsiSignal {
+				return entryShort
+			}
+		}
+	}
+
+	return entryNone
+}
+
+// openPosition1m 1m模式开仓：计算止损止盈并发送入场信号
+func (s *TrendFollowingStrategy) openPosition1m(ctx context.Context, k *marketpb.Kline, trend trendDirection, pullback pullbackResult, entry entrySignal, m1 klineSnapshot) error {
+	atrMult := s.getParam(param1mAtrMult, 1.5)
+	stopDist := atrMult * m1.Atr
+
+	var action, side string
+	var stopLoss, tp1, tp2 float64
+
+	if entry == entryLong {
+		action = "BUY"
+		side = "LONG"
+		stopLoss = m1.Close - stopDist
+		tp1 = m1.Close + stopDist   // 1.5×ATR
+		tp2 = m1.Close + 2*stopDist // 3×ATR
+	} else {
+		action = "SELL"
+		side = "SHORT"
+		stopLoss = m1.Close + stopDist
+		tp1 = m1.Close - stopDist   // 1.5×ATR
+		tp2 = m1.Close - 2*stopDist // 3×ATR
+	}
+
+	// 仓位计算
+	quantity := s.calculatePositionSize(m1.Close, stopLoss)
+
+	// 深回调缩放
+	if s.isDeepPullback() {
+		scale := s.getParam(paramDeepPullbackScale, 0.9)
+		quantity *= scale
+	}
+
+	// 构建入场原因
+	reason := s.buildEntryReason1m(trend, pullback, entry, m1, stopLoss, tp1, tp2)
+
+	// 记录持仓
+	s.pos = position{
+		side:         sideLong,
+		entryPrice:   m1.Close,
+		stopLoss:     stopLoss,
+		takeProfit1:  tp1,
+		takeProfit2:  tp2,
+		entryBarTime: m1.OpenTime,
+		atr:          m1.Atr,
+		hitTP1:       false,
+	}
+	if entry == entryShort {
+		s.pos.side = sideShort
+	}
+
+	// 计算风险收益比
+	riskReward := 0.0
+	tpStopDist := math.Abs(m1.Close - stopLoss)
+	if tpStopDist > 0 {
+		riskReward = math.Abs(tp1-m1.Close) / tpStopDist
+	}
+
+	// 发送开仓信号
+	signal := map[string]interface{}{
+		"strategy_id":  fmt.Sprintf("trend-following-1m-%s", s.symbol),
+		"symbol":       s.symbol,
+		"interval":     "1m",
+		"action":       action,
+		"side":         side,
+		"signal_type":  "OPEN",
+		"quantity":     quantity,
+		"entry_price":  m1.Close,
+		"stop_loss":    stopLoss,
+		"take_profits": []float64{tp1, tp2},
+		"reason":       reason,
+		"timestamp":    time.Now().UnixMilli(),
+		"atr":          m1.Atr,
+		"risk_reward":  riskReward,
+		"indicators": map[string]interface{}{
+			"h4_ema21":  s.latest4h.Ema21,
+			"h4_ema55":  s.latest4h.Ema55,
+			"h1_ema21":  s.latest1h.Ema21,
+			"h1_ema55":  s.latest1h.Ema55,
+			"h1_rsi":    s.latest1h.Rsi,
+			"m15_ema21": s.latest15m.Ema21,
+			"m15_rsi":   s.latest15m.Rsi,
+			"m15_atr":   s.latest15m.Atr,
+			"m1_ema21":  m1.Ema21,
+			"m1_rsi":    m1.Rsi,
+			"m1_atr":    m1.Atr,
+		},
+	}
+
+	log.Printf("[策略1m入场] %s %s | 价格=%.2f | 止损=%.2f | TP1=%.2f | TP2=%.2f | %s",
+		s.symbol, action, m1.Close, stopLoss, tp1, tp2, reason)
+
+	return s.sendSignal(ctx, signal, k)
+}
+
+// buildEntryReason1m 构建1m入场信号原因描述
+func (s *TrendFollowingStrategy) buildEntryReason1m(trend trendDirection, pullback pullbackResult, entry entrySignal, m1 klineSnapshot, stopLoss, tp1, tp2 float64) string {
+	trendStr := "无"
+	if trend == trendLong {
+		trendStr = "多头（价格>EMA21>EMA55）"
+	} else if trend == trendShort {
+		trendStr = "空头（价格<EMA21<EMA55）"
+	}
+
+	pullbackStr := "无"
+	if pullback == pullbackLong {
+		pullbackStr = "多头回调"
+	} else if pullback == pullbackShort {
+		pullbackStr = "空头回调"
+	}
+
+	return fmt.Sprintf(
+		"[1m] 4H趋势=%s | 1H回调=%s | 1M入场 | RSI=%.2f ATR=%.2f | 止损=%.2f(1.5×ATR) TP1=%.2f TP2=%.2f",
+		trendStr, pullbackStr, m1.Rsi, m1.Atr, stopLoss, tp1, tp2,
+	)
+}
+
+// checkExitConditions1m 1m模式出场条件检查
+//
+// 出场优先级：
+//  1. 止损：价格穿越止损价
+//  2. 止盈：TP2全平 / TP1移动止损到保本
+//  3. EMA破位：持仓≥N根1m K线后，价格穿越EMA21-缓冲带
+func (s *TrendFollowingStrategy) checkExitConditions1m(ctx context.Context, k *marketpb.Kline) error {
+	m1 := s.latest1m
+	price := m1.Close
+
+	// 计算持仓K线数
+	heldBars := 0
+	for _, snap := range s.klines1m {
+		if snap.OpenTime >= s.pos.entryBarTime {
+			heldBars++
+		}
+	}
+
+	minHoldingBars := int(s.getParam(param1mMinHoldingBars, 5))
+	exitConfirmBars := int(s.getParam(paramEmaExitConfirmBars, 2))
+	emaBufferATR := s.getParam(param1mEmaExitBufferATR, 0.30)
+
+	var exitAction string
+	var exitReason string
+
+	// 1. 止损检查
+	if s.pos.side == sideLong && price <= s.pos.stopLoss {
+		exitAction = "SELL"
+		exitReason = fmt.Sprintf("[1m] 多头止损：价格%.2f ≤ 止损%.2f", price, s.pos.stopLoss)
+	} else if s.pos.side == sideShort && price >= s.pos.stopLoss {
+		exitAction = "BUY"
+		exitReason = fmt.Sprintf("[1m] 空头止损：价格%.2f ≥ 止损%.2f", price, s.pos.stopLoss)
+	}
+
+	// 2. 止盈检查
+	if exitAction == "" {
+		if s.pos.side == sideLong {
+			if price >= s.pos.takeProfit2 {
+				exitAction = "SELL"
+				exitReason = fmt.Sprintf("[1m] 多头止盈2：价格%.2f ≥ TP2%.2f（3×ATR）", price, s.pos.takeProfit2)
+			} else if price >= s.pos.takeProfit1 {
+				if !s.pos.hitTP1 {
+					s.pos.hitTP1 = true
+					s.pos.stopLoss = s.pos.entryPrice
+					log.Printf("[策略1m] %s 多头移动止损→保本：原止损→入场价%.2f", s.symbol, s.pos.entryPrice)
+				}
+			}
+		} else if s.pos.side == sideShort {
+			if price <= s.pos.takeProfit2 {
+				exitAction = "BUY"
+				exitReason = fmt.Sprintf("[1m] 空头止盈2：价格%.2f ≤ TP2%.2f（3×ATR）", price, s.pos.takeProfit2)
+			} else if price <= s.pos.takeProfit1 {
+				if !s.pos.hitTP1 {
+					s.pos.hitTP1 = true
+					s.pos.stopLoss = s.pos.entryPrice
+					log.Printf("[策略1m] %s 空头移动止损→保本：原止损→入场价%.2f", s.symbol, s.pos.entryPrice)
+				}
+			}
+		}
+	}
+
+	// 3. EMA破位出场（持仓 >= minHoldingBars 根1m K线后才检查）
+	if exitAction == "" && heldBars >= minHoldingBars && m1.Ema21 != 0 {
+		buffer := emaBufferATR * s.pos.atr
+		if s.pos.side == sideLong {
+			if price < m1.Ema21-buffer {
+				s.pos.breakBelowCnt++
+				s.pos.breakAboveCnt = 0
+				if s.pos.breakBelowCnt >= exitConfirmBars {
+					exitAction = "SELL"
+					exitReason = fmt.Sprintf("[1m] 多头EMA破位：价格%.2f < EMA21%.2f - 缓冲%.2f（连续%d根确认）",
+						price, m1.Ema21, buffer, s.pos.breakBelowCnt)
+				}
+			} else {
+				s.pos.breakBelowCnt = 0
+			}
+		} else if s.pos.side == sideShort {
+			if price > m1.Ema21+buffer {
+				s.pos.breakAboveCnt++
+				s.pos.breakBelowCnt = 0
+				if s.pos.breakAboveCnt >= exitConfirmBars {
+					exitAction = "BUY"
+					exitReason = fmt.Sprintf("[1m] 空头EMA破位：价格%.2f > EMA21%.2f + 缓冲%.2f（连续%d根确认）",
+						price, m1.Ema21, buffer, s.pos.breakAboveCnt)
+				}
+			} else {
+				s.pos.breakAboveCnt = 0
+			}
+		}
+	}
+
+	if exitAction == "" {
+		// 无出场信号，记录持仓状态
+		log.Printf("[策略1m] %s 持仓中 | 方向=%v 价格=%.2f 止损=%.2f TP1=%.2f TP2=%.2f 持仓K线=%d",
+			s.symbol, s.pos.side, price, s.pos.stopLoss, s.pos.takeProfit1, s.pos.takeProfit2, heldBars)
+		return nil
+	}
+
+	// 计算盈亏
+	pnl := s.calculatePnL(price)
+
+	// 更新风控状态
+	s.updateRiskState(pnl)
+
+	// 构建出场信号
+	side := "LONG"
+	if s.pos.side == sideShort {
+		side = "SHORT"
+	}
+
+	signal := map[string]interface{}{
+		"strategy_id":  fmt.Sprintf("trend-following-1m-%s", s.symbol),
+		"symbol":       s.symbol,
+		"interval":     "1m",
+		"action":       exitAction,
+		"side":         side,
+		"signal_type":  "CLOSE",
+		"quantity":     0.01,
+		"entry_price":  price,
+		"stop_loss":    s.pos.stopLoss,
+		"take_profits": []float64{s.pos.takeProfit1, s.pos.takeProfit2},
+		"reason":       exitReason,
+		"timestamp":    time.Now().UnixMilli(),
+		"atr":          m1.Atr,
+		"risk_reward":  0,
+		"indicators": map[string]interface{}{
+			"m1_ema21": m1.Ema21,
+			"m1_rsi":   m1.Rsi,
+			"m1_atr":   m1.Atr,
+			"pnl":      pnl,
+		},
+	}
+
+	// 清除持仓
+	s.pos = position{}
+
+	log.Printf("[策略1m出场] %s %s | 价格=%.2f | 盈亏=%.2f | %s",
+		s.symbol, exitAction, price, pnl, exitReason)
+
+	return s.sendSignal(ctx, signal, k)
 }

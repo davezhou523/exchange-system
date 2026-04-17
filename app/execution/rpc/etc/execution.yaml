@@ -10,13 +10,14 @@ Kafka:
   Topics:
     Signal: signal
     Order: order
+    Kline: kline            # 1m K线 topic（MatchMode=1m 时消费）
 
 # 交易所路由配置
 Exchange:
   # 路由策略: direct=指定交易所 | simulated=模拟撮合 | by_symbol=按交易对路由
-  RouteStrategy: direct
+  RouteStrategy: simulated
   # 默认交易所: binance | okx | simulated
-  DefaultExchange: binance
+  DefaultExchange: simulated
 
   # 按交易对路由映射（RouteStrategy=by_symbol 时生效）
   # SymbolRoutes:
@@ -47,6 +48,7 @@ Exchange:
     CommissionRate: 0.0004      # 手续费 0.04%
     CommissionAsset: USDT
     FillDelayMs: 0              # 成交延迟
+    MatchMode: 1m               # instant=即时成交 | 1m=1m K线驱动撮合
 
 # 风控配置
 Risk:

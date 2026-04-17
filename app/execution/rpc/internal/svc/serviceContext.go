@@ -14,6 +14,7 @@ import (
 	"exchange-system/app/execution/rpc/internal/orderlog"
 	"exchange-system/app/execution/rpc/internal/position"
 	"exchange-system/app/execution/rpc/internal/risk"
+	marketpb "exchange-system/common/pb/market"
 	strategypb "exchange-system/common/pb/strategy"
 )
 
@@ -28,6 +29,7 @@ import (
 //   5. 订单管理（状态跟踪）
 //   6. 仓位管理（同步更新）
 //   7. 发布订单结果 (Kafka order topic)
+//   8. 1m K线驱动撮合（模拟撮合模式下）
 // ---------------------------------------------------------------------------
 
 // ServiceContext 执行服务上下文
@@ -42,8 +44,12 @@ type ServiceContext struct {
 	deduplicator *idempotent.SignalDeduplicator // 幂等去重器
 	logger       *orderlog.Logger               // 日志记录器
 
+	// 模拟撮合引擎引用（1m K线模式下使用）
+	simExchange *exchange.SimulatedExchange
+
 	// Kafka
 	signalConsumer *kafka.Consumer
+	klineConsumer  *kafka.KlineConsumer // 1m K线消费者（1m撮合模式）
 	orderProducer  *kafka.Producer
 
 	// 生命周期
@@ -101,7 +107,9 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	}
 
 	// 注册模拟撮合引擎
+	var simExchange *exchange.SimulatedExchange
 	if c.Exchange.Simulated.Enabled {
+		matchMode := exchange.SimMatchMode(c.Exchange.Simulated.MatchMode)
 		simConfig := exchange.SimConfig{
 			InitialBalance:  c.Exchange.Simulated.InitialBalance,
 			SlippageBPS:     c.Exchange.Simulated.SlippageBPS,
@@ -109,11 +117,12 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 			CommissionRate:  c.Exchange.Simulated.CommissionRate,
 			CommissionAsset: c.Exchange.Simulated.CommissionAsset,
 			FillDelayMs:     c.Exchange.Simulated.FillDelayMs,
+			MatchMode:       matchMode,
 		}
-		simExchange := exchange.NewSimulatedExchange(simConfig)
+		simExchange = exchange.NewSimulatedExchange(simConfig)
 		router.Register("simulated", simExchange)
-		log.Printf("[初始化] 模拟撮合引擎已注册 | 余额=%.0f 滑点=%.0fbps 手续费=%.2f%%",
-			simConfig.InitialBalance, simConfig.SlippageBPS, simConfig.CommissionRate*100)
+		log.Printf("[初始化] 模拟撮合引擎已注册 | 余额=%.0f 滑点=%.0fbps 手续费=%.2f%% 撮合模式=%s",
+			simConfig.InitialBalance, simConfig.SlippageBPS, simConfig.CommissionRate*100, simConfig.MatchMode)
 	}
 
 	// 4. 创建仓位管理器和订单管理器
@@ -152,16 +161,54 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		posManager:     posManager,
 		deduplicator:   deduplicator,
 		logger:         logger,
+		simExchange:    simExchange,
 		signalConsumer: signalConsumer,
 		orderProducer:  orderProducer,
 		cancel:         cancel,
 	}
 
-	// 9. 启动信号消费
+	// 9. 1m K线撮合模式下，启动1m K线消费者
+	var klineConsumer *kafka.KlineConsumer
+	if simExchange != nil && simExchange.GetMatchMode() == exchange.MatchModeKline1m && c.Kafka.Topics.Kline != "" {
+		klineGroupID := groupID + "-1m"
+		klineConsumer, err = kafka.NewKlineConsumer(c.Kafka.Addrs, klineGroupID, c.Kafka.Topics.Kline)
+		if err != nil {
+			_ = signalConsumer.Close()
+			_ = orderProducer.Close()
+			logger.Close()
+			cancel()
+			return nil, fmt.Errorf("create kline consumer: %v", err)
+		}
+
+		// 设置模拟撮合成交回调
+		simExchange.SetOnFillCallback(func(result *exchange.OrderResult) {
+			svcCtx.handleSimFill(result)
+		})
+
+		// 启动1m K线消费
+		if err := klineConsumer.StartConsuming(ctx, func(kline *marketpb.Kline) error {
+			return svcCtx.handleKline1m(kline)
+		}); err != nil {
+			_ = klineConsumer.Close()
+			_ = signalConsumer.Close()
+			_ = orderProducer.Close()
+			logger.Close()
+			cancel()
+			return nil, fmt.Errorf("start kline consumer: %v", err)
+		}
+
+		svcCtx.klineConsumer = klineConsumer
+		log.Printf("[初始化] 1m K线撮合消费者已启动 | topic=%s group=%s", c.Kafka.Topics.Kline, klineGroupID)
+	}
+
+	// 10. 启动信号消费
 	if err := signalConsumer.StartConsuming(ctx, func(sig *strategypb.Signal) error {
 		return svcCtx.HandleSignal(ctx, sig)
 	}); err != nil {
 		_ = signalConsumer.Close()
+		if klineConsumer != nil {
+			_ = klineConsumer.Close()
+		}
 		_ = orderProducer.Close()
 		logger.Close()
 		cancel()
@@ -254,10 +301,54 @@ func (s *ServiceContext) HandleSignal(ctx context.Context, sig *strategypb.Signa
 		return fmt.Errorf("create order failed: %v", err)
 	}
 
-	// 5. 标记幂等记录的订单ID
+	// 5. 1m K线撮合模式：订单仅挂起，等待1m K线驱动成交
+	//    即时模式：订单已成交，直接处理后续逻辑
+	if orderResult.Status == exchange.StatusNew {
+		// 1m撮合模式，订单挂起中
+		log.Printf("[信号] 订单挂起等待撮合 | type=%s ID=%s symbol=%s",
+			signalType, orderResult.OrderID, symbol)
+
+		// 标记幂等记录的订单ID
+		s.deduplicator.MarkOrderID(sigKey, orderResult.OrderID)
+
+		// 记录到订单管理器（状态为 NEW）
+		s.orderManager.AddOrder(&order.OrderState{
+			OrderID:      orderResult.OrderID,
+			ClientID:     orderResult.ClientOrderID,
+			Symbol:       symbol,
+			Side:         orderResult.Side,
+			PositionSide: orderResult.PositionSide,
+			Type:         exchange.OrderTypeMarket,
+			Status:       exchange.StatusNew,
+			Quantity:     quantity,
+			StrategyID:   strategyID,
+			SignalKey:    sigKey,
+			SignalType:   signalType,
+			CreateTime:   time.Now(),
+			TransactTime: time.UnixMilli(orderResult.TransactTime),
+			StopLoss:     stopLoss,
+			TakeProfits:  takeProfits,
+			Atr:          atr,
+			RiskReward:   riskReward,
+		})
+
+		// 1m撮合模式：开仓信号设置止损止盈，等成交后由回调处理后续逻辑
+		// 止损止盈会在成交回调中设置
+		return nil
+	}
+
+	// 即时成交模式：处理已成交订单的后续逻辑
+	s.handleFilledOrder(sig, orderResult, sigKey, signalType, strategyID, symbol, quantity, stopLoss, atr, riskReward, takeProfits)
+
+	return nil
+}
+
+// handleFilledOrder 处理已成交订单的后续逻辑（更新管理器、发布Kafka、记录日志）
+func (s *ServiceContext) handleFilledOrder(sig *strategypb.Signal, orderResult *exchange.OrderResult, sigKey, signalType, strategyID, symbol string, quantity, stopLoss, atr, riskReward float64, takeProfits []float64) {
+	// 标记幂等记录的订单ID
 	s.deduplicator.MarkOrderID(sigKey, orderResult.OrderID)
 
-	// 6. 更新订单管理器
+	// 更新订单管理器
 	s.orderManager.AddOrder(&order.OrderState{
 		OrderID:         orderResult.OrderID,
 		ClientID:        orderResult.ClientOrderID,
@@ -283,12 +374,12 @@ func (s *ServiceContext) HandleSignal(ctx context.Context, sig *strategypb.Signa
 		RiskReward:      riskReward,
 	})
 
-	// 7. 更新仓位管理器
+	// 更新仓位管理器
 	s.posManager.UpdateFromOrder(orderResult, strategyID, stopLoss, takeProfits)
 
-	// 8. 发布订单结果到 Kafka
+	// 发布订单结果到 Kafka
 	orderEvent := s.buildOrderEvent(sig, orderResult)
-	if err := s.orderProducer.SendMarketData(ctx, orderEvent); err != nil {
+	if err := s.orderProducer.SendMarketData(context.Background(), orderEvent); err != nil {
 		log.Printf("[信号] 发布订单结果失败: %v", err)
 	}
 
@@ -300,7 +391,64 @@ func (s *ServiceContext) HandleSignal(ctx context.Context, sig *strategypb.Signa
 	// 记录订单执行结果日志
 	s.logger.LogOrder(sig, orderResult)
 
+	// 1m撮合模式：开仓成交后设置止损止盈
+	if s.simExchange != nil && s.simExchange.GetMatchMode() == exchange.MatchModeKline1m && signalType == "OPEN" {
+		posSide := mapSideToPositionSide(sig.GetSide())
+		s.simExchange.SetPositionSLTP(symbol, posSide, orderResult.ExecutedQuantity, stopLoss, takeProfits, strategyID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 1m K线驱动撮合
+// ---------------------------------------------------------------------------
+
+// handleKline1m 处理1m K线，驱动模拟撮合
+func (s *ServiceContext) handleKline1m(kline *marketpb.Kline) error {
+	if kline == nil || s.simExchange == nil {
+		return nil
+	}
+
+	// 将1m K线数据传给模拟撮合引擎
+	s.simExchange.OnKline1m(
+		kline.Symbol,
+		kline.Open,
+		kline.High,
+		kline.Low,
+		kline.Close,
+		kline.OpenTime,
+	)
+
 	return nil
+}
+
+// handleSimFill 处理模拟撮合成交回调
+//
+// 1m K线模式下，订单撮合完成后回调此方法，更新订单管理器、仓位管理器、发布Kafka结果
+func (s *ServiceContext) handleSimFill(result *exchange.OrderResult) {
+	if result == nil {
+		return
+	}
+
+	log.Printf("[1m撮合回调] 订单成交 | ID=%s symbol=%s side=%s 成交=%.4f@%.2f",
+		result.OrderID, result.Symbol, result.Side,
+		result.ExecutedQuantity, result.AvgPrice)
+
+	// 1. 更新订单管理器中的订单状态
+	if err := s.orderManager.UpdateOrder(result.OrderID, result); err != nil {
+		log.Printf("[1m撮合回调] 更新订单失败: %v", err)
+	}
+
+	// 2. 更新仓位管理器
+	s.posManager.UpdateFromOrder(result, "", 0, nil)
+
+	// 3. 构建简化信号并记录日志
+	sig := &strategypb.Signal{
+		Symbol:   result.Symbol,
+		Action:   string(result.Side),
+		Side:     string(result.PositionSide),
+		Quantity: result.ExecutedQuantity,
+	}
+	s.logger.LogOrder(sig, result)
 }
 
 // performRiskCheck 执行风控检查
@@ -475,6 +623,11 @@ func (s *ServiceContext) Close() error {
 	var firstErr error
 	if s.logger != nil {
 		s.logger.Close()
+	}
+	if s.klineConsumer != nil {
+		if err := s.klineConsumer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	if s.signalConsumer != nil {
 		if err := s.signalConsumer.Close(); err != nil && firstErr == nil {

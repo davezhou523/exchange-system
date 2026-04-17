@@ -1,0 +1,157 @@
+syntax = "proto3";
+
+package order;
+
+option go_package = "exchange-system/common/pb/order";
+
+// ---------------------------------------------------------------------------
+// Order 微服务 — 合约订单查询服务
+// 从币安合约 API 拉取：当前委托、历史委托、历史成交、资金流水、资金费用
+// 数据保存为 JSONL 到 data 目录
+// ---------------------------------------------------------------------------
+
+// 通用查询请求
+message OrderQueryRequest {
+  string symbol = 1;          // 交易对（如 ETHUSDT），部分接口必填
+  int64 start_time = 2;       // 起始时间（毫秒时间戳），0=不限制
+  int64 end_time = 3;         // 结束时间（毫秒时间戳），0=不限制
+  int32 limit = 4;            // 返回数量限制，0=使用默认值
+  string income_type = 5;     // 资金流水类型过滤（仅资金流水接口使用）
+}
+
+// 当前委托条目
+message OpenOrderItem {
+  int64 order_id = 1;
+  string symbol = 2;
+  string status = 3;
+  string side = 4;
+  string position_side = 5;
+  string type = 6;
+  string orig_qty = 7;
+  string executed_qty = 8;
+  string avg_price = 9;
+  string price = 10;
+  string stop_price = 11;
+  string client_order_id = 12;
+  int64 time = 13;
+  int64 update_time = 14;
+  bool reduce_only = 15;
+  bool close_position = 16;
+  string time_in_force = 17;
+}
+
+// 历史委托条目
+message AllOrderItem {
+  int64 order_id = 1;
+  string symbol = 2;
+  string status = 3;
+  string side = 4;
+  string position_side = 5;
+  string type = 6;
+  string orig_qty = 7;
+  string executed_qty = 8;
+  string avg_price = 9;
+  string price = 10;
+  string stop_price = 11;
+  string client_order_id = 12;
+  int64 time = 13;
+  int64 update_time = 14;
+  bool reduce_only = 15;
+  bool close_position = 16;
+  string time_in_force = 17;
+}
+
+// 历史成交条目
+message UserTradeItem {
+  int64 id = 1;
+  string symbol = 2;
+  int64 order_id = 3;
+  string side = 4;
+  string position_side = 5;
+  string price = 6;
+  string qty = 7;
+  string realized_pnl = 8;
+  string margin_asset = 9;
+  string quote_qty = 10;
+  string commission = 11;
+  string commission_asset = 12;
+  int64 time = 13;
+  bool buyer = 14;
+  bool maker = 15;
+}
+
+// 资金流水条目
+message IncomeItem {
+  string symbol = 1;
+  string income_type = 2;
+  string income = 3;
+  string asset = 4;
+  int64 time = 5;
+  int64 tran_id = 6;
+  string trade_id = 7;
+}
+
+// 资金费率条目
+message FundingRateItem {
+  string symbol = 1;
+  string funding_rate = 2;
+  int64 funding_time = 3;
+  string mark_price = 4;
+}
+
+// 资金费用条目
+message FundingFeeItem {
+  string symbol = 1;
+  string income_type = 2;
+  string income = 3;
+  string asset = 4;
+  int64 time = 5;
+  int64 tran_id = 6;
+  string trade_id = 7;
+}
+
+// 通用列表响应
+message OpenOrderResponse {
+  repeated OpenOrderItem items = 1;
+}
+
+message AllOrderResponse {
+  repeated AllOrderItem items = 1;
+}
+
+message UserTradeResponse {
+  repeated UserTradeItem items = 1;
+}
+
+message IncomeResponse {
+  repeated IncomeItem items = 1;
+}
+
+message FundingRateResponse {
+  repeated FundingRateItem items = 1;
+}
+
+message FundingFeeResponse {
+  repeated FundingFeeItem items = 1;
+}
+
+// 通用空请求
+message EmptyRequest {}
+
+// Order 服务
+service OrderService {
+  // 查询当前委托（未成交订单）
+  rpc GetOpenOrders(OrderQueryRequest) returns (OpenOrderResponse) {}
+  // 查询历史委托
+  rpc GetAllOrders(OrderQueryRequest) returns (AllOrderResponse) {}
+  // 查询历史成交
+  rpc GetUserTrades(OrderQueryRequest) returns (UserTradeResponse) {}
+  // 查询资金流水
+  rpc GetIncomeHistory(OrderQueryRequest) returns (IncomeResponse) {}
+  // 查询资金费率历史
+  rpc GetFundingRateHistory(OrderQueryRequest) returns (FundingRateResponse) {}
+  // 查询资金费用
+  rpc GetFundingFees(OrderQueryRequest) returns (FundingFeeResponse) {}
+  // 拉取全部数据并保存到本地 JSONL
+  rpc FetchAllData(OrderQueryRequest) returns (EmptyRequest) {}
+}
