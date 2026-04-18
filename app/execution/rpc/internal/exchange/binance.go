@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -27,19 +29,32 @@ type BinanceClient struct {
 	apiKey    string
 	secretKey string
 	client    *http.Client
+
+	precisionMu          sync.RWMutex
+	quantityPrecisionMap map[string]int
 }
 
 // NewBinanceClient 创建币安期货客户端
 // baseURL 为空时默认使用正式环境 https://fapi.binance.com
-func NewBinanceClient(baseURL, apiKey, secretKey string) *BinanceClient {
+func NewBinanceClient(baseURL, apiKey, secretKey, proxyURL string) *BinanceClient {
 	if baseURL == "" {
 		baseURL = "https://fapi.binance.com"
+	}
+	transport := &http.Transport{}
+	if proxyURL != "" {
+		if proxy, err := url.Parse(proxyURL); err == nil {
+			transport.Proxy = http.ProxyURL(proxy)
+		}
 	}
 	return &BinanceClient{
 		baseURL:   strings.TrimRight(baseURL, "/"),
 		apiKey:    apiKey,
 		secretKey: secretKey,
-		client:    &http.Client{Timeout: 30 * time.Second},
+		client: &http.Client{
+			Transport: transport,
+			Timeout:   30 * time.Second,
+		},
+		quantityPrecisionMap: make(map[string]int),
 	}
 }
 
@@ -125,6 +140,11 @@ type binanceCancelResponse struct {
 
 // CreateOrder 创建订单
 func (c *BinanceClient) CreateOrder(ctx context.Context, param CreateOrderParam) (*OrderResult, error) {
+	normalizedQty, qtyPrecision, err := c.normalizeOrderQuantity(ctx, param.Symbol, param.Quantity)
+	if err != nil {
+		return nil, err
+	}
+
 	q := url.Values{}
 	q.Set("symbol", strings.ToUpper(param.Symbol))
 	q.Set("side", string(param.Side))
@@ -137,7 +157,7 @@ func (c *BinanceClient) CreateOrder(ctx context.Context, param CreateOrderParam)
 	}
 	q.Set("type", orderType)
 
-	q.Set("quantity", fmt.Sprintf("%.6f", param.Quantity))
+	q.Set("quantity", fmt.Sprintf("%.*f", qtyPrecision, normalizedQty))
 
 	// LIMIT 单必须设置价格和 TimeInForce
 	if orderType == string(OrderTypeLimit) {
@@ -161,7 +181,7 @@ func (c *BinanceClient) CreateOrder(ctx context.Context, param CreateOrderParam)
 	}
 
 	// 仅减仓
-	if param.ReduceOnly {
+	if param.ReduceOnly && (param.PositionSide == "" || param.PositionSide == PosBoth) {
 		q.Set("reduceOnly", "true")
 	}
 
@@ -184,6 +204,83 @@ func (c *BinanceClient) CreateOrder(ctx context.Context, param CreateOrderParam)
 	}
 
 	return c.convertOrderResponse(&resp), nil
+}
+
+const fallbackQuantityPrecision = 3
+
+type binanceExchangeInfoResponse struct {
+	Symbols []struct {
+		Symbol            string `json:"symbol"`
+		QuantityPrecision int    `json:"quantityPrecision"`
+	} `json:"symbols"`
+}
+
+func (c *BinanceClient) normalizeOrderQuantity(ctx context.Context, symbol string, quantity float64) (float64, int, error) {
+	if quantity <= 0 {
+		return 0, fallbackQuantityPrecision, fmt.Errorf("quantity must be positive")
+	}
+
+	precision, err := c.getQuantityPrecision(ctx, symbol)
+	if err != nil {
+		precision = fallbackQuantityPrecision
+	}
+	if precision < 0 {
+		precision = 0
+	}
+	if precision > 8 {
+		precision = 8
+	}
+
+	scale := math.Pow10(precision)
+	normalized := math.Floor(quantity*scale+1e-9) / scale
+	if normalized <= 0 {
+		return 0, precision, fmt.Errorf("quantity %.8f is below minimum precision for %s", quantity, symbol)
+	}
+	return normalized, precision, nil
+}
+
+func (c *BinanceClient) getQuantityPrecision(ctx context.Context, symbol string) (int, error) {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		return fallbackQuantityPrecision, fmt.Errorf("symbol is required")
+	}
+
+	c.precisionMu.RLock()
+	if precision, ok := c.quantityPrecisionMap[symbol]; ok {
+		c.precisionMu.RUnlock()
+		return precision, nil
+	}
+	c.precisionMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/fapi/v1/exchangeInfo", nil)
+	if err != nil {
+		return fallbackQuantityPrecision, err
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fallbackQuantityPrecision, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fallbackQuantityPrecision, fmt.Errorf("binance exchangeInfo failed: status=%d body=%s", resp.StatusCode, string(body))
+	}
+
+	var info binanceExchangeInfoResponse
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return fallbackQuantityPrecision, err
+	}
+	for _, item := range info.Symbols {
+		if strings.EqualFold(item.Symbol, symbol) {
+			c.precisionMu.Lock()
+			c.quantityPrecisionMap[symbol] = item.QuantityPrecision
+			c.precisionMu.Unlock()
+			return item.QuantityPrecision, nil
+		}
+	}
+	return fallbackQuantityPrecision, fmt.Errorf("symbol %s not found in exchangeInfo", symbol)
 }
 
 // CancelOrder 取消订单

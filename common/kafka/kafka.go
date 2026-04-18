@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
+	"log"
 	"reflect"
 	"strings"
 	"time"
@@ -227,6 +228,92 @@ func ShouldRetryConsumeErr(err error) bool {
 		return true
 	}
 	return false
+}
+
+// StartConsumerGroupLagReporter periodically prints consumer lag (newest - committed) per partition.
+// This is intended as a lightweight health signal in logs. It recreates client/offsetManager each tick
+// to be resilient to broker restarts/leader changes.
+func StartConsumerGroupLagReporter(ctx context.Context, brokers []string, groupID, topic string, every time.Duration) {
+	if groupID == "" || topic == "" || len(brokers) == 0 {
+		return
+	}
+	if every <= 0 {
+		every = 30 * time.Second
+	}
+
+	go func() {
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+
+		// Run one immediately so operators see it right after startup.
+		for {
+			printOnce := func() {
+				cfg := NewConsumerGroupConfig()
+				cfg.Consumer.Return.Errors = false // reporter only
+
+				client, err := sarama.NewClient(brokers, cfg)
+				if err != nil {
+					log.Printf("[kafka lag] group=%s topic=%s client err=%v", groupID, topic, err)
+					return
+				}
+				defer func() { _ = client.Close() }()
+
+				partitions, err := client.Partitions(topic)
+				if err != nil {
+					log.Printf("[kafka lag] group=%s topic=%s partitions err=%v", groupID, topic, err)
+					return
+				}
+				if len(partitions) == 0 {
+					log.Printf("[kafka lag] group=%s topic=%s partitions empty", groupID, topic)
+					return
+				}
+
+				om, err := sarama.NewOffsetManagerFromClient(groupID, client)
+				if err != nil {
+					log.Printf("[kafka lag] group=%s topic=%s offsetManager err=%v", groupID, topic, err)
+					return
+				}
+				defer func() { _ = om.Close() }()
+
+				for _, p := range partitions {
+					newest, err := client.GetOffset(topic, p, sarama.OffsetNewest)
+					if err != nil {
+						log.Printf("[kafka lag] group=%s topic=%s partition=%d newest err=%v", groupID, topic, p, err)
+						continue
+					}
+
+					pom, err := om.ManagePartition(topic, p)
+					if err != nil {
+						log.Printf("[kafka lag] group=%s topic=%s partition=%d manage err=%v", groupID, topic, p, err)
+						continue
+					}
+					committed, _ := pom.NextOffset()
+					_ = pom.Close()
+
+					if committed < 0 {
+						// No committed offset yet.
+						log.Printf("[kafka lag] group=%s topic=%s partition=%d committed=%d newest=%d lag=?",
+							groupID, topic, p, committed, newest)
+						continue
+					}
+					lag := newest - committed
+					if lag < 0 {
+						lag = 0
+					}
+					log.Printf("[kafka lag] group=%s topic=%s partition=%d committed=%d newest=%d lag=%d",
+						groupID, topic, p, committed, newest, lag)
+				}
+			}
+
+			printOnce()
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 }
 
 func ExtractSymbol(data interface{}) string {

@@ -17,9 +17,13 @@ type Producer struct {
 }
 
 func NewProducer(brokers []string, topic string) (*Producer, error) {
+	return NewProducerWithContext(context.Background(), brokers, topic)
+}
+
+func NewProducerWithContext(ctx context.Context, brokers []string, topic string) (*Producer, error) {
 	config := commonkafka.NewProducerConfig()
 
-	producer, err := commonkafka.NewSyncProducerWithRetry(context.Background(), brokers, config)
+	producer, err := commonkafka.NewSyncProducerWithRetry(ctx, brokers, config)
 	if err != nil {
 		return nil, err
 	}

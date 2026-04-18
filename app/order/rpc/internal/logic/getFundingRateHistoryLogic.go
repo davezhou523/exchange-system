@@ -32,7 +32,7 @@ func NewGetFundingRateHistoryLogic(ctx context.Context, svcCtx *svc.ServiceConte
 
 // GetFundingRateHistory 查询资金费率历史
 func (l *GetFundingRateHistoryLogic) GetFundingRateHistory(in *pb.OrderQueryRequest) (*pb.FundingRateResponse, error) {
-	symbol := in.GetSymbol()
+	symbol := normalizeSymbol(in.GetSymbol())
 
 	limit := int(in.GetLimit())
 	if limit <= 0 {

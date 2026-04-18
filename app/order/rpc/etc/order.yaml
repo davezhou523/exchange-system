@@ -1,11 +1,17 @@
 Name: order-rpc
 ListenOn: 0.0.0.0:9083
-
+Log:
+  Level: debug
+  Mode: file
 # 币安合约 API 配置
 Binance:
   BaseURL: https://demo-fapi.binance.com
-  APIKey: "XdWkQMlWWMf5Ukr9CvKexKEpTT6MMmih2GeAJ6V9PzyGPzIs3nAuR3YEM5BL6lwU"
-  SecretKey: "BX3tSfEZhbU2RzEahnSVHRLDi1IjU5G4fCGczoe6JgZcGIVNTbS6Xz3614o5Wb5A"
+  APIKey: "EyYZXotRJaaXeycqfwLaDYBREyLTyNQK8lCuZKilieOg5gBgKGnpbdXBSMN7eMjJ"
+  SecretKey: "69wfjz9tkqUykbwlla6HUYcCKuVtRKvOEYoCUC1BdA0dYChSOccJpI1xnUpId0UP"
+  Proxy: socks5://192.168.10.13:1080
 
 # 数据保存目录（JSONL 格式）
 DataDir: data/futures
+
+# simulated 执行模式下的本地订单日志目录，order 服务会把这些成交并入统一查询口径
+ExecutionOrderLogDir: ../../execution/rpc/data/order

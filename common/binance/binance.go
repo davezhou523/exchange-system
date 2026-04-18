@@ -33,15 +33,24 @@ type Client struct {
 
 // NewClient 创建币安期货客户端
 // baseURL 为空时默认使用正式环境 https://fapi.binance.com
-func NewClient(baseURL, apiKey, secretKey string) *Client {
+func NewClient(baseURL, apiKey, secretKey, proxyURL string) *Client {
 	if baseURL == "" {
 		baseURL = "https://fapi.binance.com"
+	}
+	transport := &http.Transport{}
+	if proxyURL != "" {
+		if proxy, err := url.Parse(proxyURL); err == nil {
+			transport.Proxy = http.ProxyURL(proxy)
+		}
 	}
 	return &Client{
 		baseURL:   strings.TrimRight(baseURL, "/"),
 		apiKey:    apiKey,
 		secretKey: secretKey,
-		client:    &http.Client{Timeout: 30 * time.Second},
+		client: &http.Client{
+			Transport: transport,
+			Timeout:   30 * time.Second,
+		},
 	}
 }
 

@@ -2,8 +2,6 @@ package logic
 
 import (
 	"context"
-	"fmt"
-
 	"exchange-system/app/order/rpc/internal/svc"
 	pb "exchange-system/common/pb/order"
 
@@ -32,10 +30,7 @@ func NewFetchAllDataLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Fetc
 
 // FetchAllData 拉取全部数据并保存到本地 JSONL
 func (l *FetchAllDataLogic) FetchAllData(in *pb.OrderQueryRequest) (*pb.EmptyRequest, error) {
-	symbol := in.GetSymbol()
-	if symbol == "" {
-		return nil, fmt.Errorf("symbol is required for FetchAllData")
-	}
+	symbol := normalizeSymbol(in.GetSymbol())
 
 	if err := l.svcCtx.FetchAllData(l.ctx, symbol, in.GetStartTime(), in.GetEndTime()); err != nil {
 		l.Errorf("FetchAllData failed: %v", err)

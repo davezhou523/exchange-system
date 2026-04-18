@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"exchange-system/app/strategy/rpc/internal/config"
 	"exchange-system/app/strategy/rpc/internal/kafka"
 	strategyengine "exchange-system/app/strategy/rpc/internal/strategy"
+	commonkafka "exchange-system/common/kafka"
 	"exchange-system/common/pb/market"
 	strategypb "exchange-system/common/pb/strategy"
 )
@@ -26,7 +28,7 @@ type ServiceContext struct {
 func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	signalProducer, err := kafka.NewProducer(c.Kafka.Addrs, c.Kafka.Topics.Signal)
+	signalProducer, err := kafka.NewProducerWithContext(ctx, c.Kafka.Addrs, c.Kafka.Topics.Signal)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -94,6 +96,9 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		cancel()
 		return nil, err
 	}
+
+	// Periodic lag print for ops/troubleshooting.
+	commonkafka.StartConsumerGroupLagReporter(ctx, c.Kafka.Addrs, groupID, c.Kafka.Topics.Kline, 30*time.Second)
 
 	return svcCtx, nil
 }

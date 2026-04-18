@@ -32,7 +32,7 @@ func NewGetIncomeHistoryLogic(ctx context.Context, svcCtx *svc.ServiceContext) *
 
 // GetIncomeHistory 查询资金流水
 func (l *GetIncomeHistoryLogic) GetIncomeHistory(in *pb.OrderQueryRequest) (*pb.IncomeResponse, error) {
-	symbol := in.GetSymbol()
+	symbol := normalizeSymbol(in.GetSymbol())
 	incomeType := in.GetIncomeType()
 
 	limit := int(in.GetLimit())

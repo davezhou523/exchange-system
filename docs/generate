@@ -18,3 +18,10 @@ goctl rpc protoc /Users/bytedance/GolandProjects/exchange-system/common/proto/ma
    --go-grpc_out=/Users/bytedance/GolandProjects/exchange-system/common/pb \
    --zrpc_out=/Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc \
    --style=goZero
+
+ goctl rpc protoc /Users/bytedance/GolandProjects/exchange-system/common/proto/order.proto \
+   --proto_path=/Users/bytedance/GolandProjects/exchange-system/common/proto \
+   --go_out=/Users/bytedance/GolandProjects/exchange-system \
+   --go-grpc_out=/Users/bytedance/GolandProjects/exchange-system \
+   --zrpc_out=/Users/bytedance/GolandProjects/exchange-system/app/order/rpc \
+   --style=goZero

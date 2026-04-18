@@ -170,9 +170,11 @@ func (h *marketKlineGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSessi
 			k.Interval, k.Symbol, openTime, closeTime, k.Open, k.High, k.Low, k.Close, k.Volume, k.IsClosed, indicatorStr,
 			msg.Partition, msg.Offset, key)
 
-		// Save aggregated kline (1m/3m/5m/15m/1h/4h) to log file for verification
-		// 1m K线日志在1m信号模式下用于策略验证，默认也记录便于回测
-		if k.IsClosed && (k.Interval == "1m" || k.Interval == "3m" || k.Interval == "5m" || k.Interval == "15m" || k.Interval == "1h" || k.Interval == "4h") {
+		// Only persist the finalized/tradable version of a closed kline.
+		// Some intervals (especially 1m) may emit a raw closed event first and a finalized
+		// indicator-enriched event later. Logging only final avoids duplicate rows for the
+		// same openTime in JSONL.
+		if k.IsClosed && k.IsFinal && (k.Interval == "1m" || k.Interval == "3m" || k.Interval == "5m" || k.Interval == "15m" || k.Interval == "1h" || k.Interval == "4h") {
 			h.consumer.writeKlineLog(&k)
 		}
 		if err := h.handler(&k); err != nil {

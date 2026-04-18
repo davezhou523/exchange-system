@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 
 	"exchange-system/app/order/rpc/internal/config"
 	"exchange-system/app/order/rpc/internal/server"
@@ -30,6 +32,9 @@ func main() {
 
 	var c config.Config
 	conf.MustLoad(*configFile, &c)
+	if err := clearAllOrdersDir(c.DataDir); err != nil {
+		log.Fatalf("failed to clear all_orders dir: %v", err)
+	}
 
 	ctx, err := svc.NewServiceContext(c)
 	if err != nil {
@@ -47,4 +52,16 @@ func main() {
 
 	fmt.Printf("Starting order rpc server at %s...\n", c.ListenOn)
 	s.Start()
+}
+
+func clearAllOrdersDir(dataDir string) error {
+	if dataDir == "" {
+		dataDir = "data/futures"
+	}
+	allOrdersDir := filepath.Join(dataDir, "all_orders")
+	if err := os.RemoveAll(allOrdersDir); err != nil {
+		return err
+	}
+	log.Printf("[Order服务] 启动清理 all_orders 目录: %s", allOrdersDir)
+	return nil
 }

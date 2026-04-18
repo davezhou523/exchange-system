@@ -32,7 +32,7 @@ func NewGetOpenOrdersLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Get
 
 // GetOpenOrders 查询当前委托（未成交订单）
 func (l *GetOpenOrdersLogic) GetOpenOrders(in *pb.OrderQueryRequest) (*pb.OpenOrderResponse, error) {
-	symbol := in.GetSymbol()
+	symbol := normalizeSymbol(in.GetSymbol())
 
 	orders, err := l.svcCtx.GetOpenOrders(l.ctx, symbol)
 	if err != nil {

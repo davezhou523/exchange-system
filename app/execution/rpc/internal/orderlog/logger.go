@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -122,6 +123,7 @@ type OrderLogEntry struct {
 	Atr             float64 `json:"atr"`
 	RiskReward      float64 `json:"risk_reward"`
 	Reason          string  `json:"reason"`
+	ErrorMessage    string  `json:"error_message,omitempty"`
 	TransactTime    int64   `json:"transact_time"`
 }
 
@@ -152,10 +154,40 @@ func (l *Logger) LogOrder(sig *strategypb.Signal, result *exchange.OrderResult) 
 		Atr:             sig.GetAtr(),
 		RiskReward:      sig.GetRiskReward(),
 		Reason:          sig.GetReason(),
+		ErrorMessage:    result.ErrorMessage,
 		TransactTime:    result.TransactTime,
 	}
 
 	l.writeJSONL(l.orderLogDir, l.orderFiles, result.Symbol, entry)
+}
+
+// LogOrderFailure 记录下单失败结果，便于排查风控拒绝或交易所报错。
+func (l *Logger) LogOrderFailure(sig *strategypb.Signal, status exchange.OrderStatus, clientID, errorMessage string) {
+	if l == nil || l.orderLogDir == "" || sig == nil {
+		return
+	}
+
+	entry := OrderLogEntry{
+		Timestamp:    time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		SignalType:   sig.GetSignalType(),
+		StrategyID:   sig.GetStrategyId(),
+		Symbol:       sig.GetSymbol(),
+		OrderID:      clientID,
+		ClientID:     clientID,
+		Side:         sig.GetAction(),
+		PositionSide: sig.GetSide(),
+		Type:         string(exchange.OrderTypeMarket),
+		Status:       string(status),
+		Quantity:     sig.GetQuantity(),
+		StopLoss:     sig.GetStopLoss(),
+		Atr:          sig.GetAtr(),
+		RiskReward:   sig.GetRiskReward(),
+		Reason:       sig.GetReason(),
+		ErrorMessage: errorMessage,
+		TransactTime: time.Now().UnixMilli(),
+	}
+
+	l.writeJSONL(l.orderLogDir, l.orderFiles, sig.GetSymbol(), entry)
 }
 
 // ---------------------------------------------------------------------------
@@ -185,20 +217,22 @@ func (l *Logger) writeJSONL(logDir string, files map[string]*os.File, symbol str
 
 	now := time.Now().UTC()
 	dateStr := now.Format("2006-01-02")
-	key := fmt.Sprintf("%s/%s", symbol, dateStr)
+	safeSymbol := sanitizePathComponent(symbol)
+	key := fmt.Sprintf("%s/%s", safeSymbol, dateStr)
+	path := filepath.Join(logDir, safeSymbol, dateStr+".jsonl")
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	f, ok := files[key]
 	if !ok {
-		dir := filepath.Join(logDir, symbol)
+		dir := filepath.Dir(path)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			log.Printf("[order-log] 创建目录失败 %s: %v", dir, err)
 			return
 		}
-		path := filepath.Join(dir, dateStr+".jsonl")
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		var err error
+		f, err = os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 		if err != nil {
 			log.Printf("[order-log] 打开文件失败 %s: %v", path, err)
 			return
@@ -207,8 +241,26 @@ func (l *Logger) writeJSONL(logDir string, files map[string]*os.File, symbol str
 	}
 
 	if _, err := f.Write(data); err != nil {
-		log.Printf("[order-log] 写入失败: %v", err)
+		log.Printf("[order-log] 写入失败，准备重试 path=%s symbol=%s: %v", path, symbol, err)
+		_ = f.Close()
+
+		reopened, openErr := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if openErr != nil {
+			delete(files, key)
+			log.Printf("[order-log] 重开文件失败 %s: %v", path, openErr)
+			return
+		}
+		files[key] = reopened
+		if _, retryErr := reopened.Write(data); retryErr != nil {
+			log.Printf("[order-log] 重试写入失败 path=%s symbol=%s: %v", path, symbol, retryErr)
+			return
+		}
 	}
+}
+
+func sanitizePathComponent(s string) string {
+	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_")
+	return replacer.Replace(s)
 }
 
 // Close 关闭所有日志文件
@@ -240,12 +292,19 @@ func round2(v float64) float64 {
 	return r
 }
 
+// round4 四舍五入保留4位小数
+func round4(v float64) float64 {
+	s := strconv.FormatFloat(v, 'f', 4, 64)
+	r, _ := strconv.ParseFloat(s, 64)
+	return r
+}
+
 // formatNumbers 将日志条目中的浮点数格式化为2位小数
 // 通过反射修改结构体字段值
 func formatNumbers(entry interface{}) {
 	switch e := entry.(type) {
 	case *SignalLogEntry:
-		e.Quantity = round2(e.Quantity)
+		e.Quantity = round4(e.Quantity)
 		e.EntryPrice = round2(e.EntryPrice)
 		e.StopLoss = round2(e.StopLoss)
 		e.Atr = round2(e.Atr)
@@ -257,8 +316,8 @@ func formatNumbers(entry interface{}) {
 			e.Indicators[k] = round2(v)
 		}
 	case *OrderLogEntry:
-		e.Quantity = round2(e.Quantity)
-		e.ExecutedQty = round2(e.ExecutedQty)
+		e.Quantity = round4(e.Quantity)
+		e.ExecutedQty = round4(e.ExecutedQty)
 		e.AvgPrice = round2(e.AvgPrice)
 		e.Commission = round2(e.Commission)
 		e.Slippage = round2(e.Slippage)

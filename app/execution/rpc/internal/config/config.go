@@ -56,6 +56,7 @@ type BinanceConfig struct {
 	APIKey    string
 	SecretKey string
 	BaseURL   string
+	Proxy     string
 }
 
 // OKXConfig OKX 交易所配置

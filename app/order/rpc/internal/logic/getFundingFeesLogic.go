@@ -32,7 +32,7 @@ func NewGetFundingFeesLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Ge
 
 // GetFundingFees 查询资金费用
 func (l *GetFundingFeesLogic) GetFundingFees(in *pb.OrderQueryRequest) (*pb.FundingFeeResponse, error) {
-	symbol := in.GetSymbol()
+	symbol := normalizeSymbol(in.GetSymbol())
 
 	limit := int(in.GetLimit())
 	if limit <= 0 {

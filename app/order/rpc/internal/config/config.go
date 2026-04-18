@@ -16,6 +16,9 @@ type Config struct {
 
 	// 数据保存目录（JSONL 格式）
 	DataDir string
+
+	// execution 服务订单日志目录（simulated 模式下的成交来源）
+	ExecutionOrderLogDir string
 }
 
 // BinanceConfig 币安合约 API 配置
@@ -23,4 +26,5 @@ type BinanceConfig struct {
 	BaseURL   string // API 基础端点（如 https://demo-fapi.binance.com）
 	APIKey    string // API Key
 	SecretKey string // Secret Key
+	Proxy     string // 可选代理地址（如 socks5://127.0.0.1:1080）
 }

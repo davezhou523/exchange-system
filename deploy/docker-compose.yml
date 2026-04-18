@@ -4,7 +4,7 @@ services:
     container_name: kafka1
     hostname: kafka1
     ports:
-      - "9092:9092"
+      - "9092:19092"
       - "19092:19092"
     environment:
       KAFKA_CLUSTER_ID: "my-kafka-cluster"

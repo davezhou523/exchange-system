@@ -3,7 +3,9 @@ package svc
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log"
+	"strings"
 	"time"
 
 	"exchange-system/app/execution/rpc/internal/config"
@@ -14,6 +16,7 @@ import (
 	"exchange-system/app/execution/rpc/internal/orderlog"
 	"exchange-system/app/execution/rpc/internal/position"
 	"exchange-system/app/execution/rpc/internal/risk"
+	commonkafka "exchange-system/common/kafka"
 	marketpb "exchange-system/common/pb/market"
 	strategypb "exchange-system/common/pb/strategy"
 )
@@ -61,7 +64,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// 1. 创建 Kafka 订单生产者
-	orderProducer, err := kafka.NewProducer(c.Kafka.Addrs, c.Kafka.Topics.Order)
+	orderProducer, err := kafka.NewProducerWithContext(ctx, c.Kafka.Addrs, c.Kafka.Topics.Order)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("create order producer: %v", err)
@@ -79,6 +82,9 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		return nil, fmt.Errorf("create signal consumer: %v", err)
 	}
 
+	// Periodic lag print for ops/troubleshooting.
+	commonkafka.StartConsumerGroupLagReporter(ctx, c.Kafka.Addrs, groupID, c.Kafka.Topics.Signal, 30*time.Second)
+
 	// 3. 创建下单路由器并注册交易所
 	router := exchange.NewRouter(exchange.RouterConfig{
 		Strategy:        exchange.RouteStrategy(c.Exchange.RouteStrategy),
@@ -91,8 +97,11 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		c.Exchange.Binance.BaseURL,
 		c.Exchange.Binance.APIKey,
 		c.Exchange.Binance.SecretKey,
+		c.Exchange.Binance.Proxy,
 	)
 	router.Register("binance", binanceClient)
+	log.Printf("[初始化] 交易路由配置 | RouteStrategy=%s DefaultExchange=%s BinanceBaseURL=%s BinanceProxy=%s",
+		c.Exchange.RouteStrategy, c.Exchange.DefaultExchange, c.Exchange.Binance.BaseURL, c.Exchange.Binance.Proxy)
 
 	// 注册 OKX 交易所（占位）
 	if c.Exchange.OKX.APIKey != "" {
@@ -179,6 +188,8 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 			cancel()
 			return nil, fmt.Errorf("create kline consumer: %v", err)
 		}
+
+		commonkafka.StartConsumerGroupLagReporter(ctx, c.Kafka.Addrs, klineGroupID, c.Kafka.Topics.Kline, 30*time.Second)
 
 		// 设置模拟撮合成交回调
 		simExchange.SetOnFillCallback(func(result *exchange.OrderResult) {
@@ -268,21 +279,25 @@ func (s *ServiceContext) HandleSignal(ctx context.Context, sig *strategypb.Signa
 		return nil
 	}
 
+	// 3. 确定订单参数
+	orderSide := mapActionToSide(action)
+	posSide := mapSideToPositionSide(side)
+	clientID := buildSignalClientOrderID(strategyID, sig.GetTimestamp())
+
+	// 平仓信号：使用 reduce_only 参数（交易所会自动平掉对应方向的仓位）
+	reduceOnly := signalType == "CLOSE"
+
 	// 2. 风控检查（仅开仓信号需要，平仓信号跳过）
 	if signalType == "OPEN" || signalType == "" {
-		if err := s.performRiskCheck(ctx, symbol, action, quantity, entryPrice); err != nil {
+		adjustedQty, err := s.performRiskCheck(ctx, symbol, action, quantity, entryPrice)
+		if err != nil {
+			s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("risk check failed: %v", err))
 			// 风控拒绝时移除幂等记录，允许后续重试
 			s.deduplicator.Remove(sigKey)
 			return fmt.Errorf("risk check failed: %v", err)
 		}
+		quantity = adjustedQty
 	}
-
-	// 3. 确定订单参数
-	orderSide := mapActionToSide(action)
-	posSide := mapSideToPositionSide(side)
-
-	// 平仓信号：使用 reduce_only 参数（交易所会自动平掉对应方向的仓位）
-	reduceOnly := signalType == "CLOSE"
 
 	// 4. 路由下单
 	orderResult, err := s.router.CreateOrder(ctx, exchange.CreateOrderParam{
@@ -292,10 +307,11 @@ func (s *ServiceContext) HandleSignal(ctx context.Context, sig *strategypb.Signa
 		Type:         exchange.OrderTypeMarket,
 		Quantity:     quantity,
 		Price:        entryPrice,
-		ClientID:     fmt.Sprintf("sig-%s-%d", strategyID, sig.GetTimestamp()),
+		ClientID:     clientID,
 		ReduceOnly:   reduceOnly,
 	})
 	if err != nil {
+		s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("create order failed: %v", err))
 		// 下单失败时移除幂等记录，允许重试
 		s.deduplicator.Remove(sigKey)
 		return fmt.Errorf("create order failed: %v", err)
@@ -452,11 +468,11 @@ func (s *ServiceContext) handleSimFill(result *exchange.OrderResult) {
 }
 
 // performRiskCheck 执行风控检查
-func (s *ServiceContext) performRiskCheck(ctx context.Context, symbol, action string, quantity, price float64) error {
+func (s *ServiceContext) performRiskCheck(ctx context.Context, symbol, action string, quantity, price float64) (float64, error) {
 	// 获取账户信息
 	account, err := s.router.GetAccountInfo(ctx)
 	if err != nil {
-		return fmt.Errorf("get account info: %v", err)
+		return quantity, fmt.Errorf("get account info: %v", err)
 	}
 
 	// 同步仓位到管理器
@@ -465,9 +481,9 @@ func (s *ServiceContext) performRiskCheck(ctx context.Context, symbol, action st
 	// 执行风控检查
 	result := s.riskManager.CheckPreOrder(account, symbol, action, quantity, price)
 	if !result.Passed {
-		return fmt.Errorf("risk rejected: %v", result.Reasons)
+		return quantity, fmt.Errorf("risk rejected: %v", result.Reasons)
 	}
-	return nil
+	return result.AdjustedQuantity, nil
 }
 
 // buildOrderEvent 构建订单结果事件，发布到 Kafka order topic
@@ -529,6 +545,7 @@ func (s *ServiceContext) CreateOrderViaGRPC(ctx context.Context, symbol, side, p
 	if s == nil || s.router == nil {
 		return nil, fmt.Errorf("execution service not initialized")
 	}
+	clientID = normalizeClientOrderID(clientID)
 
 	// 风控检查
 	account, err := s.router.GetAccountInfo(ctx)
@@ -541,6 +558,7 @@ func (s *ServiceContext) CreateOrderViaGRPC(ctx context.Context, symbol, side, p
 	if !result.Passed {
 		return nil, fmt.Errorf("risk rejected: %v", result.Reasons)
 	}
+	quantity = result.AdjustedQuantity
 
 	// 下单
 	return s.router.CreateOrder(ctx, exchange.CreateOrderParam{
@@ -564,6 +582,34 @@ func (s *ServiceContext) CancelOrderViaGRPC(ctx context.Context, symbol, orderID
 		OrderID:       orderID,
 		ClientOrderID: clientOrderID,
 	})
+}
+
+const maxClientOrderIDLen = 36
+
+func buildSignalClientOrderID(strategyID string, timestamp int64) string {
+	return normalizeClientOrderID(fmt.Sprintf("sig-%s-%d", strategyID, timestamp))
+}
+
+func normalizeClientOrderID(clientID string) string {
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" || len(clientID) <= maxClientOrderIDLen {
+		return clientID
+	}
+
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(clientID))
+
+	suffix := ""
+	if idx := strings.LastIndex(clientID, "-"); idx >= 0 && idx < len(clientID)-1 {
+		suffix = clientID[idx+1:]
+	}
+	if len(suffix) > 13 {
+		suffix = suffix[len(suffix)-13:]
+	}
+	if suffix != "" {
+		return fmt.Sprintf("sig-%010x-%s", h.Sum64()&0xffffffffff, suffix)
+	}
+	return fmt.Sprintf("cid-%010x", h.Sum64()&0xffffffffff)
 }
 
 // QueryOrderViaGRPC gRPC 查询订单入口

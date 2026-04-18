@@ -32,10 +32,7 @@ func NewGetAllOrdersLogic(ctx context.Context, svcCtx *svc.ServiceContext) *GetA
 
 // GetAllOrders 查询历史委托
 func (l *GetAllOrdersLogic) GetAllOrders(in *pb.OrderQueryRequest) (*pb.AllOrderResponse, error) {
-	symbol := in.GetSymbol()
-	if symbol == "" {
-		return nil, errSymbolRequired
-	}
+	symbol := normalizeSymbol(in.GetSymbol())
 
 	limit := int(in.GetLimit())
 	if limit <= 0 {

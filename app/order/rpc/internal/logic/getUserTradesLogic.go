@@ -32,10 +32,7 @@ func NewGetUserTradesLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Get
 
 // GetUserTrades 查询历史成交
 func (l *GetUserTradesLogic) GetUserTrades(in *pb.OrderQueryRequest) (*pb.UserTradeResponse, error) {
-	symbol := in.GetSymbol()
-	if symbol == "" {
-		return nil, errSymbolRequired
-	}
+	symbol := normalizeSymbol(in.GetSymbol())
 
 	limit := int(in.GetLimit())
 	if limit <= 0 {

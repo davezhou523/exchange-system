@@ -15,9 +15,9 @@ Kafka:
 # 交易所路由配置
 Exchange:
   # 路由策略: direct=指定交易所 | simulated=模拟撮合 | by_symbol=按交易对路由
-  RouteStrategy: simulated
+  RouteStrategy: direct
   # 默认交易所: binance | okx | simulated
-  DefaultExchange: simulated
+  DefaultExchange: binance
 
   # 按交易对路由映射（RouteStrategy=by_symbol 时生效）
   # SymbolRoutes:
@@ -28,8 +28,9 @@ Exchange:
   Binance:
     BaseURL: https://demo-fapi.binance.com
     Testnet: true
-    APIKey: "XdWkQMlWWMf5Ukr9CvKexKEpTT6MMmih2GeAJ6V9PzyGPzIs3nAuR3YEM5BL6lwU"
-    SecretKey: "BX3tSfEZhbU2RzEahnSVHRLDi1IjU5G4fCGczoe6JgZcGIVNTbS6Xz3614o5Wb5A"
+    APIKey: "EyYZXotRJaaXeycqfwLaDYBREyLTyNQK8lCuZKilieOg5gBgKGnpbdXBSMN7eMjJ"
+    SecretKey: "69wfjz9tkqUykbwlla6HUYcCKuVtRKvOEYoCUC1BdA0dYChSOccJpI1xnUpId0UP"
+    Proxy: socks5://192.168.10.13:1080
 
   # OKX 配置（暂未实现）
   # OKX:
@@ -52,7 +53,7 @@ Exchange:
 
 # 风控配置
 Risk:
-  MaxPositionSize: 0.55         # 单笔最大仓位占比 55%
+  MaxPositionSize: 0.2          # 单笔最大仓位占比 20%
   MaxLeverage: 7.0              # 最大杠杆 7 倍
   MaxDailyLossPct: 0.07         # 最大日亏损 7%
   MaxDrawdownPct: 0.15          # 最大回撤 15%
