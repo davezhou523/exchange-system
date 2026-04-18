@@ -92,14 +92,31 @@ type QueryOrderParam struct {
 
 // PositionInfo 仓位信息
 type PositionInfo struct {
-	Symbol           string  // 交易对
-	PositionAmount   float64 // 持仓数量（正=多头, 负=空头）
-	EntryPrice       float64 // 开仓均价
-	MarkPrice        float64 // 标记价格
-	UnrealizedPnl    float64 // 未实现盈亏
-	LiquidationPrice float64 // 强平价格
-	Leverage         float64 // 杠杆倍数
-	MarginType       string  // 逐仓/全仓
+	Symbol                 string  // 交易对
+	PositionAmount         float64 // 持仓数量（正=多头, 负=空头）
+	EntryPrice             float64 // 开仓均价
+	MarkPrice              float64 // 标记价格
+	UnrealizedPnl          float64 // 未实现盈亏
+	LiquidationPrice       float64 // 强平价格
+	Leverage               float64 // 杠杆倍数
+	MarginType             string  // 逐仓/全仓
+	PositionSide           string  // 持仓方向
+	BreakEvenPrice         float64 // 保本价
+	Notional               float64 // 名义价值
+	InitialMargin          float64 // 初始保证金
+	MaintMargin            float64 // 维持保证金
+	PositionInitialMargin  float64 // 持仓占用初始保证金
+	OpenOrderInitialMargin float64 // 当前委托占用初始保证金
+	IsolatedMargin         float64 // 逐仓保证金
+	BidNotional            float64 // 买单名义价值
+	AskNotional            float64 // 卖单名义价值
+	UpdateTime             int64   // 更新时间（毫秒）
+	Adl                    int32   // ADL 档位
+	PnlPercent             float64 // 仓位收益率
+	StopLossPrice          float64 // 当前止损价
+	TakeProfitPrice        float64 // 当前止盈价
+	FundingRate            float64 // 最近资金费率
+	EstimatedFundingFee    float64 // 预估资金费
 }
 
 // AccountResult 账户信息

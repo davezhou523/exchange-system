@@ -55,6 +55,23 @@ message Position {
   double liquidation_price = 6;
   double leverage = 7;
   string margin_type = 8;
+  string position_side = 9;
+  double break_even_price = 10;
+  double notional = 11;
+  double initial_margin = 12;
+  double maint_margin = 13;
+  double position_initial_margin = 14;
+  double open_order_initial_margin = 15;
+  double isolated_margin = 16;
+  double bid_notional = 17;
+  double ask_notional = 18;
+  int64 update_time = 19;
+  int32 adl = 20;
+  double pnl_percent = 21;
+  double stop_loss_price = 22;
+  double take_profit_price = 23;
+  double funding_rate = 24;
+  double estimated_funding_fee = 25;
 }
 
 service ExecutionService {
@@ -82,4 +99,5 @@ message OrderQuery {
 
 message AccountQuery {
   bool include_positions = 1;
+  string symbol = 2;
 }

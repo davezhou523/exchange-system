@@ -82,11 +82,15 @@ func (c *BinanceClient) signedQuery(query url.Values) (string, error) {
 
 // doSignedRequest 执行带签名的 HTTP 请求
 func (c *BinanceClient) doSignedRequest(ctx context.Context, method, path string, query url.Values, out any) error {
+	return c.doSignedRequestBase(ctx, c.baseURL, method, path, query, out)
+}
+
+func (c *BinanceClient) doSignedRequestBase(ctx context.Context, baseURL, method, path string, query url.Values, out any) error {
 	sq, err := c.signedQuery(query)
 	if err != nil {
 		return err
 	}
-	endpoint := c.baseURL + path + "?" + sq
+	endpoint := strings.TrimRight(baseURL, "/") + path + "?" + sq
 
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
 	if err != nil {
@@ -522,18 +526,64 @@ type binanceAccountResponse struct {
 
 // binancePositionResp 币安期货仓位信息
 type binancePositionResp struct {
-	Symbol           string `json:"symbol"`
-	PositionAmt      string `json:"positionAmt"`
-	EntryPrice       string `json:"entryPrice"`
-	MarkPrice        string `json:"markPrice"`
-	UnrealizedProfit string `json:"unrealizedProfit"`
-	LiquidationPrice string `json:"liquidationPrice"`
-	Leverage         string `json:"leverage"`
-	MarginType       string `json:"marginType"`
+	Symbol                 string `json:"symbol"`
+	PositionAmt            string `json:"positionAmt"`
+	EntryPrice             string `json:"entryPrice"`
+	BreakEvenPrice         string `json:"breakEvenPrice"`
+	MarkPrice              string `json:"markPrice"`
+	UnrealizedProfit       string `json:"unrealizedProfit"`
+	LiquidationPrice       string `json:"liquidationPrice"`
+	Leverage               string `json:"leverage"`
+	MarginType             string `json:"marginType"`
+	PositionSide           string `json:"positionSide"`
+	Notional               string `json:"notional"`
+	InitialMargin          string `json:"initialMargin"`
+	MaintMargin            string `json:"maintMargin"`
+	PositionInitialMargin  string `json:"positionInitialMargin"`
+	OpenOrderInitialMargin string `json:"openOrderInitialMargin"`
+	IsolatedMargin         string `json:"isolatedMargin"`
+	Isolated               bool   `json:"isolated"`
+	BidNotional            string `json:"bidNotional"`
+	AskNotional            string `json:"askNotional"`
+	UpdateTime             int64  `json:"updateTime"`
+	Adl                    int32  `json:"adl"`
+}
+
+type binancePositionRiskResp struct {
+	Symbol                 string `json:"symbol"`
+	PositionAmt            string `json:"positionAmt"`
+	EntryPrice             string `json:"entryPrice"`
+	BreakEvenPrice         string `json:"breakEvenPrice"`
+	MarkPrice              string `json:"markPrice"`
+	UnRealizedProfit       string `json:"unRealizedProfit"`
+	LiquidationPrice       string `json:"liquidationPrice"`
+	Leverage               string `json:"leverage"`
+	MarginType             string `json:"marginType"`
+	PositionSide           string `json:"positionSide"`
+	Notional               string `json:"notional"`
+	IsolatedMargin         string `json:"isolatedMargin"`
+	IsolatedWallet         string `json:"isolatedWallet"`
+	InitialMargin          string `json:"initialMargin"`
+	MaintMargin            string `json:"maintMargin"`
+	PositionInitialMargin  string `json:"positionInitialMargin"`
+	OpenOrderInitialMargin string `json:"openOrderInitialMargin"`
+	Adl                    int32  `json:"adl"`
+	BidNotional            string `json:"bidNotional"`
+	AskNotional            string `json:"askNotional"`
+	UpdateTime             int64  `json:"updateTime"`
 }
 
 // GetAccountInfo 获取账户信息（含全部持仓）
 func (c *BinanceClient) GetAccountInfo(ctx context.Context) (*AccountResult, error) {
+	return c.getAccountInfo(ctx, "")
+}
+
+// GetAccountInfoBySymbol 获取指定交易对的账户仓位详情。
+func (c *BinanceClient) GetAccountInfoBySymbol(ctx context.Context, symbol string) (*AccountResult, error) {
+	return c.getAccountInfo(ctx, strings.ToUpper(strings.TrimSpace(symbol)))
+}
+
+func (c *BinanceClient) getAccountInfo(ctx context.Context, symbol string) (*AccountResult, error) {
 	q := url.Values{}
 	q.Set("recvWindow", "5000")
 
@@ -551,25 +601,421 @@ func (c *BinanceClient) GetAccountInfo(ctx context.Context) (*AccountResult, err
 		Positions:          make([]PositionInfo, 0, len(resp.Positions)),
 	}
 
-	// 只返回有持仓的仓位（positionAmt != 0）
-	for _, p := range resp.Positions {
+	openOrders, err := c.GetOpenOrders(ctx, symbol)
+	if err != nil {
+		return nil, err
+	}
+	sltpMap := buildSLTPMap(openOrders)
+	algoSLTPMap, err := c.getAlgoSLTPMapBestEffort(ctx, symbol)
+	if err == nil {
+		for k, v := range algoSLTPMap {
+			current := sltpMap[k]
+			if current.stopLossPrice == 0 {
+				current.stopLossPrice = v.stopLossPrice
+			}
+			if current.takeProfitPrice == 0 {
+				current.takeProfitPrice = v.takeProfitPrice
+			}
+			sltpMap[k] = current
+		}
+	}
+	accountPositionMap := buildAccountPositionMap(resp.Positions)
+	symbolConfigMap, _ := c.getSymbolConfigBestEffort(ctx, symbol)
+	positionRisks, err := c.getPositionRisk(ctx, symbol)
+	if err != nil {
+		return nil, err
+	}
+
+	// positionRisk 是当前仓位详情的更准确来源，尤其在 Demo/新版合约环境下更稳定。
+	for _, p := range positionRisks {
 		amt := parseFloat(p.PositionAmt)
 		if amt == 0 {
 			continue
 		}
+		positionSide := strings.ToUpper(strings.TrimSpace(p.PositionSide))
+		if positionSide == "" {
+			if amt > 0 {
+				positionSide = string(PosLong)
+			} else {
+				positionSide = string(PosShort)
+			}
+		}
+		notional := parseFloat(p.Notional)
+		unrealizedPnl := parseFloat(p.UnRealizedProfit)
+		accountPos := accountPositionMap[positionKey(strings.ToUpper(p.Symbol), positionSide)]
+		initialMargin := parseFloat(p.InitialMargin)
+		if initialMargin == 0 {
+			initialMargin = accountPos.InitialMargin
+		}
+		pnlPercent := 0.0
+		if initialMargin != 0 {
+			pnlPercent = unrealizedPnl / math.Abs(initialMargin) * 100
+		}
+		key := positionKey(strings.ToUpper(p.Symbol), positionSide)
+		fundingRate := c.getLatestFundingRateValueBestEffort(ctx, p.Symbol)
+		symbolCfg := symbolConfigMap[strings.ToUpper(p.Symbol)]
 		result.Positions = append(result.Positions, PositionInfo{
-			Symbol:           p.Symbol,
-			PositionAmount:   amt,
-			EntryPrice:       parseFloat(p.EntryPrice),
-			MarkPrice:        parseFloat(p.MarkPrice),
-			UnrealizedPnl:    parseFloat(p.UnrealizedProfit),
-			LiquidationPrice: parseFloat(p.LiquidationPrice),
-			Leverage:         parseFloat(p.Leverage),
-			MarginType:       p.MarginType,
+			Symbol:                 p.Symbol,
+			PositionAmount:         amt,
+			EntryPrice:             parseFloat(p.EntryPrice),
+			MarkPrice:              parseFloat(p.MarkPrice),
+			UnrealizedPnl:          unrealizedPnl,
+			LiquidationPrice:       firstNonZero(parseFloat(p.LiquidationPrice), accountPos.LiquidationPrice),
+			Leverage:               firstNonZero(parseFloat(p.Leverage), symbolCfg.Leverage, accountPos.Leverage),
+			MarginType:             firstNonEmpty(p.MarginType, symbolCfg.MarginType, accountPos.MarginType),
+			PositionSide:           positionSide,
+			BreakEvenPrice:         parseFloat(p.BreakEvenPrice),
+			Notional:               notional,
+			InitialMargin:          initialMargin,
+			MaintMargin:            firstNonZero(parseFloat(p.MaintMargin), accountPos.MaintMargin),
+			PositionInitialMargin:  firstNonZero(parseFloat(p.PositionInitialMargin), accountPos.PositionInitialMargin),
+			OpenOrderInitialMargin: firstNonZero(parseFloat(p.OpenOrderInitialMargin), accountPos.OpenOrderInitialMargin),
+			IsolatedMargin:         firstNonZero(parseFloat(p.IsolatedMargin), parseFloat(p.IsolatedWallet), accountPos.IsolatedMargin),
+			BidNotional:            parseFloat(p.BidNotional),
+			AskNotional:            parseFloat(p.AskNotional),
+			UpdateTime:             p.UpdateTime,
+			Adl:                    p.Adl,
+			PnlPercent:             pnlPercent,
+			StopLossPrice:          sltpMap[key].stopLossPrice,
+			TakeProfitPrice:        sltpMap[key].takeProfitPrice,
+			FundingRate:            fundingRate,
+			EstimatedFundingFee:    math.Abs(notional) * fundingRate,
 		})
 	}
 
 	return result, nil
+}
+
+func (c *BinanceClient) getSymbolConfigBestEffort(ctx context.Context, symbol string) (map[string]binanceSymbolConfig, error) {
+	queryCtx, cancel := context.WithTimeout(detachContext(ctx), 250*time.Millisecond)
+	defer cancel()
+
+	q := url.Values{}
+	q.Set("recvWindow", "5000")
+	if symbol != "" {
+		q.Set("symbol", strings.ToUpper(strings.TrimSpace(symbol)))
+	}
+
+	var resp []binanceSymbolConfig
+	if err := c.doSignedRequest(queryCtx, http.MethodGet, "/fapi/v1/symbolConfig", q, &resp); err != nil {
+		return map[string]binanceSymbolConfig{}, err
+	}
+
+	result := make(map[string]binanceSymbolConfig, len(resp))
+	for _, item := range resp {
+		result[strings.ToUpper(item.Symbol)] = item
+	}
+	return result, nil
+}
+
+func (c *BinanceClient) getPositionRisk(ctx context.Context, symbol string) ([]binancePositionRiskResp, error) {
+	q := url.Values{}
+	q.Set("recvWindow", "5000")
+	if symbol != "" {
+		q.Set("symbol", strings.ToUpper(strings.TrimSpace(symbol)))
+	}
+
+	var resp []binancePositionRiskResp
+	if err := c.doSignedRequest(ctx, http.MethodGet, "/fapi/v3/positionRisk", q, &resp); err == nil {
+		return resp, nil
+	}
+
+	var fallback []binancePositionRiskResp
+	if err := c.doSignedRequest(ctx, http.MethodGet, "/fapi/v2/positionRisk", q, &fallback); err != nil {
+		return nil, err
+	}
+	return fallback, nil
+}
+
+func buildAccountPositionMap(positions []binancePositionResp) map[string]PositionInfo {
+	result := make(map[string]PositionInfo, len(positions))
+	for _, p := range positions {
+		amt := parseFloat(p.PositionAmt)
+		if amt == 0 {
+			continue
+		}
+		positionSide := strings.ToUpper(strings.TrimSpace(p.PositionSide))
+		if positionSide == "" {
+			if amt > 0 {
+				positionSide = string(PosLong)
+			} else {
+				positionSide = string(PosShort)
+			}
+		}
+		result[positionKey(strings.ToUpper(p.Symbol), positionSide)] = PositionInfo{
+			InitialMargin:          parseFloat(p.InitialMargin),
+			MaintMargin:            parseFloat(p.MaintMargin),
+			PositionInitialMargin:  parseFloat(p.PositionInitialMargin),
+			OpenOrderInitialMargin: parseFloat(p.OpenOrderInitialMargin),
+			IsolatedMargin:         parseFloat(p.IsolatedMargin),
+			Leverage:               parseFloat(p.Leverage),
+			MarginType:             normalizeMarginType(p.MarginType, p.Isolated),
+			LiquidationPrice:       parseFloat(p.LiquidationPrice),
+		}
+	}
+	return result
+}
+
+func firstNonZero(values ...float64) float64 {
+	for _, v := range values {
+		if v != 0 {
+			return v
+		}
+	}
+	return 0
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func normalizeMarginType(marginType string, isolated bool) string {
+	if strings.TrimSpace(marginType) != "" {
+		return strings.ToUpper(strings.TrimSpace(marginType))
+	}
+	if isolated {
+		return "ISOLATED"
+	}
+	return "CROSSED"
+}
+
+type sltpInfo struct {
+	stopLossPrice   float64
+	takeProfitPrice float64
+}
+
+type binanceAlgoOpenOrdersResponse struct {
+	Total  int                    `json:"total"`
+	Orders []binanceAlgoOpenOrder `json:"orders"`
+}
+
+type binanceAlgoOpenOrder struct {
+	AlgoID        int64  `json:"algoId"`
+	Symbol        string `json:"symbol"`
+	Side          string `json:"side"`
+	PositionSide  string `json:"positionSide"`
+	AlgoStatus    string `json:"algoStatus"`
+	AlgoType      string `json:"algoType"`
+	OrderType     string `json:"orderType"`
+	StopPrice     string `json:"stopPrice"`
+	TriggerPrice  string `json:"triggerPrice"`
+	ActivatePrice string `json:"activatePrice"`
+	ClientAlgoID  string `json:"clientAlgoId"`
+	ReduceOnly    bool   `json:"reduceOnly"`
+	ClosePosition bool   `json:"closePosition"`
+}
+
+type binanceConditionalAlgoOrder struct {
+	AlgoID         int64  `json:"algoId"`
+	ClientAlgoID   string `json:"clientAlgoId"`
+	AlgoType       string `json:"algoType"`
+	OrderType      string `json:"orderType"`
+	Symbol         string `json:"symbol"`
+	Side           string `json:"side"`
+	PositionSide   string `json:"positionSide"`
+	TimeInForce    string `json:"timeInForce"`
+	Quantity       string `json:"quantity"`
+	AlgoStatus     string `json:"algoStatus"`
+	TriggerPrice   string `json:"triggerPrice"`
+	Price          string `json:"price"`
+	TPTriggerPrice string `json:"tpTriggerPrice"`
+	TPPrice        string `json:"tpPrice"`
+	SLTriggerPrice string `json:"slTriggerPrice"`
+	SLPrice        string `json:"slPrice"`
+	WorkingType    string `json:"workingType"`
+	ClosePosition  bool   `json:"closePosition"`
+	PriceProtect   bool   `json:"priceProtect"`
+	ReduceOnly     bool   `json:"reduceOnly"`
+	CreateTime     int64  `json:"createTime"`
+	UpdateTime     int64  `json:"updateTime"`
+	TriggerTime    int64  `json:"triggerTime"`
+}
+
+type binanceSymbolConfig struct {
+	Symbol           string  `json:"symbol"`
+	MarginType       string  `json:"marginType"`
+	IsAutoAddMargin  bool    `json:"isAutoAddMargin"`
+	Leverage         float64 `json:"leverage"`
+	MaxNotionalValue string  `json:"maxNotionalValue"`
+}
+
+func positionKey(symbol, positionSide string) string {
+	return strings.ToUpper(strings.TrimSpace(symbol)) + "|" + strings.ToUpper(strings.TrimSpace(positionSide))
+}
+
+func (c *BinanceClient) getAlgoSLTPMap(ctx context.Context, symbol string) (map[string]sltpInfo, error) {
+	if result, err := c.getConditionalAlgoSLTPMap(ctx, symbol); err == nil && len(result) > 0 {
+		return result, nil
+	}
+
+	q := url.Values{}
+	q.Set("recvWindow", "5000")
+
+	var lastErr error
+	for _, baseURL := range c.algoBaseURLs() {
+		var resp binanceAlgoOpenOrdersResponse
+		err := c.doSignedRequestBase(ctx, baseURL, http.MethodGet, "/sapi/v1/algo/futures/openOrders", q, &resp)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		result := make(map[string]sltpInfo, len(resp.Orders))
+		for _, order := range resp.Orders {
+			key := positionKey(order.Symbol, order.PositionSide)
+			info := result[key]
+			price := firstNonZero(
+				parseFloat(order.TriggerPrice),
+				parseFloat(order.StopPrice),
+				parseFloat(order.ActivatePrice),
+			)
+			typeName := strings.ToUpper(strings.TrimSpace(order.OrderType))
+			if typeName == "" {
+				typeName = strings.ToUpper(strings.TrimSpace(order.AlgoType))
+			}
+
+			switch {
+			case strings.Contains(typeName, "STOP"):
+				info.stopLossPrice = price
+			case strings.Contains(typeName, "TAKE_PROFIT"), strings.Contains(typeName, "TP"):
+				info.takeProfitPrice = price
+			}
+			result[key] = info
+		}
+		return result, nil
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("algo open orders request failed")
+	}
+	return nil, lastErr
+}
+
+func (c *BinanceClient) getAlgoSLTPMapBestEffort(ctx context.Context, symbol string) (map[string]sltpInfo, error) {
+	queryCtx, cancel := context.WithTimeout(detachContext(ctx), 350*time.Millisecond)
+	defer cancel()
+
+	result, err := c.getAlgoSLTPMap(queryCtx, symbol)
+	if err != nil {
+		return map[string]sltpInfo{}, err
+	}
+	return result, nil
+}
+
+func (c *BinanceClient) getConditionalAlgoSLTPMap(ctx context.Context, symbol string) (map[string]sltpInfo, error) {
+	q := url.Values{}
+	q.Set("recvWindow", "5000")
+	if symbol != "" {
+		q.Set("symbol", strings.ToUpper(strings.TrimSpace(symbol)))
+	}
+
+	var orders []binanceConditionalAlgoOrder
+	if err := c.doSignedRequest(ctx, http.MethodGet, "/fapi/v1/algoOrders", q, &orders); err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]sltpInfo, len(orders))
+	for _, order := range orders {
+		if strings.ToUpper(strings.TrimSpace(order.AlgoType)) != "CONDITIONAL" {
+			continue
+		}
+		key := positionKey(order.Symbol, order.PositionSide)
+		info := result[key]
+
+		orderType := strings.ToUpper(strings.TrimSpace(order.OrderType))
+		price := firstNonZero(
+			parseFloat(order.TriggerPrice),
+			parseFloat(order.Price),
+		)
+		switch {
+		case strings.Contains(orderType, "STOP"):
+			info.stopLossPrice = price
+		case strings.Contains(orderType, "TAKE_PROFIT"), strings.Contains(orderType, "TP"):
+			info.takeProfitPrice = price
+		}
+
+		// Some conditional order payloads also expose combined TP/SL trigger fields.
+		if info.stopLossPrice == 0 {
+			info.stopLossPrice = firstNonZero(parseFloat(order.SLTriggerPrice), parseFloat(order.SLPrice))
+		}
+		if info.takeProfitPrice == 0 {
+			info.takeProfitPrice = firstNonZero(parseFloat(order.TPTriggerPrice), parseFloat(order.TPPrice))
+		}
+		result[key] = info
+	}
+	return result, nil
+}
+
+func (c *BinanceClient) algoBaseURLs() []string {
+	candidates := []string{
+		c.baseURL,
+		strings.Replace(c.baseURL, "://demo-fapi.", "://api.", 1),
+		strings.Replace(c.baseURL, "://fapi.", "://api.", 1),
+		"https://api.binance.com",
+	}
+
+	seen := make(map[string]struct{}, len(candidates))
+	result := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidate = strings.TrimRight(strings.TrimSpace(candidate), "/")
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		result = append(result, candidate)
+	}
+	return result
+}
+
+func buildSLTPMap(orders []BinanceOpenOrder) map[string]sltpInfo {
+	result := make(map[string]sltpInfo, len(orders))
+	for _, order := range orders {
+		if !order.ClosePosition {
+			continue
+		}
+		key := positionKey(order.Symbol, order.PositionSide)
+		info := result[key]
+		switch strings.ToUpper(order.Type) {
+		case "STOP_MARKET", "STOP":
+			info.stopLossPrice = parseFloat(order.StopPrice)
+		case "TAKE_PROFIT_MARKET", "TAKE_PROFIT":
+			info.takeProfitPrice = parseFloat(order.StopPrice)
+		}
+		result[key] = info
+	}
+	return result
+}
+
+func (c *BinanceClient) getLatestFundingRateValue(ctx context.Context, symbol string) float64 {
+	if strings.TrimSpace(symbol) == "" {
+		return 0
+	}
+	rates, err := c.GetFundingRate(ctx, symbol, 0, 0, 1)
+	if err != nil || len(rates) == 0 {
+		return 0
+	}
+	return parseFloat(rates[len(rates)-1].FundingRate)
+}
+
+func (c *BinanceClient) getLatestFundingRateValueBestEffort(ctx context.Context, symbol string) float64 {
+	queryCtx, cancel := context.WithTimeout(detachContext(ctx), 250*time.Millisecond)
+	defer cancel()
+	return c.getLatestFundingRateValue(queryCtx, symbol)
+}
+
+func detachContext(parent context.Context) context.Context {
+	if parent == nil {
+		return context.Background()
+	}
+	return context.WithoutCancel(parent)
 }
 
 // parseFloat 安全解析浮点数字符串

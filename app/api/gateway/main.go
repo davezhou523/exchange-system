@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
 
 	"exchange-system/app/api/gateway/internal/config"
 	"exchange-system/app/api/gateway/internal/handler"
@@ -15,6 +16,12 @@ import (
 func main() {
 	configFile := flag.String("f", "app/api/gateway/etc/gateway.yaml", "配置文件路径")
 	flag.Parse()
+
+	if _, err := os.Stat(*configFile); err != nil {
+		if _, fallbackErr := os.Stat("etc/gateway.yaml"); fallbackErr == nil {
+			*configFile = "etc/gateway.yaml"
+		}
+	}
 
 	var c config.Config
 	conf.MustLoad(*configFile, &c)

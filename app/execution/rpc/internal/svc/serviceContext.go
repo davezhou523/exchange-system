@@ -2,9 +2,11 @@ package svc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -729,11 +731,78 @@ func (s *ServiceContext) QueryOrderViaGRPC(ctx context.Context, symbol, orderID,
 }
 
 // GetAccountInfoViaGRPC gRPC 获取账户信息入口
-func (s *ServiceContext) GetAccountInfoViaGRPC(ctx context.Context) (*exchange.AccountResult, error) {
+func (s *ServiceContext) GetAccountInfoViaGRPC(ctx context.Context, symbol string) (*exchange.AccountResult, error) {
 	if s == nil || s.router == nil {
 		return nil, fmt.Errorf("execution service not initialized")
 	}
+	if symbol != "" {
+		routedExchange, err := s.router.Route(symbol)
+		if err != nil {
+			return nil, err
+		}
+		if binanceClient, ok := routedExchange.(*exchange.BinanceClient); ok {
+			return binanceClient.GetAccountInfoBySymbol(ctx, symbol)
+		}
+	}
 	return s.router.GetAccountInfo(ctx)
+}
+
+func (s *ServiceContext) GetLocalPosition(symbol string) (*position.PositionState, bool) {
+	if s == nil || s.posManager == nil || strings.TrimSpace(symbol) == "" {
+		return nil, false
+	}
+	return s.posManager.GetPosition(strings.ToUpper(strings.TrimSpace(symbol)))
+}
+
+func (s *ServiceContext) GetRiskTargetsFromSignalLog(symbol, positionSide string) (float64, float64, bool) {
+	if s == nil || strings.TrimSpace(symbol) == "" || strings.TrimSpace(positionSide) == "" || s.Config.SignalLogDir == "" {
+		return 0, 0, false
+	}
+
+	dateStr := time.Now().UTC().Format("2006-01-02")
+	path := filepath.Join(s.Config.SignalLogDir, strings.ToUpper(strings.TrimSpace(symbol)), dateStr+".jsonl")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, false
+	}
+
+	type signalLogEntry struct {
+		SignalType  string    `json:"signal_type"`
+		Side        string    `json:"side"`
+		StopLoss    float64   `json:"stop_loss"`
+		TakeProfits []float64 `json:"take_profits"`
+	}
+
+	targetSide := strings.ToUpper(strings.TrimSpace(positionSide))
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		var entry signalLogEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if strings.ToUpper(strings.TrimSpace(entry.Side)) != targetSide {
+			continue
+		}
+		switch strings.ToUpper(strings.TrimSpace(entry.SignalType)) {
+		case "CLOSE":
+			return 0, 0, false
+		case "OPEN":
+			takeProfit := 0.0
+			for _, tp := range entry.TakeProfits {
+				if tp > 0 {
+					takeProfit = tp
+					break
+				}
+			}
+			return entry.StopLoss, takeProfit, true
+		}
+	}
+
+	return 0, 0, false
 }
 
 // ---------------------------------------------------------------------------
