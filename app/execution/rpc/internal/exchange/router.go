@@ -141,3 +141,14 @@ func (r *Router) GetAccountInfo(ctx context.Context) (*AccountResult, error) {
 	}
 	return ex.GetAccountInfo(ctx)
 }
+
+// SetStopLossTakeProfit 路由设置止损止盈
+func (r *Router) SetStopLossTakeProfit(ctx context.Context, symbol string, positionSide string, quantity float64, stopLossPrice float64, takeProfitPrices []float64) error {
+	ex, err := r.Route(symbol)
+	if err != nil {
+		return fmt.Errorf("route set stop loss take profit failed: %v", err)
+	}
+	log.Printf("[路由] %s → %s | 设置止损止盈 | 止损=%.2f 止盈=%v",
+		symbol, ex.Name(), stopLossPrice, takeProfitPrices)
+	return ex.SetStopLossTakeProfit(ctx, symbol, positionSide, quantity, stopLossPrice, takeProfitPrices)
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -226,6 +227,15 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		return nil, fmt.Errorf("start signal consumer: %v", err)
 	}
 
+	signalLogAbs, signalLogAbsErr := filepath.Abs(c.SignalLogDir)
+	if signalLogAbsErr != nil {
+		signalLogAbs = c.SignalLogDir
+	}
+	orderLogAbs, orderLogAbsErr := filepath.Abs(c.OrderLogDir)
+	if orderLogAbsErr != nil {
+		orderLogAbs = c.OrderLogDir
+	}
+	log.Printf("[初始化] 日志目录绝对路径 | SignalLogDir=%s OrderLogDir=%s", signalLogAbs, orderLogAbs)
 	log.Printf("[初始化] 执行服务就绪 | 路由策略=%s 默认交易所=%s 风控杠杆=%.0fx | 信号日志=%s 订单日志=%s",
 		c.Exchange.RouteStrategy, c.Exchange.DefaultExchange, riskConfig.MaxLeverage, c.SignalLogDir, c.OrderLogDir)
 
@@ -286,12 +296,26 @@ func (s *ServiceContext) HandleSignal(ctx context.Context, sig *strategypb.Signa
 
 	// 平仓信号：使用 reduce_only 参数（交易所会自动平掉对应方向的仓位）
 	reduceOnly := signalType == "CLOSE"
+	if signalType == "CLOSE" {
+		closeQty, err := s.resolveCloseQuantity(ctx, symbol, side)
+		if err != nil {
+			s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("resolve close quantity failed: %v", err), quantity)
+			s.deduplicator.Remove(sigKey)
+			return fmt.Errorf("resolve close quantity failed: %v", err)
+		}
+		if closeQty <= 0 {
+			log.Printf("[信号] CLOSE信号忽略 | symbol=%s side=%s 无可平仓位", symbol, side)
+			s.deduplicator.Remove(sigKey)
+			return nil
+		}
+		quantity = closeQty
+	}
 
 	// 2. 风控检查（仅开仓信号需要，平仓信号跳过）
 	if signalType == "OPEN" || signalType == "" {
 		adjustedQty, err := s.performRiskCheck(ctx, symbol, action, quantity, entryPrice)
 		if err != nil {
-			s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("risk check failed: %v", err))
+			s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("risk check failed: %v", err), quantity)
 			// 风控拒绝时移除幂等记录，允许后续重试
 			s.deduplicator.Remove(sigKey)
 			return fmt.Errorf("risk check failed: %v", err)
@@ -307,11 +331,12 @@ func (s *ServiceContext) HandleSignal(ctx context.Context, sig *strategypb.Signa
 		Type:         exchange.OrderTypeMarket,
 		Quantity:     quantity,
 		Price:        entryPrice,
+		StopPrice:    sig.GetStopLoss(),
 		ClientID:     clientID,
 		ReduceOnly:   reduceOnly,
 	})
 	if err != nil {
-		s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("create order failed: %v", err))
+		s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("create order failed: %v", err), quantity)
 		// 下单失败时移除幂等记录，允许重试
 		s.deduplicator.Remove(sigKey)
 		return fmt.Errorf("create order failed: %v", err)
@@ -405,7 +430,18 @@ func (s *ServiceContext) handleFilledOrder(sig *strategypb.Signal, orderResult *
 		orderResult.Commission, orderResult.Slippage)
 
 	// 记录订单执行结果日志
-	s.logger.LogOrder(sig, orderResult)
+	s.logger.LogOrder(sig, orderResult, quantity)
+
+	// 开仓成交后设置止损止盈
+	if signalType == "OPEN" || signalType == "" {
+		if stopLoss > 0 || len(takeProfits) > 0 {
+			if err := s.router.SetStopLossTakeProfit(context.Background(), symbol, string(orderResult.PositionSide), quantity, stopLoss, takeProfits); err != nil {
+				log.Printf("[信号] 设置止损止盈失败 | symbol=%s error=%v", symbol, err)
+			} else {
+				log.Printf("[信号] 止损止盈设置成功 | symbol=%s 止损=%.2f 止盈=%v", symbol, stopLoss, takeProfits)
+			}
+		}
+	}
 
 	// 1m撮合模式：开仓成交后设置止损止盈
 	if s.simExchange != nil && s.simExchange.GetMatchMode() == exchange.MatchModeKline1m && signalType == "OPEN" {
@@ -464,7 +500,7 @@ func (s *ServiceContext) handleSimFill(result *exchange.OrderResult) {
 		Side:     string(result.PositionSide),
 		Quantity: result.ExecutedQuantity,
 	}
-	s.logger.LogOrder(sig, result)
+	s.logger.LogOrder(sig, result, result.ExecutedQuantity)
 }
 
 // performRiskCheck 执行风控检查
@@ -484,6 +520,29 @@ func (s *ServiceContext) performRiskCheck(ctx context.Context, symbol, action st
 		return quantity, fmt.Errorf("risk rejected: %v", result.Reasons)
 	}
 	return result.AdjustedQuantity, nil
+}
+
+func (s *ServiceContext) resolveCloseQuantity(ctx context.Context, symbol, side string) (float64, error) {
+	account, err := s.router.GetAccountInfo(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("get account info: %v", err)
+	}
+	s.posManager.UpdateFromExchange(account)
+
+	wantPositive := side == "LONG"
+	totalQty := 0.0
+	for _, pos := range account.Positions {
+		if pos.Symbol != symbol || pos.PositionAmount == 0 {
+			continue
+		}
+		if wantPositive && pos.PositionAmount > 0 {
+			totalQty += pos.PositionAmount
+		}
+		if !wantPositive && pos.PositionAmount < 0 {
+			totalQty += -pos.PositionAmount
+		}
+	}
+	return totalQty, nil
 }
 
 // buildOrderEvent 构建订单结果事件，发布到 Kafka order topic

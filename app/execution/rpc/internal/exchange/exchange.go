@@ -127,6 +127,9 @@ type Exchange interface {
 	// GetAccountInfo 获取账户信息（含持仓）
 	GetAccountInfo(ctx context.Context) (*AccountResult, error)
 
+	// SetStopLossTakeProfit 设置止损止盈
+	SetStopLossTakeProfit(ctx context.Context, symbol string, positionSide string, quantity float64, stopLossPrice float64, takeProfitPrices []float64) error
+
 	// Name 返回交易所名称
 	Name() string
 }

@@ -140,7 +140,7 @@ type binanceCancelResponse struct {
 
 // CreateOrder 创建订单
 func (c *BinanceClient) CreateOrder(ctx context.Context, param CreateOrderParam) (*OrderResult, error) {
-	normalizedQty, qtyPrecision, err := c.normalizeOrderQuantity(ctx, param.Symbol, param.Quantity)
+	normalizedQty, qtyPrecision, err := c.normalizeOrderQuantity(ctx, param)
 	if err != nil {
 		return nil, err
 	}
@@ -206,6 +206,57 @@ func (c *BinanceClient) CreateOrder(ctx context.Context, param CreateOrderParam)
 	return c.convertOrderResponse(&resp), nil
 }
 
+// SetStopLossTakeProfit 设置止损止盈
+func (c *BinanceClient) SetStopLossTakeProfit(ctx context.Context, symbol string, positionSide string, quantity float64, stopLossPrice float64, takeProfitPrices []float64) error {
+	// 设置止损单
+	if stopLossPrice > 0 {
+		side := "SELL"
+		if positionSide == string(PosShort) {
+			side = "BUY"
+		}
+
+		q := url.Values{}
+		q.Set("symbol", strings.ToUpper(symbol))
+		q.Set("side", side)
+		q.Set("positionSide", positionSide)
+		q.Set("type", "STOP_MARKET")
+		q.Set("stopPrice", fmt.Sprintf("%.2f", stopLossPrice))
+		q.Set("closePosition", "true")
+		q.Set("recvWindow", "5000")
+
+		var resp binanceOrderResponse
+		if err := c.doSignedRequest(ctx, http.MethodPost, "/fapi/v1/order", q, &resp); err != nil {
+			return fmt.Errorf("set stop loss failed: %v", err)
+		}
+	}
+
+	// 设置止盈单
+	for i, tpPrice := range takeProfitPrices {
+		if tpPrice > 0 {
+			side := "SELL"
+			if positionSide == string(PosShort) {
+				side = "BUY"
+			}
+
+			q := url.Values{}
+			q.Set("symbol", strings.ToUpper(symbol))
+			q.Set("side", side)
+			q.Set("positionSide", positionSide)
+			q.Set("type", "TAKE_PROFIT_MARKET")
+			q.Set("stopPrice", fmt.Sprintf("%.2f", tpPrice))
+			q.Set("closePosition", "true")
+			q.Set("recvWindow", "5000")
+
+			var resp binanceOrderResponse
+			if err := c.doSignedRequest(ctx, http.MethodPost, "/fapi/v1/order", q, &resp); err != nil {
+				return fmt.Errorf("set take profit %d failed: %v", i+1, err)
+			}
+		}
+	}
+
+	return nil
+}
+
 const fallbackQuantityPrecision = 3
 
 type binanceExchangeInfoResponse struct {
@@ -215,26 +266,26 @@ type binanceExchangeInfoResponse struct {
 	} `json:"symbols"`
 }
 
-func (c *BinanceClient) normalizeOrderQuantity(ctx context.Context, symbol string, quantity float64) (float64, int, error) {
-	if quantity <= 0 {
-		return 0, fallbackQuantityPrecision, fmt.Errorf("quantity must be positive")
+func (c *BinanceClient) normalizeOrderQuantity(ctx context.Context, param CreateOrderParam) (float64, int, error) {
+	if param.Quantity <= 0 {
+		return 0, 2, fmt.Errorf("quantity must be positive")
 	}
 
-	precision, err := c.getQuantityPrecision(ctx, symbol)
-	if err != nil {
-		precision = fallbackQuantityPrecision
-	}
-	if precision < 0 {
-		precision = 0
+	precision := 2
+	if param.ReduceOnly || param.ClosePosition {
+		exchangePrecision, err := c.getQuantityPrecision(ctx, param.Symbol)
+		if err == nil && exchangePrecision >= 0 {
+			precision = exchangePrecision
+		}
 	}
 	if precision > 8 {
 		precision = 8
 	}
 
 	scale := math.Pow10(precision)
-	normalized := math.Floor(quantity*scale+1e-9) / scale
+	normalized := math.Floor(param.Quantity*scale+1e-9) / scale
 	if normalized <= 0 {
-		return 0, precision, fmt.Errorf("quantity %.8f is below minimum precision for %s", quantity, symbol)
+		return 0, precision, fmt.Errorf("quantity %.8f is below minimum precision for %s", param.Quantity, param.Symbol)
 	}
 	return normalized, precision, nil
 }

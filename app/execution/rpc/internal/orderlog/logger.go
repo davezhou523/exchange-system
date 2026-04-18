@@ -114,6 +114,7 @@ type OrderLogEntry struct {
 	Type            string  `json:"type"`
 	Status          string  `json:"status"`
 	Quantity        float64 `json:"quantity"`
+	OrderQuantity   float64 `json:"order_quantity"`
 	ExecutedQty     float64 `json:"executed_qty"`
 	AvgPrice        float64 `json:"avg_price"`
 	Commission      float64 `json:"commission"`
@@ -128,7 +129,7 @@ type OrderLogEntry struct {
 }
 
 // LogOrder 记录订单执行结果
-func (l *Logger) LogOrder(sig *strategypb.Signal, result *exchange.OrderResult) {
+func (l *Logger) LogOrder(sig *strategypb.Signal, result *exchange.OrderResult, orderQuantity float64) {
 	if l == nil || l.orderLogDir == "" {
 		return
 	}
@@ -145,6 +146,7 @@ func (l *Logger) LogOrder(sig *strategypb.Signal, result *exchange.OrderResult) 
 		Type:            string(exchange.OrderTypeMarket),
 		Status:          string(result.Status),
 		Quantity:        sig.GetQuantity(),
+		OrderQuantity:   orderQuantity,
 		ExecutedQty:     result.ExecutedQuantity,
 		AvgPrice:        result.AvgPrice,
 		Commission:      result.Commission,
@@ -162,29 +164,30 @@ func (l *Logger) LogOrder(sig *strategypb.Signal, result *exchange.OrderResult) 
 }
 
 // LogOrderFailure 记录下单失败结果，便于排查风控拒绝或交易所报错。
-func (l *Logger) LogOrderFailure(sig *strategypb.Signal, status exchange.OrderStatus, clientID, errorMessage string) {
+func (l *Logger) LogOrderFailure(sig *strategypb.Signal, status exchange.OrderStatus, clientID, errorMessage string, orderQuantity float64) {
 	if l == nil || l.orderLogDir == "" || sig == nil {
 		return
 	}
 
 	entry := OrderLogEntry{
-		Timestamp:    time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
-		SignalType:   sig.GetSignalType(),
-		StrategyID:   sig.GetStrategyId(),
-		Symbol:       sig.GetSymbol(),
-		OrderID:      clientID,
-		ClientID:     clientID,
-		Side:         sig.GetAction(),
-		PositionSide: sig.GetSide(),
-		Type:         string(exchange.OrderTypeMarket),
-		Status:       string(status),
-		Quantity:     sig.GetQuantity(),
-		StopLoss:     sig.GetStopLoss(),
-		Atr:          sig.GetAtr(),
-		RiskReward:   sig.GetRiskReward(),
-		Reason:       sig.GetReason(),
-		ErrorMessage: errorMessage,
-		TransactTime: time.Now().UnixMilli(),
+		Timestamp:     time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		SignalType:    sig.GetSignalType(),
+		StrategyID:    sig.GetStrategyId(),
+		Symbol:        sig.GetSymbol(),
+		OrderID:       clientID,
+		ClientID:      clientID,
+		Side:          sig.GetAction(),
+		PositionSide:  sig.GetSide(),
+		Type:          string(exchange.OrderTypeMarket),
+		Status:        string(status),
+		Quantity:      sig.GetQuantity(),
+		OrderQuantity: orderQuantity,
+		StopLoss:      sig.GetStopLoss(),
+		Atr:           sig.GetAtr(),
+		RiskReward:    sig.GetRiskReward(),
+		Reason:        sig.GetReason(),
+		ErrorMessage:  errorMessage,
+		TransactTime:  time.Now().UnixMilli(),
 	}
 
 	l.writeJSONL(l.orderLogDir, l.orderFiles, sig.GetSymbol(), entry)
@@ -317,6 +320,7 @@ func formatNumbers(entry interface{}) {
 		}
 	case *OrderLogEntry:
 		e.Quantity = round4(e.Quantity)
+		e.OrderQuantity = round4(e.OrderQuantity)
 		e.ExecutedQty = round4(e.ExecutedQty)
 		e.AvgPrice = round2(e.AvgPrice)
 		e.Commission = round2(e.Commission)

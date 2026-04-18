@@ -155,7 +155,17 @@ func NewSimulatedExchange(config SimConfig) *SimulatedExchange {
 }
 
 // Name 返回交易所名称
-func (s *SimulatedExchange) Name() string { return "simulated" }
+func (s *SimulatedExchange) Name() string {
+	return "simulated"
+}
+
+// SetStopLossTakeProfit 设置止损止盈（模拟交易所）
+func (s *SimulatedExchange) SetStopLossTakeProfit(ctx context.Context, symbol string, positionSide string, quantity float64, stopLossPrice float64, takeProfitPrices []float64) error {
+	// 模拟交易所的止损止盈设置逻辑
+	posSide := PositionSide(positionSide)
+	s.SetPositionSLTP(symbol, posSide, quantity, stopLossPrice, takeProfitPrices, "")
+	return nil
+}
 
 // SetPriceProvider 设置外部价格提供者（用于获取当前市场价格）
 // 此方法可选，默认使用 entry_price 作为成交价
