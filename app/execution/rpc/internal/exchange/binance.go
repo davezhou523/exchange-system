@@ -29,14 +29,17 @@ type BinanceClient struct {
 	apiKey    string
 	secretKey string
 	client    *http.Client
+	leverage  int
 
 	precisionMu          sync.RWMutex
 	quantityPrecisionMap map[string]int
+	leverageMu           sync.RWMutex
+	leverageSet          map[string]int
 }
 
 // NewBinanceClient 创建币安期货客户端
 // baseURL 为空时默认使用正式环境 https://fapi.binance.com
-func NewBinanceClient(baseURL, apiKey, secretKey, proxyURL string) *BinanceClient {
+func NewBinanceClient(baseURL, apiKey, secretKey, proxyURL string, leverage float64) *BinanceClient {
 	if baseURL == "" {
 		baseURL = "https://fapi.binance.com"
 	}
@@ -54,7 +57,9 @@ func NewBinanceClient(baseURL, apiKey, secretKey, proxyURL string) *BinanceClien
 			Transport: transport,
 			Timeout:   30 * time.Second,
 		},
+		leverage:             int(math.Round(leverage)),
 		quantityPrecisionMap: make(map[string]int),
+		leverageSet:          make(map[string]int),
 	}
 }
 
@@ -140,6 +145,12 @@ type binanceCancelResponse struct {
 
 // CreateOrder 创建订单
 func (c *BinanceClient) CreateOrder(ctx context.Context, param CreateOrderParam) (*OrderResult, error) {
+	if !param.ReduceOnly && !param.ClosePosition {
+		if err := c.ensureSymbolLeverage(ctx, param.Symbol); err != nil {
+			return nil, err
+		}
+	}
+
 	normalizedQty, qtyPrecision, err := c.normalizeOrderQuantity(ctx, param)
 	if err != nil {
 		return nil, err
@@ -156,6 +167,10 @@ func (c *BinanceClient) CreateOrder(ctx context.Context, param CreateOrderParam)
 		orderType = string(OrderTypeMarket)
 	}
 	q.Set("type", orderType)
+	if orderType == string(OrderTypeMarket) {
+		// 让市价单直接返回成交结果，避免被误判为 NEW 而跳过订单日志和止损止盈设置。
+		q.Set("newOrderRespType", "RESULT")
+	}
 
 	q.Set("quantity", fmt.Sprintf("%.*f", qtyPrecision, normalizedQty))
 
@@ -206,6 +221,45 @@ func (c *BinanceClient) CreateOrder(ctx context.Context, param CreateOrderParam)
 	return c.convertOrderResponse(&resp), nil
 }
 
+type binanceLeverageResponse struct {
+	Leverage         int    `json:"leverage"`
+	MaxNotionalValue string `json:"maxNotionalValue"`
+	Symbol           string `json:"symbol"`
+}
+
+func (c *BinanceClient) ensureSymbolLeverage(ctx context.Context, symbol string) error {
+	if c.leverage <= 0 {
+		return nil
+	}
+
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		return fmt.Errorf("symbol is required")
+	}
+
+	c.leverageMu.RLock()
+	current, ok := c.leverageSet[symbol]
+	c.leverageMu.RUnlock()
+	if ok && current == c.leverage {
+		return nil
+	}
+
+	q := url.Values{}
+	q.Set("symbol", symbol)
+	q.Set("leverage", strconv.Itoa(c.leverage))
+	q.Set("recvWindow", "5000")
+
+	var resp binanceLeverageResponse
+	if err := c.doSignedRequest(ctx, http.MethodPost, "/fapi/v1/leverage", q, &resp); err != nil {
+		return fmt.Errorf("set leverage failed for %s: %w", symbol, err)
+	}
+
+	c.leverageMu.Lock()
+	c.leverageSet[symbol] = resp.Leverage
+	c.leverageMu.Unlock()
+	return nil
+}
+
 // SetStopLossTakeProfit 设置止损止盈
 func (c *BinanceClient) SetStopLossTakeProfit(ctx context.Context, symbol string, positionSide string, quantity float64, stopLossPrice float64, takeProfitPrices []float64) error {
 	// 设置止损单
@@ -215,46 +269,86 @@ func (c *BinanceClient) SetStopLossTakeProfit(ctx context.Context, symbol string
 			side = "BUY"
 		}
 
-		q := url.Values{}
-		q.Set("symbol", strings.ToUpper(symbol))
-		q.Set("side", side)
-		q.Set("positionSide", positionSide)
-		q.Set("type", "STOP_MARKET")
-		q.Set("stopPrice", fmt.Sprintf("%.2f", stopLossPrice))
-		q.Set("closePosition", "true")
-		q.Set("recvWindow", "5000")
-
-		var resp binanceOrderResponse
-		if err := c.doSignedRequest(ctx, http.MethodPost, "/fapi/v1/order", q, &resp); err != nil {
+		if err := c.createAlgoConditionalOrder(ctx, strings.ToUpper(symbol), side, positionSide, "STOP_MARKET", stopLossPrice, true); err != nil {
 			return fmt.Errorf("set stop loss failed: %v", err)
 		}
 	}
 
-	// 设置止盈单
-	for i, tpPrice := range takeProfitPrices {
-		if tpPrice > 0 {
-			side := "SELL"
-			if positionSide == string(PosShort) {
-				side = "BUY"
-			}
+	// Binance 持仓级 TP/SL 更适合单组全平条件单。
+	// 多段止盈需要拆分仓位分别挂单，当前先使用第一档止盈，确保官网可见且语义明确。
+	takeProfitPrice := 0.0
+	for _, price := range takeProfitPrices {
+		if price > 0 {
+			takeProfitPrice = price
+			break
+		}
+	}
+	if takeProfitPrice > 0 {
+		side := "SELL"
+		if positionSide == string(PosShort) {
+			side = "BUY"
+		}
 
-			q := url.Values{}
-			q.Set("symbol", strings.ToUpper(symbol))
-			q.Set("side", side)
-			q.Set("positionSide", positionSide)
-			q.Set("type", "TAKE_PROFIT_MARKET")
-			q.Set("stopPrice", fmt.Sprintf("%.2f", tpPrice))
-			q.Set("closePosition", "true")
-			q.Set("recvWindow", "5000")
-
-			var resp binanceOrderResponse
-			if err := c.doSignedRequest(ctx, http.MethodPost, "/fapi/v1/order", q, &resp); err != nil {
-				return fmt.Errorf("set take profit %d failed: %v", i+1, err)
-			}
+		if err := c.createAlgoConditionalOrder(ctx, strings.ToUpper(symbol), side, positionSide, "TAKE_PROFIT_MARKET", takeProfitPrice, true); err != nil {
+			return fmt.Errorf("set take profit failed: %v", err)
 		}
 	}
 
 	return nil
+}
+
+type binanceAlgoOrderResponse struct {
+	Symbol       string `json:"symbol"`
+	AlgoId       int64  `json:"algoId"`
+	ClientAlgoId string `json:"clientAlgoId"`
+}
+
+// createAlgoConditionalOrder creates a conditional order via the Futures Algo Order API.
+// Binance migrated conditional order types (STOP_MARKET/TAKE_PROFIT_MARKET, etc.) away from /fapi/v1/order,
+// which now returns -4120 ("use Algo Order API endpoints instead").
+func (c *BinanceClient) createAlgoConditionalOrder(ctx context.Context, symbol, side, positionSide, orderType string, triggerPrice float64, closePosition bool) error {
+	if symbol == "" {
+		return fmt.Errorf("symbol is required")
+	}
+	if side == "" {
+		return fmt.Errorf("side is required")
+	}
+	if orderType == "" {
+		return fmt.Errorf("type is required")
+	}
+	if triggerPrice <= 0 {
+		return fmt.Errorf("trigger price must be positive")
+	}
+
+	q := url.Values{}
+	q.Set("symbol", symbol)
+	q.Set("side", side)
+	if positionSide != "" {
+		q.Set("positionSide", positionSide)
+	}
+	// Binance futures algo orders require the conditional order type and trigger price.
+	q.Set("algoType", "CONDITIONAL")
+	q.Set("type", orderType)
+	q.Set("triggerPrice", fmt.Sprintf("%.2f", triggerPrice))
+	q.Set("workingType", "MARK_PRICE")
+	q.Set("priceProtect", "TRUE")
+	if closePosition {
+		q.Set("closePosition", "true")
+	}
+	q.Set("recvWindow", "5000")
+
+	// Try both known paths to tolerate minor upstream naming differences.
+	var resp binanceAlgoOrderResponse
+	if err := c.doSignedRequest(ctx, http.MethodPost, "/fapi/v1/algo/order", q, &resp); err == nil {
+		return nil
+	} else {
+		var resp2 binanceAlgoOrderResponse
+		err2 := c.doSignedRequest(ctx, http.MethodPost, "/fapi/v1/algoOrder", q, &resp2)
+		if err2 == nil {
+			return nil
+		}
+		return fmt.Errorf("algo endpoint failed: path1=%v; path2=%v", err, err2)
+	}
 }
 
 const fallbackQuantityPrecision = 3

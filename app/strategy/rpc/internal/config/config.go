@@ -20,6 +20,8 @@ type Config struct {
 		}
 	}
 
+	Execution zrpc.RpcClientConf
+
 	KlineLogDir  string
 	SignalLogDir string
 

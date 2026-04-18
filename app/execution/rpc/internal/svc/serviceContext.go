@@ -99,6 +99,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		c.Exchange.Binance.APIKey,
 		c.Exchange.Binance.SecretKey,
 		c.Exchange.Binance.Proxy,
+		c.Risk.MaxLeverage,
 	)
 	router.Register("binance", binanceClient)
 	log.Printf("[初始化] 交易路由配置 | RouteStrategy=%s DefaultExchange=%s BinanceBaseURL=%s BinanceProxy=%s",
@@ -435,19 +436,41 @@ func (s *ServiceContext) handleFilledOrder(sig *strategypb.Signal, orderResult *
 	// 开仓成交后设置止损止盈
 	if signalType == "OPEN" || signalType == "" {
 		if stopLoss > 0 || len(takeProfits) > 0 {
-			if err := s.router.SetStopLossTakeProfit(context.Background(), symbol, string(orderResult.PositionSide), quantity, stopLoss, takeProfits); err != nil {
+			targetPositionSide := string(orderResult.PositionSide)
+			if targetPositionSide == "" || targetPositionSide == string(exchange.PosBoth) {
+				targetPositionSide = string(mapSideToPositionSide(sig.GetSide()))
+			}
+			if err := s.router.SetStopLossTakeProfit(context.Background(), symbol, targetPositionSide, quantity, stopLoss, takeProfits); err != nil {
 				log.Printf("[信号] 设置止损止盈失败 | symbol=%s error=%v", symbol, err)
 			} else {
-				log.Printf("[信号] 止损止盈设置成功 | symbol=%s 止损=%.2f 止盈=%v", symbol, stopLoss, takeProfits)
+				log.Printf("[信号] 止损止盈设置成功 | symbol=%s positionSide=%s 止损=%.2f 止盈=%v", symbol, targetPositionSide, stopLoss, takeProfits)
 			}
 		}
 	}
 
 	// 1m撮合模式：开仓成交后设置止损止盈
-	if s.simExchange != nil && s.simExchange.GetMatchMode() == exchange.MatchModeKline1m && signalType == "OPEN" {
+	if s.shouldUseSimulatedSLTP(symbol) && signalType == "OPEN" {
 		posSide := mapSideToPositionSide(sig.GetSide())
 		s.simExchange.SetPositionSLTP(symbol, posSide, orderResult.ExecutedQuantity, stopLoss, takeProfits, strategyID)
 	}
+}
+
+func (s *ServiceContext) shouldUseSimulatedSLTP(symbol string) bool {
+	if s == nil || s.simExchange == nil {
+		return false
+	}
+	if s.simExchange.GetMatchMode() != exchange.MatchModeKline1m {
+		return false
+	}
+	if s.router == nil {
+		return false
+	}
+
+	routedExchange, err := s.router.Route(symbol)
+	if err != nil {
+		return false
+	}
+	return routedExchange != nil && routedExchange.Name() == "simulated"
 }
 
 // ---------------------------------------------------------------------------

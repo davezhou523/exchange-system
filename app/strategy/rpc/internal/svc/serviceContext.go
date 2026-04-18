@@ -6,12 +6,15 @@ import (
 	"sync"
 	"time"
 
+	"exchange-system/app/execution/rpc/executionservice"
 	"exchange-system/app/strategy/rpc/internal/config"
 	"exchange-system/app/strategy/rpc/internal/kafka"
 	strategyengine "exchange-system/app/strategy/rpc/internal/strategy"
 	commonkafka "exchange-system/common/kafka"
 	"exchange-system/common/pb/market"
 	strategypb "exchange-system/common/pb/strategy"
+
+	"github.com/zeromicro/go-zero/zrpc"
 )
 
 type ServiceContext struct {
@@ -19,6 +22,7 @@ type ServiceContext struct {
 
 	signalProducer *kafka.Producer
 	marketConsumer *kafka.Consumer
+	executionCli   executionservice.ExecutionService
 
 	mu         sync.RWMutex
 	strategies map[string]*strategyengine.TrendFollowingStrategy
@@ -49,10 +53,13 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		return nil, err
 	}
 
+	executionCli := executionservice.NewExecutionService(zrpc.MustNewClient(c.Execution))
+
 	svcCtx := &ServiceContext{
 		Config:         c,
 		signalProducer: signalProducer,
 		marketConsumer: marketConsumer,
+		executionCli:   executionCli,
 		strategies:     make(map[string]*strategyengine.TrendFollowingStrategy),
 		cancel:         cancel,
 	}
@@ -89,6 +96,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		if strat == nil {
 			return nil
 		}
+		svcCtx.reconcileStrategyPosition(ctx, strat, kline)
 		return strat.OnKline(ctx, kline)
 	}); err != nil {
 		_ = marketConsumer.Close()
@@ -101,6 +109,44 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	commonkafka.StartConsumerGroupLagReporter(ctx, c.Kafka.Addrs, groupID, c.Kafka.Topics.Kline, 30*time.Second)
 
 	return svcCtx, nil
+}
+
+func (s *ServiceContext) reconcileStrategyPosition(ctx context.Context, strat *strategyengine.TrendFollowingStrategy, kline *market.Kline) {
+	if s == nil || strat == nil || kline == nil || s.executionCli == nil {
+		return
+	}
+	if kline.Interval != "1m" || !kline.IsFinal {
+		return
+	}
+	if !strat.HasOpenPosition() {
+		return
+	}
+
+	rpcCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	account, err := s.executionCli.GetAccountInfo(rpcCtx, &executionservice.AccountQuery{IncludePositions: true})
+	if err != nil {
+		return
+	}
+
+	longQty := 0.0
+	shortQty := 0.0
+	for _, pos := range account.GetPositions() {
+		if pos.GetSymbol() != kline.Symbol {
+			continue
+		}
+		amt := pos.GetPositionAmount()
+		if amt > 0 {
+			longQty += amt
+			continue
+		}
+		if amt < 0 {
+			shortQty += -amt
+		}
+	}
+
+	strat.ReconcilePositionWithExchange(longQty, shortQty)
 }
 
 func (s *ServiceContext) UpsertStrategy(cfg *strategypb.StrategyConfig) {

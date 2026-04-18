@@ -11,6 +11,9 @@ Kafka:
     Kline: kline
     Signal: signal
 
+Execution:
+  Target: 127.0.0.1:9082
+
 # 多时间周期趋势跟踪策略（Strategy3）
 # 架构：4H趋势判断 + 1H回调确认 + 15M入场信号
 # ⚠️ 当前为调试参数，放宽了过滤条件以便快速触发信号验证流程

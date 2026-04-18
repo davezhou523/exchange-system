@@ -94,7 +94,7 @@ func (l *Logger) LogSignal(sig *strategypb.Signal) {
 		Indicators:  sig.GetIndicators(),
 	}
 
-	l.writeJSONL(l.signalLogDir, l.signalFiles, sig.GetSymbol(), entry)
+	l.writeJSONL(l.signalLogDir, l.signalFiles, sig.GetSymbol(), &entry)
 }
 
 // ---------------------------------------------------------------------------
@@ -125,7 +125,7 @@ type OrderLogEntry struct {
 	RiskReward      float64 `json:"risk_reward"`
 	Reason          string  `json:"reason"`
 	ErrorMessage    string  `json:"error_message,omitempty"`
-	TransactTime    int64   `json:"transact_time"`
+	TransactTime    string  `json:"transact_time"`
 }
 
 // LogOrder 记录订单执行结果
@@ -157,10 +157,10 @@ func (l *Logger) LogOrder(sig *strategypb.Signal, result *exchange.OrderResult, 
 		RiskReward:      sig.GetRiskReward(),
 		Reason:          sig.GetReason(),
 		ErrorMessage:    result.ErrorMessage,
-		TransactTime:    result.TransactTime,
+		TransactTime:    formatMillisTime(result.TransactTime),
 	}
 
-	l.writeJSONL(l.orderLogDir, l.orderFiles, result.Symbol, entry)
+	l.writeJSONL(l.orderLogDir, l.orderFiles, result.Symbol, &entry)
 }
 
 // LogOrderFailure 记录下单失败结果，便于排查风控拒绝或交易所报错。
@@ -187,10 +187,10 @@ func (l *Logger) LogOrderFailure(sig *strategypb.Signal, status exchange.OrderSt
 		RiskReward:    sig.GetRiskReward(),
 		Reason:        sig.GetReason(),
 		ErrorMessage:  errorMessage,
-		TransactTime:  time.Now().UnixMilli(),
+		TransactTime:  formatMillisTime(time.Now().UnixMilli()),
 	}
 
-	l.writeJSONL(l.orderLogDir, l.orderFiles, sig.GetSymbol(), entry)
+	l.writeJSONL(l.orderLogDir, l.orderFiles, sig.GetSymbol(), &entry)
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +300,13 @@ func round4(v float64) float64 {
 	s := strconv.FormatFloat(v, 'f', 4, 64)
 	r, _ := strconv.ParseFloat(s, 64)
 	return r
+}
+
+func formatMillisTime(ms int64) string {
+	if ms <= 0 {
+		return ""
+	}
+	return time.UnixMilli(ms).UTC().Format("2006-01-02 15:04:05")
 }
 
 // formatNumbers 将日志条目中的浮点数格式化为2位小数

@@ -1,5 +1,9 @@
 Name: execution-rpc
 ListenOn: 0.0.0.0:9082
+Log:
+  Level: info
+  Mode: file
+  File: execution.log
 
 Kafka:
   Addrs:

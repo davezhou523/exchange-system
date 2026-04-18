@@ -107,6 +107,8 @@ type TrendFollowingStrategy struct {
 	signalLogFiles map[string]*os.File
 }
 
+const positionSyncEpsilon = 1e-8
+
 // ---------------------------------------------------------------------------
 // 构造函数
 // ---------------------------------------------------------------------------
@@ -123,6 +125,40 @@ func NewTrendFollowingStrategy(symbol string, params map[string]float64, produce
 		signalLogDir:   signalLogDir,
 		signalLogFiles: make(map[string]*os.File),
 	}
+}
+
+func (s *TrendFollowingStrategy) HasOpenPosition() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pos.side != sideNone
+}
+
+func (s *TrendFollowingStrategy) ReconcilePositionWithExchange(longQty, shortQty float64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.pos.side == sideNone {
+		return false
+	}
+
+	switch s.pos.side {
+	case sideLong:
+		if math.Abs(longQty) <= positionSyncEpsilon {
+			log.Printf("[策略纠偏] %s 检测到交易所多头仓位已清空，重置本地持仓状态 | long=%.8f short=%.8f",
+				s.symbol, longQty, shortQty)
+			s.pos = position{}
+			return true
+		}
+	case sideShort:
+		if math.Abs(shortQty) <= positionSyncEpsilon {
+			log.Printf("[策略纠偏] %s 检测到交易所空头仓位已清空，重置本地持仓状态 | long=%.8f short=%.8f",
+				s.symbol, longQty, shortQty)
+			s.pos = position{}
+			return true
+		}
+	}
+
+	return false
 }
 
 // ---------------------------------------------------------------------------
