@@ -244,6 +244,11 @@ func StartConsumerGroupLagReporter(ctx context.Context, brokers []string, groupI
 	go func() {
 		ticker := time.NewTicker(every)
 		defer ticker.Stop()
+		type lagState struct {
+			status string
+			lag    int64
+		}
+		states := make(map[int32]lagState)
 
 		// Run one immediately so operators see it right after startup.
 		for {
@@ -284,6 +289,16 @@ func StartConsumerGroupLagReporter(ctx context.Context, brokers []string, groupI
 
 					pom, err := om.ManagePartition(topic, p)
 					if err != nil {
+						if isOffsetTopicNotReadyErr(err) {
+							prev := states[p]
+							if prev.status != "offset_pending" {
+								log.Printf("[kafka lag] group=%s topic=%s partition=%d waiting for consumer offsets initialization: %v",
+									groupID, topic, p, err)
+							}
+							states[p] = lagState{status: "offset_pending"}
+							continue
+						}
+						delete(states, p)
 						log.Printf("[kafka lag] group=%s topic=%s partition=%d manage err=%v", groupID, topic, p, err)
 						continue
 					}
@@ -291,17 +306,30 @@ func StartConsumerGroupLagReporter(ctx context.Context, brokers []string, groupI
 					_ = pom.Close()
 
 					if committed < 0 {
-						// No committed offset yet.
-						log.Printf("[kafka lag] group=%s topic=%s partition=%d committed=%d newest=%d lag=?",
-							groupID, topic, p, committed, newest)
+						prev := states[p]
+						if prev.status != "no_commit" {
+							log.Printf("[kafka lag] group=%s topic=%s partition=%d committed=%d newest=%d lag=?",
+								groupID, topic, p, committed, newest)
+						}
+						states[p] = lagState{status: "no_commit"}
 						continue
 					}
 					lag := newest - committed
 					if lag < 0 {
 						lag = 0
 					}
-					log.Printf("[kafka lag] group=%s topic=%s partition=%d committed=%d newest=%d lag=%d",
-						groupID, topic, p, committed, newest, lag)
+					prev := states[p]
+					if lag > 0 {
+						log.Printf("[kafka lag] group=%s topic=%s partition=%d committed=%d newest=%d lag=%d",
+							groupID, topic, p, committed, newest, lag)
+						states[p] = lagState{status: "lagging", lag: lag}
+						continue
+					}
+					if prev.status != "caught_up" || prev.lag != 0 {
+						log.Printf("[kafka lag] group=%s topic=%s partition=%d committed=%d newest=%d lag=%d",
+							groupID, topic, p, committed, newest, lag)
+					}
+					states[p] = lagState{status: "caught_up", lag: lag}
 				}
 			}
 
@@ -314,6 +342,15 @@ func StartConsumerGroupLagReporter(ctx context.Context, brokers []string, groupI
 			}
 		}
 	}()
+}
+
+func isOffsetTopicNotReadyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "offset's topic has not yet been created") ||
+		strings.Contains(msg, "offsets topic has not yet been created")
 }
 
 func ExtractSymbol(data interface{}) string {

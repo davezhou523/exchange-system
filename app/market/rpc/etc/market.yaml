@@ -11,6 +11,7 @@ Kafka:
     - 127.0.0.1:39092
   Topics:
     Kline: kline
+    Depth: depth
 
 KlineLogDir: data/kline
 

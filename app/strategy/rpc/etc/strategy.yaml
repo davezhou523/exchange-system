@@ -9,7 +9,9 @@ Kafka:
   Group: strategy-rpc-kline
   Topics:
     Kline: kline
+    Depth: depth
     Signal: signal
+    HarvestPathSignal: harvest_path_signal
 
 Execution:
   Target: 127.0.0.1:9082
@@ -69,6 +71,21 @@ Strategies:
       1m_min_holding_bars: 5          # 1m 最小持仓K线数
       1m_ema_exit_buffer_atr: 0.30    # 1m EMA破位缓冲ATR倍数
 
+      # === 收割路径风险过滤 / harvest_path_signal ===
+      harvest_path_model_enabled: 1
+      harvest_path_publish_threshold: 0.60
+      harvest_path_lookback: 20
+      harvest_path_block_threshold: 0.80
+      harvest_path_log_threshold: 0.60
+      harvest_path_lstm_enabled: 0
+      harvest_path_lstm_weight: 0.35
+      harvest_path_book_enabled: 0
+      harvest_path_book_weight: 0.35
+      harvest_path_book_top_n: 10
+      harvest_path_book_spread_bps_cap: 12
+      harvest_path_regime_aware_threshold_enabled: 1
+      harvest_path_regime_lookback: 120
+
       # === 风险约束（放宽）===
       max_consecutive_losses: 10       # 最大连续亏损次数（放宽：3→10）
       max_daily_loss_pct: 0.50        # 最大日亏损比例（放宽：7%→50%）
@@ -80,6 +97,14 @@ Strategy:
   Symbol: ETHUSDT
   Name: strategy3
   RuntimeMode: kafka
+
+HarvestPathLSTM:
+  Enabled: false
+  PythonBin: python3
+  ScriptPath: tools/harvestpath_lstm/predict.py
+  DataDir: app/strategy/rpc/data/kline
+  ArtifactsDir: tools/harvestpath_lstm/artifacts
+  TimeoutMs: 2500
 
 KlineLogDir: data/kline
 SignalLogDir: data/signal

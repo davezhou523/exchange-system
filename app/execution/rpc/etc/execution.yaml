@@ -13,6 +13,7 @@ Kafka:
   Group: execution-rpc-signal
   Topics:
     Signal: signal
+    HarvestPathSignal: harvest_path_signal
     Order: order
     Kline: kline            # 1m K线 topic（MatchMode=1m 时消费）
 

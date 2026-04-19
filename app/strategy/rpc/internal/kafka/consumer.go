@@ -26,6 +26,7 @@ type Consumer struct {
 }
 
 type MarketDataHandler func(kline *market.Kline) error
+type DepthHandler func(depth *market.Depth) error
 
 func NewConsumer(brokers []string, groupID string, topic string, klineLogDir string) (*Consumer, error) {
 	if groupID == "" {
@@ -82,45 +83,58 @@ func (c *Consumer) StartConsuming(ctx context.Context, handler MarketDataHandler
 		}
 	}()
 
-	go func() {
-		attempt := 0
-		for {
-			err := c.group.Consume(ctx, []string{c.topic}, h)
-			if err != nil {
-				log.Printf("kafka consume loop error group=%s topic=%s err=%v", c.groupID, c.topic, err)
-				if commonkafka.ShouldRetryConsumeErr(err) {
-					sleep := commonkafka.RetryBackoff(attempt)
-					if sleep < 2*time.Second {
-						sleep = 2 * time.Second
-					}
-					log.Printf("kafka consume retry group=%s topic=%s attempt=%d sleep=%v", c.groupID, c.topic, attempt, sleep)
-					time.Sleep(sleep)
-					if attempt < 8 {
-						attempt++
-					}
-				} else {
-					// 非临时错误也做指数退避，避免疯狂重试打日志
-					sleep := commonkafka.RetryBackoff(attempt)
-					if sleep < 3*time.Second {
-						sleep = 3 * time.Second
-					}
-					log.Printf("kafka consume non-retryable error, backing off group=%s topic=%s attempt=%d sleep=%v", c.groupID, c.topic, attempt, sleep)
-					time.Sleep(sleep)
-					if attempt < 8 {
-						attempt++
-					}
-				}
-				continue
-			}
-			attempt = 0
-			if ctx.Err() != nil {
-				return
-			}
-			// Prevent rebalance storm: small cooldown after each Consume cycle
-			time.Sleep(2 * time.Second)
-		}
-	}()
+	go c.consumeLoop(ctx, h)
 	return nil
+}
+
+func (c *Consumer) StartConsumingDepth(ctx context.Context, handler DepthHandler) error {
+	if c == nil || c.group == nil {
+		return fmt.Errorf("consumer group not initialized")
+	}
+	if handler == nil {
+		return fmt.Errorf("depth handler is nil")
+	}
+
+	h := &marketDepthGroupHandler{handler: handler, groupID: c.groupID, topic: c.topic}
+	go c.consumeLoop(ctx, h)
+	return nil
+}
+
+func (c *Consumer) consumeLoop(ctx context.Context, handler sarama.ConsumerGroupHandler) {
+	attempt := 0
+	for {
+		err := c.group.Consume(ctx, []string{c.topic}, handler)
+		if err != nil {
+			log.Printf("kafka consume loop error group=%s topic=%s err=%v", c.groupID, c.topic, err)
+			if commonkafka.ShouldRetryConsumeErr(err) {
+				sleep := commonkafka.RetryBackoff(attempt)
+				if sleep < 2*time.Second {
+					sleep = 2 * time.Second
+				}
+				log.Printf("kafka consume retry group=%s topic=%s attempt=%d sleep=%v", c.groupID, c.topic, attempt, sleep)
+				time.Sleep(sleep)
+				if attempt < 8 {
+					attempt++
+				}
+			} else {
+				sleep := commonkafka.RetryBackoff(attempt)
+				if sleep < 3*time.Second {
+					sleep = 3 * time.Second
+				}
+				log.Printf("kafka consume non-retryable error, backing off group=%s topic=%s attempt=%d sleep=%v", c.groupID, c.topic, attempt, sleep)
+				time.Sleep(sleep)
+				if attempt < 8 {
+					attempt++
+				}
+			}
+			continue
+		}
+		attempt = 0
+		if ctx.Err() != nil {
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
 
 type marketKlineGroupHandler struct {
@@ -130,6 +144,12 @@ type marketKlineGroupHandler struct {
 	consumer *Consumer
 }
 
+type marketDepthGroupHandler struct {
+	handler DepthHandler
+	groupID string
+	topic   string
+}
+
 func (h *marketKlineGroupHandler) Setup(s sarama.ConsumerGroupSession) error {
 	log.Printf("kafka consumer-group setup group=%s topic=%s member=%s generation=%d claims=%v", h.groupID, h.topic, s.MemberID(), s.GenerationID(), s.Claims())
 	return nil
@@ -137,6 +157,16 @@ func (h *marketKlineGroupHandler) Setup(s sarama.ConsumerGroupSession) error {
 
 func (h *marketKlineGroupHandler) Cleanup(s sarama.ConsumerGroupSession) error {
 	log.Printf("kafka consumer-group cleanup group=%s topic=%s member=%s generation=%d", h.groupID, h.topic, s.MemberID(), s.GenerationID())
+	return nil
+}
+
+func (h *marketDepthGroupHandler) Setup(s sarama.ConsumerGroupSession) error {
+	log.Printf("kafka depth consumer-group setup group=%s topic=%s member=%s generation=%d claims=%v", h.groupID, h.topic, s.MemberID(), s.GenerationID(), s.Claims())
+	return nil
+}
+
+func (h *marketDepthGroupHandler) Cleanup(s sarama.ConsumerGroupSession) error {
+	log.Printf("kafka depth consumer-group cleanup group=%s topic=%s member=%s generation=%d", h.groupID, h.topic, s.MemberID(), s.GenerationID())
 	return nil
 }
 
@@ -179,6 +209,25 @@ func (h *marketKlineGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSessi
 		}
 		if err := h.handler(&k); err != nil {
 			log.Printf("kafka handler failed group=%s topic=%s partition=%d offset=%d symbol=%s interval=%s err=%v", h.groupID, msg.Topic, msg.Partition, msg.Offset, k.Symbol, k.Interval, err)
+		}
+		session.MarkMessage(msg, "")
+	}
+	return nil
+}
+
+func (h *marketDepthGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	for msg := range claim.Messages() {
+		if msg == nil {
+			continue
+		}
+		var depth market.Depth
+		if err := json.Unmarshal(msg.Value, &depth); err != nil {
+			log.Printf("kafka depth unmarshal failed group=%s topic=%s partition=%d offset=%d err=%v", h.groupID, msg.Topic, msg.Partition, msg.Offset, err)
+			session.MarkMessage(msg, "")
+			continue
+		}
+		if err := h.handler(&depth); err != nil {
+			log.Printf("kafka depth handler failed group=%s topic=%s partition=%d offset=%d symbol=%s err=%v", h.groupID, msg.Topic, msg.Partition, msg.Offset, depth.Symbol, err)
 		}
 		session.MarkMessage(msg, "")
 	}

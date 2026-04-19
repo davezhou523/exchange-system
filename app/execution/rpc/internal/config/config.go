@@ -9,9 +9,10 @@ type Config struct {
 		Addrs  []string
 		Group  string
 		Topics struct {
-			Signal string // 消费的策略信号 topic
-			Order  string // 生产的订单结果 topic
-			Kline  string // 消费的1m K线 topic（1m撮合模式下使用）
+			Signal            string // 消费的策略信号 topic
+			HarvestPathSignal string // 消费的收割路径风险 topic
+			Order             string // 生产的订单结果 topic
+			Kline             string // 消费的1m K线 topic（1m撮合模式下使用）
 		}
 	}
 

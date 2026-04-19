@@ -16,6 +16,7 @@ func RegisterHandlers(server *rest.Server, serviceContext *svc.ServiceContext) {
 		{Method: http.MethodGet, Path: "/orders", Handler: AllOrdersHandler(serviceContext)},
 		{Method: http.MethodGet, Path: "/trades", Handler: UserTradesHandler(serviceContext)},
 		{Method: http.MethodGet, Path: "/position-cycles", Handler: PositionCyclesHandler(serviceContext)},
+		{Method: http.MethodGet, Path: "/position-cycles.csv", Handler: PositionCyclesCSVHandler(serviceContext)},
 		{Method: http.MethodGet, Path: "/account", Handler: AccountHandler(serviceContext)},
 		{Method: http.MethodPost, Path: "/strategy/start", Handler: StartStrategyHandler(serviceContext)},
 		{Method: http.MethodPost, Path: "/strategy/stop", Handler: StopStrategyHandler(serviceContext)},

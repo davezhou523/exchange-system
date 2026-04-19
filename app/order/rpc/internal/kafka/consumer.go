@@ -14,23 +14,42 @@ import (
 )
 
 type OrderEvent struct {
-	OrderID         string    `json:"order_id"`
-	ClientID        string    `json:"client_id"`
-	Symbol          string    `json:"symbol"`
-	Status          string    `json:"status"`
-	SignalType      string    `json:"signal_type"`
-	Side            string    `json:"side"`
-	PositionSide    string    `json:"position_side"`
-	Quantity        float64   `json:"quantity"`
-	AvgPrice        float64   `json:"avg_price"`
-	Commission      float64   `json:"commission"`
-	CommissionAsset string    `json:"commission_asset"`
-	Slippage        float64   `json:"slippage"`
-	Timestamp       int64     `json:"timestamp"`
-	StrategyID      string    `json:"strategy_id"`
-	StopLoss        float64   `json:"stop_loss"`
-	TakeProfits     []float64 `json:"take_profits"`
-	Reason          string    `json:"reason"`
+	OrderID                    string        `json:"order_id"`
+	ClientID                   string        `json:"client_id"`
+	Symbol                     string        `json:"symbol"`
+	Status                     string        `json:"status"`
+	SignalType                 string        `json:"signal_type"`
+	Side                       string        `json:"side"`
+	PositionSide               string        `json:"position_side"`
+	Quantity                   float64       `json:"quantity"`
+	AvgPrice                   float64       `json:"avg_price"`
+	Commission                 float64       `json:"commission"`
+	CommissionAsset            string        `json:"commission_asset"`
+	Slippage                   float64       `json:"slippage"`
+	Timestamp                  int64         `json:"timestamp"`
+	StrategyID                 string        `json:"strategy_id"`
+	StopLoss                   float64       `json:"stop_loss"`
+	TakeProfits                []float64     `json:"take_profits"`
+	Reason                     string        `json:"reason"`
+	SignalReason               *SignalReason `json:"signal_reason"`
+	HarvestPathProbability     float64       `json:"harvest_path_probability"`
+	HarvestPathRuleProbability float64       `json:"harvest_path_rule_probability"`
+	HarvestPathLSTMProbability float64       `json:"harvest_path_lstm_probability"`
+	HarvestPathAction          string        `json:"harvest_path_action"`
+	HarvestPathRiskLevel       string        `json:"harvest_path_risk_level"`
+	HarvestPathTargetSide      string        `json:"harvest_path_target_side"`
+	HarvestPathReferencePrice  float64       `json:"harvest_path_reference_price"`
+	HarvestPathMarketPrice     float64       `json:"harvest_path_market_price"`
+}
+
+type SignalReason struct {
+	Summary          string   `json:"summary"`
+	Phase            string   `json:"phase"`
+	TrendContext     string   `json:"trend_context"`
+	SetupContext     string   `json:"setup_context"`
+	PathContext      string   `json:"path_context"`
+	ExecutionContext string   `json:"execution_context"`
+	Tags             []string `json:"tags"`
 }
 
 type OrderEventHandler func(event *OrderEvent) error

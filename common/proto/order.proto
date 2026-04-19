@@ -41,6 +41,16 @@ message OpenOrderItem {
 }
 
 // 历史委托条目
+message SignalReason {
+  string summary = 1;
+  string phase = 2;
+  string trend_context = 3;
+  string setup_context = 4;
+  string path_context = 5;
+  string execution_context = 6;
+  repeated string tags = 7;
+}
+
 message AllOrderItem {
   int64 order_id = 1;
   string symbol = 2;
@@ -64,6 +74,21 @@ message AllOrderItem {
   string actual_fee_asset = 20;
   string action_type = 21;
   string position_cycle_id = 22;
+  string harvest_path_probability = 23;
+  string harvest_path_action = 24;
+  string harvest_path_risk_level = 25;
+  string harvest_path_target_side = 26;
+  string harvest_path_reference_price = 27;
+  string harvest_path_market_price = 28;
+  string reason = 29;
+  SignalReason signal_reason = 30;
+  string harvest_path_lstm_probability = 31;
+  string harvest_path_rule_probability = 32;
+  string harvest_path_volatility_regime = 33;
+  string harvest_path_threshold_source = 34;
+  string harvest_path_applied_threshold = 35;
+  string harvest_path_book_probability = 36;
+  string harvest_path_book_summary = 37;
 }
 
 // 历史成交条目

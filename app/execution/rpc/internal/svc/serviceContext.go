@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"exchange-system/app/execution/rpc/internal/config"
@@ -54,12 +56,35 @@ type ServiceContext struct {
 	simExchange *exchange.SimulatedExchange
 
 	// Kafka
-	signalConsumer *kafka.Consumer
-	klineConsumer  *kafka.KlineConsumer // 1m K线消费者（1m撮合模式）
-	orderProducer  *kafka.Producer
+	signalConsumer      *kafka.Consumer
+	harvestPathConsumer *kafka.HarvestPathConsumer
+	klineConsumer       *kafka.KlineConsumer // 1m K线消费者（1m撮合模式）
+	orderProducer       *kafka.Producer
+
+	harvestPathMu      sync.RWMutex
+	harvestPathSignals map[string]harvestPathRiskSnapshot
 
 	// 生命周期
 	cancel context.CancelFunc
+}
+
+type harvestPathRiskSnapshot struct {
+	Symbol                 string
+	EventTime              int64
+	HarvestPathProbability float64
+	RuleProbability        float64
+	LSTMProbability        float64
+	BookProbability        float64
+	BookSummary            string
+	VolatilityRegime       string
+	ThresholdSource        string
+	AppliedThreshold       float64
+	PathAction             string
+	RiskLevel              string
+	TargetSide             string
+	ReferencePrice         float64
+	MarketPrice            float64
+	ReceivedAt             time.Time
 }
 
 // NewServiceContext 创建执行服务上下文
@@ -84,9 +109,22 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		cancel()
 		return nil, fmt.Errorf("create signal consumer: %v", err)
 	}
+	var harvestPathConsumer *kafka.HarvestPathConsumer
+	if c.Kafka.Topics.HarvestPathSignal != "" {
+		harvestPathConsumer, err = kafka.NewHarvestPathConsumer(c.Kafka.Addrs, groupID+"-harvest-path", c.Kafka.Topics.HarvestPathSignal)
+		if err != nil {
+			_ = signalConsumer.Close()
+			_ = orderProducer.Close()
+			cancel()
+			return nil, fmt.Errorf("create harvest path consumer: %v", err)
+		}
+	}
 
 	// Periodic lag print for ops/troubleshooting.
 	commonkafka.StartConsumerGroupLagReporter(ctx, c.Kafka.Addrs, groupID, c.Kafka.Topics.Signal, 30*time.Second)
+	if c.Kafka.Topics.HarvestPathSignal != "" {
+		commonkafka.StartConsumerGroupLagReporter(ctx, c.Kafka.Addrs, groupID+"-harvest-path", c.Kafka.Topics.HarvestPathSignal, 30*time.Second)
+	}
 
 	// 3. 创建下单路由器并注册交易所
 	router := exchange.NewRouter(exchange.RouterConfig{
@@ -167,17 +205,19 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 
 	// 8. 构建服务上下文
 	svcCtx := &ServiceContext{
-		Config:         c,
-		router:         router,
-		riskManager:    riskManager,
-		orderManager:   orderManager,
-		posManager:     posManager,
-		deduplicator:   deduplicator,
-		logger:         logger,
-		simExchange:    simExchange,
-		signalConsumer: signalConsumer,
-		orderProducer:  orderProducer,
-		cancel:         cancel,
+		Config:              c,
+		router:              router,
+		riskManager:         riskManager,
+		orderManager:        orderManager,
+		posManager:          posManager,
+		deduplicator:        deduplicator,
+		logger:              logger,
+		simExchange:         simExchange,
+		signalConsumer:      signalConsumer,
+		harvestPathConsumer: harvestPathConsumer,
+		orderProducer:       orderProducer,
+		harvestPathSignals:  make(map[string]harvestPathRiskSnapshot),
+		cancel:              cancel,
 	}
 
 	// 9. 1m K线撮合模式下，启动1m K线消费者
@@ -186,6 +226,9 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		klineGroupID := groupID + "-1m"
 		klineConsumer, err = kafka.NewKlineConsumer(c.Kafka.Addrs, klineGroupID, c.Kafka.Topics.Kline)
 		if err != nil {
+			if harvestPathConsumer != nil {
+				_ = harvestPathConsumer.Close()
+			}
 			_ = signalConsumer.Close()
 			_ = orderProducer.Close()
 			logger.Close()
@@ -205,6 +248,9 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 			return svcCtx.handleKline1m(kline)
 		}); err != nil {
 			_ = klineConsumer.Close()
+			if harvestPathConsumer != nil {
+				_ = harvestPathConsumer.Close()
+			}
 			_ = signalConsumer.Close()
 			_ = orderProducer.Close()
 			logger.Close()
@@ -216,11 +262,31 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		log.Printf("[初始化] 1m K线撮合消费者已启动 | topic=%s group=%s", c.Kafka.Topics.Kline, klineGroupID)
 	}
 
+	if harvestPathConsumer != nil {
+		if err := harvestPathConsumer.StartConsuming(ctx, func(sig *kafka.HarvestPathSignal) error {
+			return svcCtx.handleHarvestPathSignal(sig)
+		}); err != nil {
+			_ = harvestPathConsumer.Close()
+			_ = signalConsumer.Close()
+			if klineConsumer != nil {
+				_ = klineConsumer.Close()
+			}
+			_ = orderProducer.Close()
+			logger.Close()
+			cancel()
+			return nil, fmt.Errorf("start harvest path consumer: %v", err)
+		}
+		log.Printf("[初始化] 收割路径风险消费者已启动 | topic=%s group=%s", c.Kafka.Topics.HarvestPathSignal, groupID+"-harvest-path")
+	}
+
 	// 10. 启动信号消费
 	if err := signalConsumer.StartConsuming(ctx, func(sig *strategypb.Signal) error {
 		return svcCtx.HandleSignal(ctx, sig)
 	}); err != nil {
 		_ = signalConsumer.Close()
+		if harvestPathConsumer != nil {
+			_ = harvestPathConsumer.Close()
+		}
 		if klineConsumer != nil {
 			_ = klineConsumer.Close()
 		}
@@ -302,7 +368,7 @@ func (s *ServiceContext) HandleSignal(ctx context.Context, sig *strategypb.Signa
 	if signalType == "CLOSE" {
 		closeQty, err := s.resolveCloseQuantity(ctx, symbol, side)
 		if err != nil {
-			s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("resolve close quantity failed: %v", err), quantity)
+			s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("resolve close quantity failed: %v", err), quantity, s.currentHarvestPathMeta(symbol, side))
 			s.deduplicator.Remove(sigKey)
 			return fmt.Errorf("resolve close quantity failed: %v", err)
 		}
@@ -316,9 +382,16 @@ func (s *ServiceContext) HandleSignal(ctx context.Context, sig *strategypb.Signa
 
 	// 2. 风控检查（仅开仓信号需要，平仓信号跳过）
 	if signalType == "OPEN" || signalType == "" {
+		wickAdjustedQty, wickErr := s.applyHarvestPathRisk(symbol, side, quantity, entryPrice)
+		if wickErr != nil {
+			s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("harvest path risk rejected: %v", wickErr), quantity, s.currentHarvestPathMeta(symbol, side))
+			s.deduplicator.Remove(sigKey)
+			return fmt.Errorf("harvest path risk rejected: %v", wickErr)
+		}
+		quantity = wickAdjustedQty
 		adjustedQty, err := s.performRiskCheck(ctx, symbol, action, quantity, entryPrice)
 		if err != nil {
-			s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("risk check failed: %v", err), quantity)
+			s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("risk check failed: %v", err), quantity, s.currentHarvestPathMeta(symbol, side))
 			// 风控拒绝时移除幂等记录，允许后续重试
 			s.deduplicator.Remove(sigKey)
 			return fmt.Errorf("risk check failed: %v", err)
@@ -327,7 +400,7 @@ func (s *ServiceContext) HandleSignal(ctx context.Context, sig *strategypb.Signa
 
 		// 新开仓前先清理该交易对遗留的保护单，避免官网页面残留旧止损止盈造成混淆。
 		if err := s.cancelRiskOrdersBeforeOpen(ctx, symbol); err != nil {
-			s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("cancel stale stop/take orders failed: %v", err), quantity)
+			s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("cancel stale stop/take orders failed: %v", err), quantity, s.currentHarvestPathMeta(symbol, side))
 			s.deduplicator.Remove(sigKey)
 			return fmt.Errorf("cancel stale stop/take orders failed: %v", err)
 		}
@@ -346,7 +419,7 @@ func (s *ServiceContext) HandleSignal(ctx context.Context, sig *strategypb.Signa
 		ReduceOnly:   reduceOnly,
 	})
 	if err != nil {
-		s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("create order failed: %v", err), quantity)
+		s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("create order failed: %v", err), quantity, s.currentHarvestPathMeta(symbol, side))
 		// 下单失败时移除幂等记录，允许重试
 		s.deduplicator.Remove(sigKey)
 		return fmt.Errorf("create order failed: %v", err)
@@ -440,7 +513,7 @@ func (s *ServiceContext) handleFilledOrder(sig *strategypb.Signal, orderResult *
 		orderResult.Commission, orderResult.Slippage)
 
 	// 记录订单执行结果日志
-	s.logger.LogOrder(sig, orderResult, quantity)
+	s.logger.LogOrder(sig, orderResult, quantity, s.currentHarvestPathMeta(symbol, string(orderResult.PositionSide)))
 
 	// 开仓成交后设置止损止盈
 	if signalType == "OPEN" || signalType == "" {
@@ -532,7 +605,7 @@ func (s *ServiceContext) handleSimFill(result *exchange.OrderResult) {
 		Side:     string(result.PositionSide),
 		Quantity: result.ExecutedQuantity,
 	}
-	s.logger.LogOrder(sig, result, result.ExecutedQuantity)
+	s.logger.LogOrder(sig, result, result.ExecutedQuantity, s.currentHarvestPathMeta(result.Symbol, string(result.PositionSide)))
 }
 
 // performRiskCheck 执行风控检查
@@ -552,6 +625,121 @@ func (s *ServiceContext) performRiskCheck(ctx context.Context, symbol, action st
 		return quantity, fmt.Errorf("risk rejected: %v", result.Reasons)
 	}
 	return result.AdjustedQuantity, nil
+}
+
+func (s *ServiceContext) handleHarvestPathSignal(sig *kafka.HarvestPathSignal) error {
+	if s == nil || sig == nil || strings.TrimSpace(sig.Symbol) == "" {
+		return nil
+	}
+
+	snapshot := harvestPathRiskSnapshot{
+		Symbol:                 strings.ToUpper(strings.TrimSpace(sig.Symbol)),
+		EventTime:              sig.EventTime,
+		HarvestPathProbability: sig.HarvestPathProbability,
+		RuleProbability:        sig.RuleProbability,
+		LSTMProbability:        sig.LSTMProbability,
+		BookProbability:        sig.BookProbability,
+		BookSummary:            strings.TrimSpace(sig.BookSummary),
+		VolatilityRegime:       strings.ToUpper(strings.TrimSpace(sig.VolatilityRegime)),
+		ThresholdSource:        strings.TrimSpace(sig.ThresholdSource),
+		AppliedThreshold:       sig.AppliedThreshold,
+		PathAction:             strings.ToUpper(strings.TrimSpace(sig.PathAction)),
+		RiskLevel:              strings.ToUpper(strings.TrimSpace(sig.RiskLevel)),
+		TargetSide:             strings.ToUpper(strings.TrimSpace(sig.TargetSide)),
+		ReferencePrice:         sig.ReferencePrice,
+		MarketPrice:            sig.MarketPrice,
+		ReceivedAt:             time.Now().UTC(),
+	}
+
+	s.harvestPathMu.Lock()
+	prev, ok := s.harvestPathSignals[snapshot.Symbol]
+	if ok && snapshot.EventTime < prev.EventTime {
+		s.harvestPathMu.Unlock()
+		return nil
+	}
+	s.harvestPathSignals[snapshot.Symbol] = snapshot
+	s.harvestPathMu.Unlock()
+
+	log.Printf("[harvest-path risk] update symbol=%s level=%s path_action=%s prob=%.2f rule_prob=%.2f lstm_prob=%.2f book_prob=%.2f threshold=%.2f regime=%s source=%s target=%s ref=%.2f market=%.2f",
+		snapshot.Symbol, snapshot.RiskLevel, snapshot.PathAction, snapshot.HarvestPathProbability, snapshot.RuleProbability, snapshot.LSTMProbability,
+		snapshot.BookProbability, snapshot.AppliedThreshold, snapshot.VolatilityRegime, snapshot.ThresholdSource, snapshot.TargetSide, snapshot.ReferencePrice, snapshot.MarketPrice)
+	return nil
+}
+
+func (s *ServiceContext) applyHarvestPathRisk(symbol, side string, quantity, price float64) (float64, error) {
+	if s == nil || quantity <= 0 {
+		return quantity, nil
+	}
+	snapshot, ok := s.matchedHarvestPathSignal(symbol, side)
+	if !ok {
+		return quantity, nil
+	}
+	entrySide := strings.ToUpper(strings.TrimSpace(side))
+
+	if snapshot.PathAction == "WAIT_FOR_RECLAIM" || snapshot.RiskLevel == "PATH_ALERT" {
+		return quantity, fmt.Errorf("symbol=%s path_alert: wait_for_reclaim prob=%.2f path_action=%s", symbol, snapshot.HarvestPathProbability, snapshot.PathAction)
+	}
+	if snapshot.PathAction != "REDUCE_PROBE_SIZE" && snapshot.RiskLevel != "PATH_PRESSURE" {
+		return quantity, nil
+	}
+
+	scale := math.Max(0.25, 1-snapshot.HarvestPathProbability)
+	adjusted := quantity * scale
+	if adjusted >= quantity {
+		return quantity, nil
+	}
+
+	log.Printf("[harvest-path risk] trim probe size symbol=%s side=%s qty=%.4f->%.4f prob=%.2f path_action=%s risk=%s price=%.2f ref=%.2f",
+		strings.ToUpper(strings.TrimSpace(symbol)), entrySide, quantity, adjusted, snapshot.HarvestPathProbability,
+		snapshot.PathAction, snapshot.RiskLevel, price, snapshot.ReferencePrice)
+	return adjusted, nil
+}
+
+func (s *ServiceContext) getLatestHarvestPathSignal(symbol string) (harvestPathRiskSnapshot, bool) {
+	if s == nil {
+		return harvestPathRiskSnapshot{}, false
+	}
+	s.harvestPathMu.RLock()
+	defer s.harvestPathMu.RUnlock()
+	snapshot, ok := s.harvestPathSignals[strings.ToUpper(strings.TrimSpace(symbol))]
+	return snapshot, ok
+}
+
+func (s *ServiceContext) matchedHarvestPathSignal(symbol, side string) (harvestPathRiskSnapshot, bool) {
+	snapshot, ok := s.getLatestHarvestPathSignal(symbol)
+	if !ok {
+		return harvestPathRiskSnapshot{}, false
+	}
+	if time.Since(snapshot.ReceivedAt) > 2*time.Minute {
+		return harvestPathRiskSnapshot{}, false
+	}
+	entrySide := strings.ToUpper(strings.TrimSpace(side))
+	if (entrySide == "LONG" && snapshot.TargetSide != "UP") || (entrySide == "SHORT" && snapshot.TargetSide != "DOWN") {
+		return harvestPathRiskSnapshot{}, false
+	}
+	return snapshot, true
+}
+
+func (s *ServiceContext) currentHarvestPathMeta(symbol, side string) *orderlog.HarvestPathMeta {
+	snapshot, ok := s.matchedHarvestPathSignal(symbol, side)
+	if !ok {
+		return nil
+	}
+	return &orderlog.HarvestPathMeta{
+		Probability:      snapshot.HarvestPathProbability,
+		RuleProbability:  snapshot.RuleProbability,
+		LSTMProbability:  snapshot.LSTMProbability,
+		BookProbability:  snapshot.BookProbability,
+		BookSummary:      snapshot.BookSummary,
+		VolatilityRegime: snapshot.VolatilityRegime,
+		ThresholdSource:  snapshot.ThresholdSource,
+		AppliedThreshold: snapshot.AppliedThreshold,
+		PathAction:       snapshot.PathAction,
+		RiskLevel:        snapshot.RiskLevel,
+		TargetSide:       snapshot.TargetSide,
+		ReferencePrice:   snapshot.ReferencePrice,
+		MarketPrice:      snapshot.MarketPrice,
+	}
 }
 
 func (s *ServiceContext) resolveCloseQuantity(ctx context.Context, symbol, side string) (float64, error) {
@@ -579,7 +767,7 @@ func (s *ServiceContext) resolveCloseQuantity(ctx context.Context, symbol, side 
 
 // buildOrderEvent 构建订单结果事件，发布到 Kafka order topic
 func (s *ServiceContext) buildOrderEvent(sig *strategypb.Signal, result *exchange.OrderResult) map[string]interface{} {
-	return map[string]interface{}{
+	event := map[string]interface{}{
 		"order_id":         result.OrderID,
 		"client_id":        result.ClientOrderID,
 		"symbol":           result.Symbol,
@@ -596,11 +784,59 @@ func (s *ServiceContext) buildOrderEvent(sig *strategypb.Signal, result *exchang
 		"strategy_id":      sig.GetStrategyId(),
 		"stop_loss":        sig.GetStopLoss(),
 		"take_profits":     sig.GetTakeProfits(),
-		"reason":           sig.GetReason(),
+		"reason":           orderlog.ComposeHarvestPathReason(sig.GetReason(), s.currentHarvestPathMeta(result.Symbol, sig.GetSide())),
 		"atr":              sig.GetAtr(),
 		"risk_reward":      sig.GetRiskReward(),
 		"indicators":       sig.GetIndicators(),
 	}
+	if sr := orderlogSignalReasonMap(sig.GetSignalReason()); sr != nil {
+		event["signal_reason"] = sr
+	}
+	if harvestPath := s.currentHarvestPathMeta(result.Symbol, sig.GetSide()); harvestPath != nil {
+		event["harvest_path_probability"] = harvestPath.Probability
+		event["harvest_path_rule_probability"] = harvestPath.RuleProbability
+		event["harvest_path_lstm_probability"] = harvestPath.LSTMProbability
+		event["harvest_path_action"] = harvestPath.PathAction
+		event["harvest_path_risk_level"] = harvestPath.RiskLevel
+		event["harvest_path_target_side"] = harvestPath.TargetSide
+		event["harvest_path_reference_price"] = harvestPath.ReferencePrice
+		event["harvest_path_market_price"] = harvestPath.MarketPrice
+	}
+	return event
+}
+
+func orderlogSignalReasonMap(reason *strategypb.SignalReason) map[string]interface{} {
+	if reason == nil {
+		return nil
+	}
+	out := map[string]interface{}{
+		"summary":           strings.TrimSpace(reason.GetSummary()),
+		"phase":             strings.TrimSpace(reason.GetPhase()),
+		"trend_context":     strings.TrimSpace(reason.GetTrendContext()),
+		"setup_context":     strings.TrimSpace(reason.GetSetupContext()),
+		"path_context":      strings.TrimSpace(reason.GetPathContext()),
+		"execution_context": strings.TrimSpace(reason.GetExecutionContext()),
+	}
+	if tags := reason.GetTags(); len(tags) > 0 {
+		out["tags"] = append([]string(nil), tags...)
+	}
+	empty := true
+	for _, v := range out {
+		switch x := v.(type) {
+		case string:
+			if x != "" {
+				empty = false
+			}
+		case []string:
+			if len(x) > 0 {
+				empty = false
+			}
+		}
+	}
+	if empty {
+		return nil
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -854,6 +1090,11 @@ func (s *ServiceContext) Close() error {
 	}
 	if s.signalConsumer != nil {
 		if err := s.signalConsumer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if s.harvestPathConsumer != nil {
+		if err := s.harvestPathConsumer.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

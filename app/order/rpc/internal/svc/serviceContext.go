@@ -19,6 +19,7 @@ import (
 	orderkafka "exchange-system/app/order/rpc/internal/kafka"
 	"exchange-system/common/binance"
 	commonkafka "exchange-system/common/kafka"
+	orderpb "exchange-system/common/pb/order"
 )
 
 const defaultAllOrdersLookback = 7 * 24 * time.Hour
@@ -34,14 +35,17 @@ const defaultAllOrdersLookback = 7 * 24 * time.Hour
 
 // ServiceContext Order 服务上下文
 type ServiceContext struct {
-	Config               config.Config
-	client               *binance.Client
-	dataDir              string
-	executionOrderLogDir string
-	orderConsumer        *orderkafka.Consumer
-	cancel               context.CancelFunc
-	feeSummaryMu         sync.RWMutex
-	feeSummaries         map[string]map[int64]tradeFeeSummary
+	Config                config.Config
+	client                *binance.Client
+	dataDir               string
+	executionOrderLogDir  string
+	orderConsumer         *orderkafka.Consumer
+	cancel                context.CancelFunc
+	feeSummaryMu          sync.RWMutex
+	feeSummaries          map[string]map[int64]tradeFeeSummary
+	executionMetaMu       sync.RWMutex
+	executionMetaByOrder  map[string]map[int64]executionOrderMeta
+	executionMetaByClient map[string]map[string]executionOrderMeta
 }
 
 type refreshSummary struct {
@@ -63,6 +67,24 @@ type tradeFeeSummary struct {
 type OrderLifecycleInfo struct {
 	ActionType      string
 	PositionCycleID string
+}
+
+type executionOrderMeta struct {
+	HarvestPathProbability      float64
+	HarvestPathRuleProbability  float64
+	HarvestPathLSTMProbability  float64
+	HarvestPathBookProbability  float64
+	HarvestPathBookSummary      string
+	HarvestPathVolatilityRegime string
+	HarvestPathThresholdSource  string
+	HarvestPathAppliedThreshold float64
+	HarvestPathAction           string
+	HarvestPathRiskLevel        string
+	HarvestPathTargetSide       string
+	HarvestPathReferencePrice   float64
+	HarvestPathMarketPrice      float64
+	Reason                      string
+	SignalReason                *orderpb.SignalReason
 }
 
 // NewServiceContext 创建 Order 服务上下文
@@ -97,12 +119,14 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		c.Binance.BaseURL, "ETHUSDT", defaultStartTime, formatMillis(defaultStartTime))
 
 	svcCtx := &ServiceContext{
-		Config:               c,
-		client:               client,
-		dataDir:              dataDir,
-		executionOrderLogDir: executionOrderLogDir,
-		cancel:               cancel,
-		feeSummaries:         make(map[string]map[int64]tradeFeeSummary),
+		Config:                c,
+		client:                client,
+		dataDir:               dataDir,
+		executionOrderLogDir:  executionOrderLogDir,
+		cancel:                cancel,
+		feeSummaries:          make(map[string]map[int64]tradeFeeSummary),
+		executionMetaByOrder:  make(map[string]map[int64]executionOrderMeta),
+		executionMetaByClient: make(map[string]map[string]executionOrderMeta),
 	}
 
 	orderTopic := c.Kafka.Topics.Order
@@ -401,55 +425,84 @@ func (s *ServiceContext) categoryJSONLPath(category, symbol string) string {
 }
 
 type executionOrderLogEntry struct {
-	Timestamp       string  `json:"timestamp"`
-	SignalType      string  `json:"signal_type"`
-	StrategyID      string  `json:"strategy_id"`
-	Symbol          string  `json:"symbol"`
-	OrderID         string  `json:"order_id"`
-	ClientID        string  `json:"client_id"`
-	Side            string  `json:"side"`
-	PositionSide    string  `json:"position_side"`
-	Type            string  `json:"type"`
-	Status          string  `json:"status"`
-	Quantity        float64 `json:"quantity"`
-	ExecutedQty     float64 `json:"executed_qty"`
-	AvgPrice        float64 `json:"avg_price"`
-	Commission      float64 `json:"commission"`
-	CommissionAsset string  `json:"commission_asset"`
-	Slippage        float64 `json:"slippage"`
-	StopLoss        float64 `json:"stop_loss"`
-	Atr             float64 `json:"atr"`
-	RiskReward      float64 `json:"risk_reward"`
-	Reason          string  `json:"reason"`
-	TransactTime    int64   `json:"transact_time"`
+	Timestamp                   string            `json:"timestamp"`
+	SignalType                  string            `json:"signal_type"`
+	StrategyID                  string            `json:"strategy_id"`
+	Symbol                      string            `json:"symbol"`
+	OrderID                     string            `json:"order_id"`
+	ClientID                    string            `json:"client_id"`
+	Side                        string            `json:"side"`
+	PositionSide                string            `json:"position_side"`
+	Type                        string            `json:"type"`
+	Status                      string            `json:"status"`
+	Quantity                    float64           `json:"quantity"`
+	ExecutedQty                 float64           `json:"executed_qty"`
+	AvgPrice                    float64           `json:"avg_price"`
+	Commission                  float64           `json:"commission"`
+	CommissionAsset             string            `json:"commission_asset"`
+	Slippage                    float64           `json:"slippage"`
+	StopLoss                    float64           `json:"stop_loss"`
+	Atr                         float64           `json:"atr"`
+	RiskReward                  float64           `json:"risk_reward"`
+	Reason                      string            `json:"reason"`
+	SignalReason                *signalReasonJSON `json:"signal_reason,omitempty"`
+	TransactTime                int64             `json:"transact_time"`
+	HarvestPathProbability      float64           `json:"harvest_path_probability"`
+	HarvestPathRuleProbability  float64           `json:"harvest_path_rule_probability"`
+	HarvestPathLSTMProbability  float64           `json:"harvest_path_lstm_probability"`
+	HarvestPathBookProbability  float64           `json:"harvest_path_book_probability,omitempty"`
+	HarvestPathBookSummary      string            `json:"harvest_path_book_summary,omitempty"`
+	HarvestPathVolatilityRegime string            `json:"harvest_path_volatility_regime,omitempty"`
+	HarvestPathThresholdSource  string            `json:"harvest_path_threshold_source,omitempty"`
+	HarvestPathAppliedThreshold float64           `json:"harvest_path_applied_threshold,omitempty"`
+	HarvestPathAction           string            `json:"harvest_path_action"`
+	HarvestPathRiskLevel        string            `json:"harvest_path_risk_level"`
+	HarvestPathTargetSide       string            `json:"harvest_path_target_side"`
+	HarvestPathReferencePrice   float64           `json:"harvest_path_reference_price"`
+	HarvestPathMarketPrice      float64           `json:"harvest_path_market_price"`
 }
 
 type allOrderJSONLEntry struct {
-	Time            string `json:"time"`
-	TimeLocal       string `json:"time_local"`
-	OrderID         int64  `json:"order_id"`
-	Symbol          string `json:"symbol"`
-	Status          string `json:"status"`
-	Side            string `json:"side"`
-	PositionSide    string `json:"position_side"`
-	Type            string `json:"type"`
-	OrigQty         string `json:"orig_qty"`
-	ExecutedQty     string `json:"executed_qty"`
-	BaseQty         string `json:"base_qty"`
-	QuoteQty        string `json:"quote_qty"`
-	AvgPrice        string `json:"avg_price"`
-	Price           string `json:"price"`
-	StopPrice       string `json:"stop_price"`
-	ClientOrderID   string `json:"client_order_id"`
-	EstimatedFee    string `json:"estimated_fee"`
-	ActualFee       string `json:"actual_fee"`
-	ActualFeeAsset  string `json:"actual_fee_asset"`
-	ActionType      string `json:"action_type"`
-	PositionCycleID string `json:"position_cycle_id"`
-	ReduceOnly      bool   `json:"reduce_only"`
-	ClosePosition   bool   `json:"close_position"`
-	UpdateTime      string `json:"update_time"`
-	TimeInForce     string `json:"time_in_force"`
+	Time                        string            `json:"time"`
+	TimeLocal                   string            `json:"time_local"`
+	OrderID                     int64             `json:"order_id"`
+	Symbol                      string            `json:"symbol"`
+	Status                      string            `json:"status"`
+	Side                        string            `json:"side"`
+	PositionSide                string            `json:"position_side"`
+	Type                        string            `json:"type"`
+	OrigQty                     string            `json:"orig_qty"`
+	ExecutedQty                 string            `json:"executed_qty"`
+	BaseQty                     string            `json:"base_qty"`
+	QuoteQty                    string            `json:"quote_qty"`
+	AvgPrice                    string            `json:"avg_price"`
+	Price                       string            `json:"price"`
+	StopPrice                   string            `json:"stop_price"`
+	ClientOrderID               string            `json:"client_order_id"`
+	EstimatedFee                string            `json:"estimated_fee"`
+	ActualFee                   string            `json:"actual_fee"`
+	ActualFeeAsset              string            `json:"actual_fee_asset"`
+	ActionType                  string            `json:"action_type"`
+	PositionCycleID             string            `json:"position_cycle_id"`
+	HarvestPathProbability      string            `json:"harvest_path_probability,omitempty"`
+	HarvestPathRuleProbability  string            `json:"harvest_path_rule_probability,omitempty"`
+	HarvestPathLSTMProbability  string            `json:"harvest_path_lstm_probability,omitempty"`
+	HarvestPathBookProbability  string            `json:"harvest_path_book_probability,omitempty"`
+	HarvestPathBookSummary      string            `json:"harvest_path_book_summary,omitempty"`
+	HarvestPathVolatilityRegime string            `json:"harvest_path_volatility_regime,omitempty"`
+	HarvestPathThresholdSource  string            `json:"harvest_path_threshold_source,omitempty"`
+	HarvestPathAppliedThreshold string            `json:"harvest_path_applied_threshold,omitempty"`
+	HarvestPathAction           string            `json:"harvest_path_action,omitempty"`
+	HarvestPathRiskLevel        string            `json:"harvest_path_risk_level,omitempty"`
+	HarvestPathTargetSide       string            `json:"harvest_path_target_side,omitempty"`
+	HarvestPathReferencePrice   string            `json:"harvest_path_reference_price,omitempty"`
+	HarvestPathMarketPrice      string            `json:"harvest_path_market_price,omitempty"`
+	Reason                      string            `json:"reason,omitempty"`
+	SignalReason                *signalReasonJSON `json:"signal_reason,omitempty"`
+	ReduceOnly                  bool              `json:"reduce_only"`
+	ClosePosition               bool              `json:"close_position"`
+	UpdateTime                  string            `json:"update_time"`
+	TimeInForce                 string            `json:"time_in_force"`
 }
 
 type positionJSONLEntry struct {
@@ -466,6 +519,16 @@ type positionJSONLEntry struct {
 	MarginType        string `json:"margin_type"`
 	TimeUTC           string `json:"time_utc"`
 	SnapshotTimestamp int64  `json:"snapshot_timestamp"`
+}
+
+type signalReasonJSON struct {
+	Summary          string   `json:"summary,omitempty"`
+	Phase            string   `json:"phase,omitempty"`
+	TrendContext     string   `json:"trend_context,omitempty"`
+	SetupContext     string   `json:"setup_context,omitempty"`
+	PathContext      string   `json:"path_context,omitempty"`
+	ExecutionContext string   `json:"execution_context,omitempty"`
+	Tags             []string `json:"tags,omitempty"`
 }
 
 type userTradeJSONLEntry struct {
@@ -601,7 +664,73 @@ func (s *ServiceContext) readExecutionOrderLogs(symbol string, startTime, endTim
 			return nil, fmt.Errorf("close %s: %w", path, closeErr)
 		}
 	}
+	s.cacheExecutionOrderMeta(symbol, out)
 	return out, nil
+}
+
+func (s *ServiceContext) cacheExecutionOrderMeta(symbol string, entries []executionOrderLogEntry) {
+	if s == nil || strings.TrimSpace(symbol) == "" {
+		return
+	}
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	byOrder := make(map[int64]executionOrderMeta)
+	byClient := make(map[string]executionOrderMeta)
+	for _, entry := range entries {
+		meta := executionOrderMeta{
+			HarvestPathProbability:      entry.HarvestPathProbability,
+			HarvestPathRuleProbability:  entry.HarvestPathRuleProbability,
+			HarvestPathLSTMProbability:  entry.HarvestPathLSTMProbability,
+			HarvestPathBookProbability:  entry.HarvestPathBookProbability,
+			HarvestPathBookSummary:      strings.TrimSpace(entry.HarvestPathBookSummary),
+			HarvestPathVolatilityRegime: strings.TrimSpace(entry.HarvestPathVolatilityRegime),
+			HarvestPathThresholdSource:  strings.TrimSpace(entry.HarvestPathThresholdSource),
+			HarvestPathAppliedThreshold: entry.HarvestPathAppliedThreshold,
+			HarvestPathAction:           strings.TrimSpace(entry.HarvestPathAction),
+			HarvestPathRiskLevel:        strings.TrimSpace(entry.HarvestPathRiskLevel),
+			HarvestPathTargetSide:       strings.TrimSpace(entry.HarvestPathTargetSide),
+			HarvestPathReferencePrice:   entry.HarvestPathReferencePrice,
+			HarvestPathMarketPrice:      entry.HarvestPathMarketPrice,
+			Reason:                      strings.TrimSpace(entry.Reason),
+			SignalReason:                signalReasonJSONToPB(entry.SignalReason),
+		}
+		if orderID := stableID(entry.OrderID); orderID > 0 {
+			byOrder[orderID] = meta
+		}
+		if clientID := strings.TrimSpace(entry.ClientID); clientID != "" {
+			byClient[clientID] = meta
+		}
+	}
+
+	s.executionMetaMu.Lock()
+	s.executionMetaByOrder[symbol] = byOrder
+	s.executionMetaByClient[symbol] = byClient
+	s.executionMetaMu.Unlock()
+}
+
+func (s *ServiceContext) allOrderHarvestPathMeta(order binance.AllOrder) executionOrderMeta {
+	if s == nil {
+		return executionOrderMeta{}
+	}
+	symbol := strings.ToUpper(strings.TrimSpace(order.Symbol))
+	if symbol == "" {
+		return executionOrderMeta{}
+	}
+	s.executionMetaMu.RLock()
+	defer s.executionMetaMu.RUnlock()
+	if byOrder := s.executionMetaByOrder[symbol]; byOrder != nil {
+		if meta, ok := byOrder[order.OrderID]; ok {
+			return meta
+		}
+	}
+	clientID := strings.TrimSpace(order.ClientOrderID)
+	if clientID != "" {
+		if byClient := s.executionMetaByClient[symbol]; byClient != nil {
+			if meta, ok := byClient[clientID]; ok {
+				return meta
+			}
+		}
+	}
+	return executionOrderMeta{}
 }
 
 func stableID(s string) int64 {
@@ -675,6 +804,7 @@ func parseFloatString(v string) float64 {
 func (s *ServiceContext) toAllOrderJSONLEntry(item binance.AllOrder, lifecycle OrderLifecycleInfo) allOrderJSONLEntry {
 	pricePrecision, quantityPrecision := s.symbolPrecisions(item.Symbol)
 	feeSummary := s.tradeFeeSummary(item.Symbol, item.OrderID)
+	harvestPathMeta := s.allOrderHarvestPathMeta(item)
 	baseQty := parseFloatString(item.ExecutedQty)
 	if baseQty == 0 {
 		baseQty = parseFloatString(item.OrigQty)
@@ -690,31 +820,46 @@ func (s *ServiceContext) toAllOrderJSONLEntry(item binance.AllOrder, lifecycle O
 	}
 
 	return allOrderJSONLEntry{
-		Time:            formatOrderTime(item.Time),
-		TimeLocal:       formatOrderTimeLocal(item.Time),
-		OrderID:         item.OrderID,
-		Symbol:          item.Symbol,
-		Status:          item.Status,
-		Side:            item.Side,
-		PositionSide:    item.PositionSide,
-		Type:            item.Type,
-		OrigQty:         formatDecimalString(item.OrigQty, quantityPrecision, "0"),
-		ExecutedQty:     formatDecimalString(item.ExecutedQty, quantityPrecision, "0"),
-		BaseQty:         formatFloatWithPrecision(baseQty, quantityPrecision),
-		QuoteQty:        formatFloatWithPrecision(quoteQty, 2),
-		AvgPrice:        formatDecimalString(item.AvgPrice, pricePrecision, "0"),
-		Price:           formatDecimalString(item.Price, pricePrecision, "0"),
-		StopPrice:       formatDecimalString(item.StopPrice, pricePrecision, "0"),
-		ClientOrderID:   item.ClientOrderID,
-		EstimatedFee:    formatFloatWithPrecision(estimatedFee, 8),
-		ActualFee:       formatFloatWithPrecision(feeSummary.ActualFee, 8),
-		ActualFeeAsset:  actualFeeAsset,
-		ActionType:      lifecycle.ActionType,
-		PositionCycleID: lifecycle.PositionCycleID,
-		ReduceOnly:      item.ReduceOnly,
-		ClosePosition:   item.ClosePosition,
-		UpdateTime:      formatOrderTime(item.UpdateTime),
-		TimeInForce:     item.TimeInForce,
+		Time:                        formatOrderTime(item.Time),
+		TimeLocal:                   formatOrderTimeLocal(item.Time),
+		OrderID:                     item.OrderID,
+		Symbol:                      item.Symbol,
+		Status:                      item.Status,
+		Side:                        item.Side,
+		PositionSide:                item.PositionSide,
+		Type:                        item.Type,
+		OrigQty:                     formatDecimalString(item.OrigQty, quantityPrecision, "0"),
+		ExecutedQty:                 formatDecimalString(item.ExecutedQty, quantityPrecision, "0"),
+		BaseQty:                     formatFloatWithPrecision(baseQty, quantityPrecision),
+		QuoteQty:                    formatFloatWithPrecision(quoteQty, 2),
+		AvgPrice:                    formatDecimalString(item.AvgPrice, pricePrecision, "0"),
+		Price:                       formatDecimalString(item.Price, pricePrecision, "0"),
+		StopPrice:                   formatDecimalString(item.StopPrice, pricePrecision, "0"),
+		ClientOrderID:               item.ClientOrderID,
+		EstimatedFee:                formatFloatWithPrecision(estimatedFee, 8),
+		ActualFee:                   formatFloatWithPrecision(feeSummary.ActualFee, 8),
+		ActualFeeAsset:              actualFeeAsset,
+		ActionType:                  lifecycle.ActionType,
+		PositionCycleID:             lifecycle.PositionCycleID,
+		HarvestPathProbability:      formatOptionalFloatWithPrecision(harvestPathMeta.HarvestPathProbability, 4),
+		HarvestPathRuleProbability:  formatOptionalFloatWithPrecision(harvestPathMeta.HarvestPathRuleProbability, 4),
+		HarvestPathLSTMProbability:  formatOptionalFloatWithPrecision(harvestPathMeta.HarvestPathLSTMProbability, 4),
+		HarvestPathBookProbability:  formatOptionalFloatWithPrecision(harvestPathMeta.HarvestPathBookProbability, 4),
+		HarvestPathBookSummary:      strings.TrimSpace(harvestPathMeta.HarvestPathBookSummary),
+		HarvestPathVolatilityRegime: strings.TrimSpace(harvestPathMeta.HarvestPathVolatilityRegime),
+		HarvestPathThresholdSource:  strings.TrimSpace(harvestPathMeta.HarvestPathThresholdSource),
+		HarvestPathAppliedThreshold: formatOptionalFloatWithPrecision(harvestPathMeta.HarvestPathAppliedThreshold, 4),
+		HarvestPathAction:           harvestPathMeta.HarvestPathAction,
+		HarvestPathRiskLevel:        harvestPathMeta.HarvestPathRiskLevel,
+		HarvestPathTargetSide:       harvestPathMeta.HarvestPathTargetSide,
+		HarvestPathReferencePrice:   formatOptionalFloatWithPrecision(harvestPathMeta.HarvestPathReferencePrice, pricePrecision),
+		HarvestPathMarketPrice:      formatOptionalFloatWithPrecision(harvestPathMeta.HarvestPathMarketPrice, pricePrecision),
+		Reason:                      harvestPathMeta.Reason,
+		SignalReason:                signalReasonPBToJSON(harvestPathMeta.SignalReason),
+		ReduceOnly:                  item.ReduceOnly,
+		ClosePosition:               item.ClosePosition,
+		UpdateTime:                  formatOrderTime(item.UpdateTime),
+		TimeInForce:                 item.TimeInForce,
 	}
 }
 
@@ -815,6 +960,13 @@ func formatDecimalString(v string, precision int, zeroValue string) string {
 	return formatFloatWithPrecision(f, precision)
 }
 
+func formatOptionalFloatWithPrecision(v float64, precision int) string {
+	if v == 0 {
+		return ""
+	}
+	return formatFloatWithPrecision(v, precision)
+}
+
 func formatFloatWithPrecision(v float64, precision int) string {
 	if precision < 0 {
 		precision = 0
@@ -889,6 +1041,83 @@ func (s *ServiceContext) AllOrderLifecycleFields(order binance.AllOrder, lifecyc
 	}
 	info := lifecycleMap[order.OrderID]
 	return info.ActionType, info.PositionCycleID
+}
+
+func (s *ServiceContext) AllOrderHarvestPathFields(order binance.AllOrder) (string, string, string, string, string, string, string, string, string, string, string, string, string, string, *orderpb.SignalReason) {
+	meta := s.allOrderHarvestPathMeta(order)
+	pricePrecision, _ := s.symbolPrecisions(order.Symbol)
+	return formatOptionalFloatWithPrecision(meta.HarvestPathProbability, 4),
+		formatOptionalFloatWithPrecision(meta.HarvestPathRuleProbability, 4),
+		formatOptionalFloatWithPrecision(meta.HarvestPathLSTMProbability, 4),
+		formatOptionalFloatWithPrecision(meta.HarvestPathBookProbability, 4),
+		strings.TrimSpace(meta.HarvestPathBookSummary),
+		strings.TrimSpace(meta.HarvestPathVolatilityRegime),
+		strings.TrimSpace(meta.HarvestPathThresholdSource),
+		formatOptionalFloatWithPrecision(meta.HarvestPathAppliedThreshold, 4),
+		meta.HarvestPathAction,
+		meta.HarvestPathRiskLevel,
+		meta.HarvestPathTargetSide,
+		formatOptionalFloatWithPrecision(meta.HarvestPathReferencePrice, pricePrecision),
+		formatOptionalFloatWithPrecision(meta.HarvestPathMarketPrice, pricePrecision),
+		meta.Reason,
+		cloneSignalReasonPB(meta.SignalReason)
+}
+
+func signalReasonJSONToPB(v *signalReasonJSON) *orderpb.SignalReason {
+	if v == nil {
+		return nil
+	}
+	out := &orderpb.SignalReason{
+		Summary:          strings.TrimSpace(v.Summary),
+		Phase:            strings.TrimSpace(v.Phase),
+		TrendContext:     strings.TrimSpace(v.TrendContext),
+		SetupContext:     strings.TrimSpace(v.SetupContext),
+		PathContext:      strings.TrimSpace(v.PathContext),
+		ExecutionContext: strings.TrimSpace(v.ExecutionContext),
+	}
+	if len(v.Tags) > 0 {
+		out.Tags = append([]string(nil), v.Tags...)
+	}
+	if out.Summary == "" && out.Phase == "" && out.TrendContext == "" && out.SetupContext == "" && out.PathContext == "" && out.ExecutionContext == "" && len(out.Tags) == 0 {
+		return nil
+	}
+	return out
+}
+
+func signalReasonPBToJSON(v *orderpb.SignalReason) *signalReasonJSON {
+	if v == nil {
+		return nil
+	}
+	out := &signalReasonJSON{
+		Summary:          strings.TrimSpace(v.GetSummary()),
+		Phase:            strings.TrimSpace(v.GetPhase()),
+		TrendContext:     strings.TrimSpace(v.GetTrendContext()),
+		SetupContext:     strings.TrimSpace(v.GetSetupContext()),
+		PathContext:      strings.TrimSpace(v.GetPathContext()),
+		ExecutionContext: strings.TrimSpace(v.GetExecutionContext()),
+	}
+	if tags := v.GetTags(); len(tags) > 0 {
+		out.Tags = append([]string(nil), tags...)
+	}
+	if out.Summary == "" && out.Phase == "" && out.TrendContext == "" && out.SetupContext == "" && out.PathContext == "" && out.ExecutionContext == "" && len(out.Tags) == 0 {
+		return nil
+	}
+	return out
+}
+
+func cloneSignalReasonPB(v *orderpb.SignalReason) *orderpb.SignalReason {
+	if v == nil {
+		return nil
+	}
+	return &orderpb.SignalReason{
+		Summary:          v.GetSummary(),
+		Phase:            v.GetPhase(),
+		TrendContext:     v.GetTrendContext(),
+		SetupContext:     v.GetSetupContext(),
+		PathContext:      v.GetPathContext(),
+		ExecutionContext: v.GetExecutionContext(),
+		Tags:             append([]string(nil), v.GetTags()...),
+	}
 }
 
 func (s *ServiceContext) UserTradeFeeFields(trade binance.UserTrade) (string, string) {

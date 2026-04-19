@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package strategy;
 
-option go_package = "./strategy";
+option go_package = "exchange-system/common/pb/strategy";
 
 
 
@@ -12,6 +12,16 @@ option go_package = "./strategy";
 //
 // Signal 包含"可执行"信息：方向、数量、止损止盈、信号类型
 // 不包含：原始K线数据、中间指标计算过程
+message SignalReason {
+  string summary = 1;           // 兼容旧链路的摘要描述
+  string phase = 2;             // OPEN_ENTRY / CLOSE_EXIT
+  string trend_context = 3;     // 大级别趋势背景
+  string setup_context = 4;     // 入场/出场触发背景
+  string path_context = 5;      // 收割路径或盘口路径背景
+  string execution_context = 6; // 止损止盈、仓位、确认条件等执行信息
+  repeated string tags = 7;     // 标签，如 ["15m", "trend_following", "long"]
+}
+
 message Signal {
   string strategy_id = 1;     // 策略ID，如 "trend-following-BTCUSDT"
   string symbol = 2;          // 交易对，如 "BTCUSDT"
@@ -21,7 +31,7 @@ message Signal {
   double entry_price = 6;     // 入场/出场价格
   double stop_loss = 7;       // 止损价
   repeated double take_profits = 8; // 止盈价列表
-  string reason = 9;          // 信号原因描述（如"4H多头|1H回调|15M RSI突破"）
+  string reason = 9;          // 兼容旧链路的摘要原因
   int64 timestamp = 10;       // 信号时间戳（毫秒）
 
   // --- 以下为新增字段 ---
@@ -33,6 +43,7 @@ message Signal {
 
   // 指标快照 — 供日志/审计用，execution 不做计算
   map<string, double> indicators = 15; // 如 {"h4_ema21":68000, "m15_rsi":62.3, "m15_atr":350}
+  SignalReason signal_reason = 16;     // 结构化原因描述
 }
 
 // 策略配置

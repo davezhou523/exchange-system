@@ -9,10 +9,12 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
 	"exchange-system/app/strategy/rpc/internal/kafka"
+	harvestpathmodel "exchange-system/app/strategy/rpc/internal/strategy/harvestpath"
 	marketpb "exchange-system/common/pb/market"
 )
 
@@ -41,6 +43,9 @@ type klineSnapshot struct {
 	High     float64
 	Low      float64
 	Close    float64
+	Volume   float64
+	QuoteVol float64
+	TakerBuy float64
 	Ema21    float64
 	Ema55    float64
 	Rsi      float64
@@ -72,9 +77,11 @@ type position struct {
 
 // TrendFollowingStrategy 多时间周期趋势跟踪策略
 type TrendFollowingStrategy struct {
-	symbol   string
-	params   map[string]float64
-	producer *kafka.Producer
+	symbol                   string
+	params                   map[string]float64
+	producer                 *kafka.Producer
+	harvestPathProducer      *kafka.Producer
+	harvestPathLSTMPredictor *harvestpathmodel.LSTMPredictor
 
 	// mu 保护以下字段的并发访问
 	mu sync.Mutex
@@ -87,10 +94,11 @@ type TrendFollowingStrategy struct {
 	klines1m  []klineSnapshot // 1m K线历史（1m信号模式下使用）
 
 	// 最新指标快照（每个周期只需保留最新的，由 OnKline 更新）
-	latest4h  klineSnapshot
-	latest1h  klineSnapshot
-	latest15m klineSnapshot
-	latest1m  klineSnapshot // 最新1m K线快照
+	latest4h    klineSnapshot
+	latest1h    klineSnapshot
+	latest15m   klineSnapshot
+	latest1m    klineSnapshot // 最新1m K线快照
+	latestDepth *harvestpathmodel.OrderBookSnapshot
 
 	// 持仓状态
 	pos position
@@ -107,6 +115,10 @@ type TrendFollowingStrategy struct {
 	signalLogFiles map[string]*os.File
 }
 
+type RuntimeOptions struct {
+	HarvestPathLSTMPredictor *harvestpathmodel.LSTMPredictor
+}
+
 const positionSyncEpsilon = 1e-8
 
 // ---------------------------------------------------------------------------
@@ -114,17 +126,26 @@ const positionSyncEpsilon = 1e-8
 // ---------------------------------------------------------------------------
 
 // NewTrendFollowingStrategy 创建多时间周期趋势跟踪策略实例
-func NewTrendFollowingStrategy(symbol string, params map[string]float64, producer *kafka.Producer, signalLogDir string) *TrendFollowingStrategy {
+func NewTrendFollowingStrategy(symbol string, params map[string]float64, producer, harvestPathProducer *kafka.Producer, signalLogDir string, opts *RuntimeOptions) *TrendFollowingStrategy {
 	if params == nil {
 		params = map[string]float64{}
 	}
 	return &TrendFollowingStrategy{
-		symbol:         symbol,
-		params:         params,
-		producer:       producer,
-		signalLogDir:   signalLogDir,
-		signalLogFiles: make(map[string]*os.File),
+		symbol:                   symbol,
+		params:                   params,
+		producer:                 producer,
+		harvestPathProducer:      harvestPathProducer,
+		harvestPathLSTMPredictor: runtimeHarvestPathLSTMPredictor(opts),
+		signalLogDir:             signalLogDir,
+		signalLogFiles:           make(map[string]*os.File),
 	}
+}
+
+func runtimeHarvestPathLSTMPredictor(opts *RuntimeOptions) *harvestpathmodel.LSTMPredictor {
+	if opts == nil {
+		return nil
+	}
+	return opts.HarvestPathLSTMPredictor
 }
 
 func (s *TrendFollowingStrategy) HasOpenPosition() bool {
@@ -228,6 +249,21 @@ const (
 	param1mRsiBiasShort     = "1m_rsi_bias_short"      // 1m 空头RSI偏置（默认45）
 	param1mMinHoldingBars   = "1m_min_holding_bars"    // 1m 最小持仓K线数（默认5）
 	param1mEmaExitBufferATR = "1m_ema_exit_buffer_atr" // 1m EMA破位缓冲ATR倍数（默认0.3）
+
+	// 收割路径风险过滤（默认关闭，按需开启）
+	paramHarvestPathModelEnabled                = "harvest_path_model_enabled"                  // 0=关闭 | 1=开启
+	paramHarvestPathPublishThreshold            = "harvest_path_publish_threshold"              // harvest_path_signal 发布阈值（默认0.60）
+	paramHarvestPathLookback                    = "harvest_path_lookback"                       // 结构识别回看窗口（默认20根1m）
+	paramHarvestPathBlockThreshold              = "harvest_path_block_threshold"                // 高风险阻断阈值（默认0.80）
+	paramHarvestPathLogThreshold                = "harvest_path_log_threshold"                  // 中风险日志阈值（默认0.60）
+	paramHarvestPathLSTMEnabled                 = "harvest_path_lstm_enabled"                   // 0=关闭 | 1=开启
+	paramHarvestPathLSTMWeight                  = "harvest_path_lstm_weight"                    // LSTM 概率融合权重（默认0.35）
+	paramHarvestPathBookEnabled                 = "harvest_path_book_enabled"                   // 0=关闭 | 1=开启
+	paramHarvestPathBookWeight                  = "harvest_path_book_weight"                    // 订单簿概率融合权重（默认0.35）
+	paramHarvestPathBookTopN                    = "harvest_path_book_top_n"                     // 订单簿 topN 档位（默认10）
+	paramHarvestPathBookSpreadBpsCap            = "harvest_path_book_spread_bps_cap"            // spread 风险归一化上限（默认12bps）
+	paramHarvestPathRegimeAwareThresholdEnabled = "harvest_path_regime_aware_threshold_enabled" // 0=关闭 | 1=开启
+	paramHarvestPathRegimeLookback              = "harvest_path_regime_lookback"                // 在线波动 regime 识别回看窗口（默认120根1m）
 )
 
 // ---------------------------------------------------------------------------
@@ -257,6 +293,9 @@ func (s *TrendFollowingStrategy) OnKline(ctx context.Context, k *marketpb.Kline)
 		High:     k.High,
 		Low:      k.Low,
 		Close:    k.Close,
+		Volume:   k.Volume,
+		QuoteVol: k.QuoteVolume,
+		TakerBuy: k.TakerBuyVolume,
 		Ema21:    k.Ema21,
 		Ema55:    k.Ema55,
 		Rsi:      k.Rsi,
@@ -329,6 +368,42 @@ func (s *TrendFollowingStrategy) OnKline(ctx context.Context, k *marketpb.Kline)
 
 	// 空仓时 → 检查入场条件
 	return s.checkEntryConditions(ctx, k)
+}
+
+func (s *TrendFollowingStrategy) OnDepth(depth *marketpb.Depth) {
+	if s == nil || depth == nil || depth.Symbol != s.symbol {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	snapshot := &harvestpathmodel.OrderBookSnapshot{
+		Timestamp: depth.GetTimestamp(),
+		Bids:      make([]harvestpathmodel.BookLevel, 0, len(depth.GetBids())),
+		Asks:      make([]harvestpathmodel.BookLevel, 0, len(depth.GetAsks())),
+	}
+	for _, item := range depth.GetBids() {
+		if item == nil || item.GetPrice() <= 0 || item.GetQuantity() <= 0 {
+			continue
+		}
+		snapshot.Bids = append(snapshot.Bids, harvestpathmodel.BookLevel{
+			Price:    item.GetPrice(),
+			Quantity: item.GetQuantity(),
+		})
+	}
+	for _, item := range depth.GetAsks() {
+		if item == nil || item.GetPrice() <= 0 || item.GetQuantity() <= 0 {
+			continue
+		}
+		snapshot.Asks = append(snapshot.Asks, harvestpathmodel.BookLevel{
+			Price:    item.GetPrice(),
+			Quantity: item.GetQuantity(),
+		})
+	}
+	if len(snapshot.Bids) == 0 || len(snapshot.Asks) == 0 {
+		return
+	}
+	s.latestDepth = snapshot
 }
 
 // ---------------------------------------------------------------------------
@@ -616,6 +691,9 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 				return nil
 			}
 		}
+		if s.shouldBlockForHarvestPathRisk(ctx, k, entry) {
+			return nil
+		}
 
 		return s.openPosition(ctx, k, trend, pullback, entry, m15)
 	}
@@ -655,6 +733,9 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 			s.symbol, pullback, s.latest15m.Rsi, s.latest15m.Atr)
 		return nil
 	}
+	if s.shouldBlockForHarvestPathRisk(ctx, k, entry) {
+		return nil
+	}
 
 	return s.openPosition(ctx, k, trend, pullback, entry, s.latest15m)
 }
@@ -692,6 +773,14 @@ func (s *TrendFollowingStrategy) openPosition(ctx context.Context, k *marketpb.K
 
 	// 构建信号原因
 	reason := s.buildEntryReason(trend, pullback, entry, m15, stopLoss, tp1, tp2)
+	signalReason := s.newSignalReason(
+		reason,
+		"OPEN_ENTRY",
+		fmt.Sprintf("4H趋势=%s", describeTrendContext(trend)),
+		fmt.Sprintf("1H回调=%s | 15M入场确认", describePullbackContext15m(pullback)),
+		fmt.Sprintf("RSI=%.2f ATR=%.2f | 止损=%.2f TP1=%.2f TP2=%.2f", m15.Rsi, m15.Atr, stopLoss, tp1, tp2),
+		"15m", "trend_following", "open", side,
+	)
 
 	// 记录持仓
 	s.pos = position{
@@ -717,20 +806,21 @@ func (s *TrendFollowingStrategy) openPosition(ctx context.Context, k *marketpb.K
 
 	// 发送开仓信号
 	signal := map[string]interface{}{
-		"strategy_id":  fmt.Sprintf("trend-following-%s", s.symbol),
-		"symbol":       s.symbol,
-		"interval":     "15m",
-		"action":       action,
-		"side":         side,
-		"signal_type":  "OPEN",
-		"quantity":     quantity,
-		"entry_price":  m15.Close,
-		"stop_loss":    stopLoss,
-		"take_profits": []float64{tp1, tp2},
-		"reason":       reason,
-		"timestamp":    time.Now().UnixMilli(),
-		"atr":          m15.Atr,
-		"risk_reward":  riskReward,
+		"strategy_id":   fmt.Sprintf("trend-following-%s", s.symbol),
+		"symbol":        s.symbol,
+		"interval":      "15m",
+		"action":        action,
+		"side":          side,
+		"signal_type":   "OPEN",
+		"quantity":      quantity,
+		"entry_price":   m15.Close,
+		"stop_loss":     stopLoss,
+		"take_profits":  []float64{tp1, tp2},
+		"reason":        signalReason.Summary,
+		"signal_reason": signalReason,
+		"timestamp":     time.Now().UnixMilli(),
+		"atr":           m15.Atr,
+		"risk_reward":   riskReward,
 		"indicators": map[string]interface{}{
 			"h4_ema21":  s.latest4h.Ema21,
 			"h4_ema55":  s.latest4h.Ema55,
@@ -751,23 +841,9 @@ func (s *TrendFollowingStrategy) openPosition(ctx context.Context, k *marketpb.K
 
 // buildEntryReason 构建入场信号原因描述
 func (s *TrendFollowingStrategy) buildEntryReason(trend trendDirection, pullback pullbackResult, entry entrySignal, m15 klineSnapshot, stopLoss, tp1, tp2 float64) string {
-	trendStr := "无"
-	if trend == trendLong {
-		trendStr = "多头（价格>EMA21>EMA55）"
-	} else if trend == trendShort {
-		trendStr = "空头（价格<EMA21<EMA55）"
-	}
-
-	pullbackStr := "无"
-	if pullback == pullbackLong {
-		pullbackStr = "多头回调（EMA21>价格>EMA55，RSI∈[42,60]）"
-	} else if pullback == pullbackShort {
-		pullbackStr = "空头回调（EMA21<价格<EMA55，RSI∈[40,58]）"
-	}
-
 	return fmt.Sprintf(
 		"4H趋势=%s | 1H回调=%s | 15M入场 | RSI=%.2f ATR=%.2f | 止损=%.2f(1.5×ATR) TP1=%.2f TP2=%.2f",
-		trendStr, pullbackStr, m15.Rsi, m15.Atr, stopLoss, tp1, tp2,
+		describeTrendContext(trend), describePullbackContext15m(pullback), m15.Rsi, m15.Atr, stopLoss, tp1, tp2,
 	)
 }
 
@@ -895,10 +971,25 @@ func (s *TrendFollowingStrategy) checkExitConditions(ctx context.Context, k *mar
 		"entry_price":  price,
 		"stop_loss":    s.pos.stopLoss,
 		"take_profits": []float64{s.pos.takeProfit1, s.pos.takeProfit2},
-		"reason":       exitReason,
-		"timestamp":    time.Now().UnixMilli(),
-		"atr":          m15.Atr,
-		"risk_reward":  0, // 出场信号无需风险收益比
+		"reason": s.newSignalReason(
+			exitReason,
+			"CLOSE_EXIT",
+			fmt.Sprintf("持仓方向=%s | 周期=15m", side),
+			exitReason,
+			fmt.Sprintf("平仓价=%.2f | 已实现盈亏=%.2f | 止损=%.2f", price, pnl, s.pos.stopLoss),
+			"15m", "trend_following", "close", side,
+		).Summary,
+		"signal_reason": s.newSignalReason(
+			exitReason,
+			"CLOSE_EXIT",
+			fmt.Sprintf("持仓方向=%s | 周期=15m", side),
+			exitReason,
+			fmt.Sprintf("平仓价=%.2f | 已实现盈亏=%.2f | 止损=%.2f", price, pnl, s.pos.stopLoss),
+			"15m", "trend_following", "close", side,
+		),
+		"timestamp":   time.Now().UnixMilli(),
+		"atr":         m15.Atr,
+		"risk_reward": 0, // 出场信号无需风险收益比
 		"indicators": map[string]interface{}{
 			"m15_ema21": m15.Ema21,
 			"m15_rsi":   m15.Rsi,
@@ -1102,20 +1193,83 @@ func (s *TrendFollowingStrategy) sendSignal(ctx context.Context, signal map[stri
 
 // signalLogEntry 定义结构化的信号日志格式
 type signalLogEntry struct {
-	Timestamp   string                 `json:"timestamp"`
-	StrategyID  string                 `json:"strategyId"`
-	Symbol      string                 `json:"symbol"`
-	Interval    string                 `json:"interval"`
-	Action      string                 `json:"action"`
-	Side        string                 `json:"side"`
-	EntryPrice  float64                `json:"entryPrice"`
-	Quantity    float64                `json:"quantity"`
-	StopLoss    float64                `json:"stopLoss"`
-	TakeProfits []float64              `json:"takeProfits"`
-	Reason      string                 `json:"reason"`
-	Indicators  map[string]interface{} `json:"indicators"`
-	IsTradable  bool                   `json:"isTradable"`
-	IsFinal     bool                   `json:"isFinal"`
+	Timestamp    string                 `json:"timestamp"`
+	StrategyID   string                 `json:"strategyId"`
+	Symbol       string                 `json:"symbol"`
+	Interval     string                 `json:"interval"`
+	Action       string                 `json:"action"`
+	Side         string                 `json:"side"`
+	EntryPrice   float64                `json:"entryPrice"`
+	Quantity     float64                `json:"quantity"`
+	StopLoss     float64                `json:"stopLoss"`
+	TakeProfits  []float64              `json:"takeProfits"`
+	Reason       string                 `json:"reason"`
+	SignalReason interface{}            `json:"signalReason,omitempty"`
+	Indicators   map[string]interface{} `json:"indicators"`
+	IsTradable   bool                   `json:"isTradable"`
+	IsFinal      bool                   `json:"isFinal"`
+}
+
+type signalReasonPayload struct {
+	Summary          string   `json:"summary"`
+	Phase            string   `json:"phase"`
+	TrendContext     string   `json:"trend_context,omitempty"`
+	SetupContext     string   `json:"setup_context,omitempty"`
+	PathContext      string   `json:"path_context,omitempty"`
+	ExecutionContext string   `json:"execution_context,omitempty"`
+	Tags             []string `json:"tags,omitempty"`
+}
+
+func (s *TrendFollowingStrategy) newSignalReason(summary, phase, trendContext, setupContext, executionContext string, tags ...string) signalReasonPayload {
+	return signalReasonPayload{
+		Summary:          summary,
+		Phase:            phase,
+		TrendContext:     trendContext,
+		SetupContext:     setupContext,
+		PathContext:      s.harvestPathReasonContext(),
+		ExecutionContext: executionContext,
+		Tags:             tags,
+	}
+}
+
+func (s *TrendFollowingStrategy) harvestPathReasonContext() string {
+	if s.getParam(paramHarvestPathModelEnabled, 0) > 0 {
+		return "harvest_path_guard=enabled"
+	}
+	return "harvest_path_guard=disabled"
+}
+
+func describeTrendContext(trend trendDirection) string {
+	switch trend {
+	case trendLong:
+		return "多头（价格>EMA21>EMA55）"
+	case trendShort:
+		return "空头（价格<EMA21<EMA55）"
+	default:
+		return "无"
+	}
+}
+
+func describePullbackContext15m(pullback pullbackResult) string {
+	switch pullback {
+	case pullbackLong:
+		return "多头回调（EMA21>价格>EMA55，RSI∈[42,60]）"
+	case pullbackShort:
+		return "空头回调（EMA21<价格<EMA55，RSI∈[40,58]）"
+	default:
+		return "无"
+	}
+}
+
+func describePullbackContext1m(pullback pullbackResult) string {
+	switch pullback {
+	case pullbackLong:
+		return "多头回调"
+	case pullbackShort:
+		return "空头回调"
+	default:
+		return "无"
+	}
 }
 
 // writeSignalLog 追加信号到每日 JSONL 日志文件
@@ -1155,6 +1309,7 @@ func (s *TrendFollowingStrategy) writeSignalLog(signal map[string]interface{}, k
 	quantity, _ := signal["quantity"].(float64)
 	stopLoss, _ := signal["stop_loss"].(float64)
 	reason, _ := signal["reason"].(string)
+	signalReason := signal["signal_reason"]
 	interval, _ := signal["interval"].(string)
 	indicators, _ := signal["indicators"].(map[string]interface{})
 	strategyID, _ := signal["strategy_id"].(string)
@@ -1165,20 +1320,21 @@ func (s *TrendFollowingStrategy) writeSignalLog(signal map[string]interface{}, k
 	}
 
 	entry := signalLogEntry{
-		Timestamp:   now.Format("2006-01-02T15:04:05.000Z"),
-		StrategyID:  strategyID,
-		Symbol:      s.symbol,
-		Interval:    interval,
-		Action:      action,
-		Side:        side,
-		EntryPrice:  entryPrice,
-		Quantity:    quantity,
-		StopLoss:    stopLoss,
-		TakeProfits: takeProfits,
-		Reason:      reason,
-		Indicators:  indicators,
-		IsTradable:  k.IsTradable,
-		IsFinal:     k.IsFinal,
+		Timestamp:    now.Format("2006-01-02T15:04:05.000Z"),
+		StrategyID:   strategyID,
+		Symbol:       s.symbol,
+		Interval:     interval,
+		Action:       action,
+		Side:         side,
+		EntryPrice:   entryPrice,
+		Quantity:     quantity,
+		StopLoss:     stopLoss,
+		TakeProfits:  takeProfits,
+		Reason:       reason,
+		SignalReason: signalReason,
+		Indicators:   indicators,
+		IsTradable:   k.IsTradable,
+		IsFinal:      k.IsFinal,
 	}
 
 	// 数值保留2位小数
@@ -1289,6 +1445,9 @@ func (s *TrendFollowingStrategy) checkEntryConditions1m(ctx context.Context, k *
 				return nil
 			}
 		}
+		if s.shouldBlockForHarvestPathRisk(ctx, k, entry) {
+			return nil
+		}
 
 		return s.openPosition1m(ctx, k, trend, pullback, entry, m1)
 	}
@@ -1320,8 +1479,290 @@ func (s *TrendFollowingStrategy) checkEntryConditions1m(ctx context.Context, k *
 	if entry == entryNone {
 		return nil
 	}
+	if s.shouldBlockForHarvestPathRisk(ctx, k, entry) {
+		return nil
+	}
 
 	return s.openPosition1m(ctx, k, trend, pullback, entry, m1)
+}
+
+func (s *TrendFollowingStrategy) shouldBlockForHarvestPathRisk(ctx context.Context, k *marketpb.Kline, entry entrySignal) bool {
+	if s.getParam(paramHarvestPathModelEnabled, 0) <= 0 {
+		return false
+	}
+	entrySide, ok := toHarvestPathEntrySide(entry)
+	if !ok {
+		return false
+	}
+
+	input := harvestpathmodel.Context{
+		Symbol:    s.symbol,
+		EventTime: k.GetEventTime(),
+		LastPrice: k.GetClose(),
+		EntrySide: entrySide,
+		Candles1m: s.buildHarvestPathCandles(),
+		OrderBook: s.buildHarvestPathOrderBook(),
+	}
+	blockThreshold, volatilityRegime, thresholdSource := s.harvestPathBlockThresholdForCurrentRegime()
+	detector := harvestpathmodel.NewDetector(
+		int(s.getParam(paramHarvestPathLookback, 20)),
+		blockThreshold,
+	)
+	signal, err := detector.Evaluate(input)
+	if err != nil || signal == nil {
+		return false
+	}
+	s.applyHarvestPathLSTM(ctx, detector, signal)
+	s.applyHarvestPathBook(detector, signal, input.OrderBook, entrySide, k.GetClose())
+	s.publishHarvestPathSignal(ctx, k, entrySide, signal, volatilityRegime, thresholdSource, blockThreshold)
+
+	logThreshold := s.getParam(paramHarvestPathLogThreshold, 0.60)
+	if signal.HarvestPathProbability >= logThreshold {
+		log.Printf("[harvest-path] %s entry=%s target=%s prob=%.2f rule_prob=%.2f lstm_prob=%.2f book_prob=%.2f block_threshold=%.2f regime=%s threshold_source=%s stop_density=%.2f trigger=%.2f zone=[%.2f,%.2f] path_action=%s",
+			s.symbol, entrySide, signal.TargetSide, signal.HarvestPathProbability, signal.RuleProbability,
+			signal.LSTMProbability, signal.BookProbability, blockThreshold, volatilityRegime, thresholdSource, signal.StopDensityScore, signal.TriggerScore, signal.TargetZoneLow, signal.TargetZoneHigh, signal.PathAction)
+	}
+	if detector.ShouldBlock(signal) {
+		log.Printf("[harvest-path] %s hold entry=%s and wait for reclaim prob=%.2f threshold=%.2f regime=%s ref=%.2f market=%.2f",
+			s.symbol, entrySide, signal.HarvestPathProbability, blockThreshold, volatilityRegime, signal.ReferencePrice, signal.MarketPrice)
+		return true
+	}
+	return false
+}
+
+func (s *TrendFollowingStrategy) harvestPathBlockThresholdForCurrentRegime() (float64, string, string) {
+	base := s.getParam(paramHarvestPathBlockThreshold, 0.80)
+	if s == nil || s.harvestPathLSTMPredictor == nil {
+		return base, "", "global"
+	}
+	if s.getParam(paramHarvestPathLSTMEnabled, 0) <= 0 {
+		return base, "", "global"
+	}
+	if s.getParam(paramHarvestPathRegimeAwareThresholdEnabled, 1) <= 0 {
+		return base, "", "global"
+	}
+	regime, ok := s.currentHarvestPathVolatilityRegime(int(s.getParam(paramHarvestPathRegimeLookback, 120)))
+	if !ok {
+		return base, "", "global"
+	}
+	threshold, matched := s.harvestPathLSTMPredictor.RegimeThreshold(s.symbol, regime, base)
+	if matched {
+		return threshold, regime, "regime"
+	}
+	if threshold != base {
+		return threshold, regime, "artifact_default"
+	}
+	return base, regime, "global"
+}
+
+func (s *TrendFollowingStrategy) currentHarvestPathVolatilityRegime(lookback int) (string, bool) {
+	if s == nil || len(s.klines1m) == 0 {
+		return "", false
+	}
+	if lookback <= 0 {
+		lookback = 120
+	}
+	start := len(s.klines1m) - lookback
+	if start < 0 {
+		start = 0
+	}
+	atrPcts := make([]float64, 0, len(s.klines1m)-start)
+	for _, item := range s.klines1m[start:] {
+		if item.Close <= 0 || item.Atr <= 0 {
+			continue
+		}
+		atrPcts = append(atrPcts, item.Atr/item.Close)
+	}
+	if len(atrPcts) < 3 {
+		return "", false
+	}
+	current := atrPcts[len(atrPcts)-1]
+	sorted := append([]float64(nil), atrPcts...)
+	sort.Float64s(sorted)
+	lowCut := percentile(sorted, 0.33)
+	highCut := percentile(sorted, 0.67)
+	switch {
+	case current <= lowCut:
+		return "LOW", true
+	case current >= highCut:
+		return "HIGH", true
+	default:
+		return "MID", true
+	}
+}
+
+func percentile(sorted []float64, q float64) float64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	if q <= 0 {
+		return sorted[0]
+	}
+	if q >= 1 {
+		return sorted[len(sorted)-1]
+	}
+	pos := q * float64(len(sorted)-1)
+	lower := int(math.Floor(pos))
+	upper := int(math.Ceil(pos))
+	if lower == upper {
+		return sorted[lower]
+	}
+	weight := pos - float64(lower)
+	return sorted[lower]*(1-weight) + sorted[upper]*weight
+}
+
+func (s *TrendFollowingStrategy) applyHarvestPathLSTM(ctx context.Context, detector *harvestpathmodel.Detector, signal *harvestpathmodel.Signal) {
+	if s == nil || detector == nil || signal == nil {
+		return
+	}
+	if s.getParam(paramHarvestPathLSTMEnabled, 0) <= 0 {
+		return
+	}
+	if s.harvestPathLSTMPredictor == nil {
+		return
+	}
+	prediction, err := s.harvestPathLSTMPredictor.Predict(ctx, s.symbol)
+	if err != nil {
+		log.Printf("[harvest-path] %s lstm liquidity sweep risk recognition failed: %v", s.symbol, err)
+		return
+	}
+	if prediction == nil {
+		return
+	}
+	detector.BlendLSTMProbability(signal, prediction.HarvestPathProbability, s.getParam(paramHarvestPathLSTMWeight, 0.35))
+}
+
+func (s *TrendFollowingStrategy) applyHarvestPathBook(
+	detector *harvestpathmodel.Detector,
+	signal *harvestpathmodel.Signal,
+	orderBook *harvestpathmodel.OrderBookSnapshot,
+	entrySide harvestpathmodel.EntrySide,
+	lastPrice float64,
+) {
+	if s == nil || detector == nil || signal == nil || orderBook == nil {
+		return
+	}
+	if s.getParam(paramHarvestPathBookEnabled, 0) <= 0 {
+		return
+	}
+	encoder := harvestpathmodel.NewBookEncoder(
+		int(s.getParam(paramHarvestPathBookTopN, 10)),
+		s.getParam(paramHarvestPathBookSpreadBpsCap, 12),
+	)
+	features := encoder.Encode(orderBook, lastPrice, entrySide)
+	if features == nil {
+		return
+	}
+	detector.BlendBookProbability(
+		signal,
+		features.Probability,
+		features.SpreadBps,
+		features.DepthImbalance,
+		features.DirectionalPressure,
+		features.Summary,
+		s.getParam(paramHarvestPathBookWeight, 0.35),
+	)
+}
+
+func (s *TrendFollowingStrategy) publishHarvestPathSignal(
+	ctx context.Context,
+	k *marketpb.Kline,
+	entrySide harvestpathmodel.EntrySide,
+	signal *harvestpathmodel.Signal,
+	volatilityRegime string,
+	thresholdSource string,
+	appliedThreshold float64,
+) {
+	if s == nil || s.harvestPathProducer == nil || signal == nil || k == nil {
+		return
+	}
+	threshold := s.getParam(paramHarvestPathPublishThreshold, 0.60)
+	if signal.HarvestPathProbability < threshold {
+		return
+	}
+
+	msg := map[string]interface{}{
+		"symbol":                   s.symbol,
+		"event_time":               signal.EventTime,
+		"interval":                 k.GetInterval(),
+		"model":                    "harvest_path_liquidity_sweep_risk_v1",
+		"entry_side":               string(entrySide),
+		"target_side":              string(signal.TargetSide),
+		"target_zone_low":          signal.TargetZoneLow,
+		"target_zone_high":         signal.TargetZoneHigh,
+		"reference_price":          signal.ReferencePrice,
+		"market_price":             signal.MarketPrice,
+		"stop_density_score":       signal.StopDensityScore,
+		"trigger_score":            signal.TriggerScore,
+		"rule_probability":         signal.RuleProbability,
+		"lstm_probability":         signal.LSTMProbability,
+		"book_probability":         signal.BookProbability,
+		"book_spread_bps":          signal.BookSpreadBps,
+		"book_imbalance":           signal.BookImbalance,
+		"book_pressure":            signal.BookPressure,
+		"book_summary":             signal.BookSummary,
+		"volatility_regime":        volatilityRegime,
+		"threshold_source":         thresholdSource,
+		"applied_threshold":        appliedThreshold,
+		"harvest_path_probability": signal.HarvestPathProbability,
+		"expected_path_depth":      signal.ExpectedPathDepth,
+		"expected_reversal_speed":  signal.ExpectedReversalSpeed,
+		"path_action":              signal.PathAction,
+		"risk_level":               signal.RiskLevel,
+		"is_closed":                k.GetIsClosed(),
+		"is_final":                 k.GetIsFinal(),
+		"is_tradable":              k.GetIsTradable(),
+		"volume":                   k.GetVolume(),
+		"quote_volume":             k.GetQuoteVolume(),
+		"taker_buy_volume":         k.GetTakerBuyVolume(),
+	}
+	if err := s.harvestPathProducer.SendMarketData(ctx, msg); err != nil {
+		log.Printf("[harvest-path] %s publish path signal failed: %v", s.symbol, err)
+	}
+}
+
+func (s *TrendFollowingStrategy) buildHarvestPathOrderBook() *harvestpathmodel.OrderBookSnapshot {
+	if s == nil || s.latestDepth == nil {
+		return nil
+	}
+	snapshot := &harvestpathmodel.OrderBookSnapshot{
+		Timestamp: s.latestDepth.Timestamp,
+		Bids:      append([]harvestpathmodel.BookLevel(nil), s.latestDepth.Bids...),
+		Asks:      append([]harvestpathmodel.BookLevel(nil), s.latestDepth.Asks...),
+	}
+	return snapshot
+}
+
+func (s *TrendFollowingStrategy) buildHarvestPathCandles() []harvestpathmodel.Candle {
+	if len(s.klines1m) == 0 {
+		return nil
+	}
+	items := make([]harvestpathmodel.Candle, 0, len(s.klines1m))
+	for _, item := range s.klines1m {
+		items = append(items, harvestpathmodel.Candle{
+			OpenTime:       item.OpenTime,
+			Open:           item.Open,
+			High:           item.High,
+			Low:            item.Low,
+			Close:          item.Close,
+			Volume:         item.Volume,
+			QuoteVolume:    item.QuoteVol,
+			TakerBuyVolume: item.TakerBuy,
+			Atr:            item.Atr,
+		})
+	}
+	return items
+}
+
+func toHarvestPathEntrySide(entry entrySignal) (harvestpathmodel.EntrySide, bool) {
+	switch entry {
+	case entryLong:
+		return harvestpathmodel.EntrySideLong, true
+	case entryShort:
+		return harvestpathmodel.EntrySideShort, true
+	default:
+		return "", false
+	}
 }
 
 // judge1MEntry 判断1分钟入场信号
@@ -1449,6 +1890,14 @@ func (s *TrendFollowingStrategy) openPosition1m(ctx context.Context, k *marketpb
 
 	// 构建入场原因
 	reason := s.buildEntryReason1m(trend, pullback, entry, m1, stopLoss, tp1, tp2)
+	signalReason := s.newSignalReason(
+		reason,
+		"OPEN_ENTRY",
+		fmt.Sprintf("4H趋势=%s", describeTrendContext(trend)),
+		fmt.Sprintf("1H回调=%s | 1M入场确认", describePullbackContext1m(pullback)),
+		fmt.Sprintf("RSI=%.2f ATR=%.2f | 止损=%.2f TP1=%.2f TP2=%.2f", m1.Rsi, m1.Atr, stopLoss, tp1, tp2),
+		"1m", "trend_following", "open", side,
+	)
 
 	// 记录持仓
 	s.pos = position{
@@ -1474,20 +1923,21 @@ func (s *TrendFollowingStrategy) openPosition1m(ctx context.Context, k *marketpb
 
 	// 发送开仓信号
 	signal := map[string]interface{}{
-		"strategy_id":  fmt.Sprintf("trend-following-1m-%s", s.symbol),
-		"symbol":       s.symbol,
-		"interval":     "1m",
-		"action":       action,
-		"side":         side,
-		"signal_type":  "OPEN",
-		"quantity":     quantity,
-		"entry_price":  m1.Close,
-		"stop_loss":    stopLoss,
-		"take_profits": []float64{tp1, tp2},
-		"reason":       reason,
-		"timestamp":    time.Now().UnixMilli(),
-		"atr":          m1.Atr,
-		"risk_reward":  riskReward,
+		"strategy_id":   fmt.Sprintf("trend-following-1m-%s", s.symbol),
+		"symbol":        s.symbol,
+		"interval":      "1m",
+		"action":        action,
+		"side":          side,
+		"signal_type":   "OPEN",
+		"quantity":      quantity,
+		"entry_price":   m1.Close,
+		"stop_loss":     stopLoss,
+		"take_profits":  []float64{tp1, tp2},
+		"reason":        signalReason.Summary,
+		"signal_reason": signalReason,
+		"timestamp":     time.Now().UnixMilli(),
+		"atr":           m1.Atr,
+		"risk_reward":   riskReward,
 		"indicators": map[string]interface{}{
 			"h4_ema21":  s.latest4h.Ema21,
 			"h4_ema55":  s.latest4h.Ema55,
@@ -1511,23 +1961,9 @@ func (s *TrendFollowingStrategy) openPosition1m(ctx context.Context, k *marketpb
 
 // buildEntryReason1m 构建1m入场信号原因描述
 func (s *TrendFollowingStrategy) buildEntryReason1m(trend trendDirection, pullback pullbackResult, entry entrySignal, m1 klineSnapshot, stopLoss, tp1, tp2 float64) string {
-	trendStr := "无"
-	if trend == trendLong {
-		trendStr = "多头（价格>EMA21>EMA55）"
-	} else if trend == trendShort {
-		trendStr = "空头（价格<EMA21<EMA55）"
-	}
-
-	pullbackStr := "无"
-	if pullback == pullbackLong {
-		pullbackStr = "多头回调"
-	} else if pullback == pullbackShort {
-		pullbackStr = "空头回调"
-	}
-
 	return fmt.Sprintf(
 		"[1m] 4H趋势=%s | 1H回调=%s | 1M入场 | RSI=%.2f ATR=%.2f | 止损=%.2f(1.5×ATR) TP1=%.2f TP2=%.2f",
-		trendStr, pullbackStr, m1.Rsi, m1.Atr, stopLoss, tp1, tp2,
+		describeTrendContext(trend), describePullbackContext1m(pullback), m1.Rsi, m1.Atr, stopLoss, tp1, tp2,
 	)
 }
 
@@ -1652,10 +2088,25 @@ func (s *TrendFollowingStrategy) checkExitConditions1m(ctx context.Context, k *m
 		"entry_price":  price,
 		"stop_loss":    s.pos.stopLoss,
 		"take_profits": []float64{s.pos.takeProfit1, s.pos.takeProfit2},
-		"reason":       exitReason,
-		"timestamp":    time.Now().UnixMilli(),
-		"atr":          m1.Atr,
-		"risk_reward":  0,
+		"reason": s.newSignalReason(
+			exitReason,
+			"CLOSE_EXIT",
+			fmt.Sprintf("持仓方向=%s | 周期=1m", side),
+			exitReason,
+			fmt.Sprintf("平仓价=%.2f | 已实现盈亏=%.2f | 止损=%.2f", price, pnl, s.pos.stopLoss),
+			"1m", "trend_following", "close", side,
+		).Summary,
+		"signal_reason": s.newSignalReason(
+			exitReason,
+			"CLOSE_EXIT",
+			fmt.Sprintf("持仓方向=%s | 周期=1m", side),
+			exitReason,
+			fmt.Sprintf("平仓价=%.2f | 已实现盈亏=%.2f | 止损=%.2f", price, pnl, s.pos.stopLoss),
+			"1m", "trend_following", "close", side,
+		),
+		"timestamp":   time.Now().UnixMilli(),
+		"atr":         m1.Atr,
+		"risk_reward": 0,
 		"indicators": map[string]interface{}{
 			"m1_ema21": m1.Ema21,
 			"m1_rsi":   m1.Rsi,

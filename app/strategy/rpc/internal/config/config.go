@@ -15,8 +15,10 @@ type Config struct {
 		Addrs  []string
 		Group  string
 		Topics struct {
-			Kline  string
-			Signal string
+			Kline             string
+			Depth             string
+			Signal            string
+			HarvestPathSignal string
 		}
 	}
 
@@ -31,5 +33,14 @@ type Config struct {
 		Symbol      string
 		Name        string
 		RuntimeMode string
+	}
+
+	HarvestPathLSTM struct {
+		Enabled      bool
+		PythonBin    string
+		ScriptPath   string
+		DataDir      string
+		ArtifactsDir string
+		TimeoutMs    int64
 	}
 }

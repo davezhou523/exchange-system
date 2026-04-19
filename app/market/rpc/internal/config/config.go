@@ -12,6 +12,7 @@ type Config struct {
 		Addrs  []string
 		Topics struct {
 			Kline string
+			Depth string
 		}
 	}
 	Binance struct {

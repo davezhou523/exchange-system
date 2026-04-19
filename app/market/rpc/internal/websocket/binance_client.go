@@ -17,14 +17,15 @@ import (
 )
 
 type BinanceWebSocketClient struct {
-	baseURL    string
-	proxyURL   string
-	dialer     *websocket.Dialer
-	conn       *websocket.Conn
-	producer   KafkaProducer
-	symbols    []string
-	intervals  []string
-	aggregator KlineAggregator
+	baseURL       string
+	proxyURL      string
+	dialer        *websocket.Dialer
+	conn          *websocket.Conn
+	producer      KafkaProducer
+	depthProducer KafkaProducer
+	symbols       []string
+	intervals     []string
+	aggregator    KlineAggregator
 }
 
 type KlineAggregator interface {
@@ -101,13 +102,42 @@ func (i *flexInt) UnmarshalJSON(data []byte) error {
 type StreamEnvelope struct {
 	Stream string `json:"stream"`
 	Data   struct {
-		EventType string    `json:"e"`
-		EventTime flexInt   `json:"E"`
-		Kline     KlineData `json:"k"`
+		EventType string           `json:"e"`
+		EventTime flexInt          `json:"E"`
+		Symbol    string           `json:"s"`
+		Kline     KlineData        `json:"k"`
+		Bids      []depthLevelData `json:"b"`
+		Asks      []depthLevelData `json:"a"`
 	} `json:"data"`
 }
 
-func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []string, producer KafkaProducer, aggregator KlineAggregator) *BinanceWebSocketClient {
+type depthLevelData struct {
+	Price    float64
+	Quantity float64
+}
+
+func (d *depthLevelData) UnmarshalJSON(data []byte) error {
+	var raw []json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if len(raw) < 2 {
+		return fmt.Errorf("invalid depth level length: %d", len(raw))
+	}
+	var price flexFloat
+	if err := json.Unmarshal(raw[0], &price); err != nil {
+		return err
+	}
+	var quantity flexFloat
+	if err := json.Unmarshal(raw[1], &quantity); err != nil {
+		return err
+	}
+	d.Price = float64(price)
+	d.Quantity = float64(quantity)
+	return nil
+}
+
+func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []string, producer, depthProducer KafkaProducer, aggregator KlineAggregator) *BinanceWebSocketClient {
 	dialer := &websocket.Dialer{
 		HandshakeTimeout: 15 * time.Second,
 	}
@@ -123,13 +153,14 @@ func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []st
 	}
 
 	return &BinanceWebSocketClient{
-		baseURL:    baseURL,
-		proxyURL:   proxyURL,
-		dialer:     dialer,
-		producer:   producer,
-		symbols:    symbols,
-		intervals:  intervals,
-		aggregator: aggregator,
+		baseURL:       baseURL,
+		proxyURL:      proxyURL,
+		dialer:        dialer,
+		producer:      producer,
+		depthProducer: depthProducer,
+		symbols:       symbols,
+		intervals:     intervals,
+		aggregator:    aggregator,
 	}
 }
 
@@ -144,6 +175,9 @@ func (c *BinanceWebSocketClient) buildStreamURL() string {
 	for _, symbol := range c.symbols {
 		for _, interval := range c.intervals {
 			streams = append(streams, fmt.Sprintf("%s@kline_%s", strings.ToLower(symbol), interval))
+		}
+		if c.depthProducer != nil {
+			streams = append(streams, fmt.Sprintf("%s@depth20@100ms", strings.ToLower(symbol)))
 		}
 	}
 	return fmt.Sprintf("%s/stream?streams=%s", strings.TrimRight(c.baseURL, "/"), strings.Join(streams, "/"))
@@ -268,6 +302,37 @@ func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []by
 			}
 			if c.aggregator != nil {
 				c.aggregator.OnKline(ctx, &k)
+			}
+		}
+	}
+	if strings.Contains(envelope.Stream, "@depth") && c.depthProducer != nil {
+		depth := market.Depth{
+			Symbol:    envelope.Data.Symbol,
+			Timestamp: int64(envelope.Data.EventTime),
+			Bids:      make([]*market.DepthItem, 0, len(envelope.Data.Bids)),
+			Asks:      make([]*market.DepthItem, 0, len(envelope.Data.Asks)),
+		}
+		for _, item := range envelope.Data.Bids {
+			if item.Price <= 0 || item.Quantity <= 0 {
+				continue
+			}
+			depth.Bids = append(depth.Bids, &market.DepthItem{
+				Price:    item.Price,
+				Quantity: item.Quantity,
+			})
+		}
+		for _, item := range envelope.Data.Asks {
+			if item.Price <= 0 || item.Quantity <= 0 {
+				continue
+			}
+			depth.Asks = append(depth.Asks, &market.DepthItem{
+				Price:    item.Price,
+				Quantity: item.Quantity,
+			})
+		}
+		if len(depth.Bids) > 0 && len(depth.Asks) > 0 {
+			if err := c.depthProducer.SendMarketData(ctx, &depth); err != nil {
+				return fmt.Errorf("failed to send depth to Kafka: %v", err)
 			}
 		}
 	}

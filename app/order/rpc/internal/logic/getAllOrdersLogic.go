@@ -60,32 +60,50 @@ func convertAllOrder(svcCtx *svc.ServiceContext, lifecycleMap map[int64]svc.Orde
 		return nil
 	}
 	estimatedFee, actualFee, actualFeeAsset, actionType, positionCycleID := "", "", "", "", ""
+	harvestPathProbability, harvestPathRuleProbability, harvestPathLSTMProbability, harvestPathBookProbability, harvestPathBookSummary, harvestPathVolatilityRegime, harvestPathThresholdSource, harvestPathAppliedThreshold, harvestPathAction, harvestPathRiskLevel, harvestPathTargetSide, harvestPathReferencePrice, harvestPathMarketPrice, reason := "", "", "", "", "", "", "", "", "", "", "", "", "", ""
+	var signalReason *pb.SignalReason
 	if svcCtx != nil {
 		estimatedFee, actualFee, actualFeeAsset = svcCtx.AllOrderFeeFields(*o)
 		actionType, positionCycleID = svcCtx.AllOrderLifecycleFields(*o, lifecycleMap)
+		harvestPathProbability, harvestPathRuleProbability, harvestPathLSTMProbability, harvestPathBookProbability, harvestPathBookSummary, harvestPathVolatilityRegime, harvestPathThresholdSource, harvestPathAppliedThreshold, harvestPathAction, harvestPathRiskLevel, harvestPathTargetSide, harvestPathReferencePrice, harvestPathMarketPrice, reason, signalReason = svcCtx.AllOrderHarvestPathFields(*o)
 	}
 	return &pb.AllOrderItem{
-		OrderId:         o.OrderID,
-		Symbol:          o.Symbol,
-		Status:          o.Status,
-		Side:            o.Side,
-		PositionSide:    o.PositionSide,
-		Type:            o.Type,
-		OrigQty:         o.OrigQty,
-		ExecutedQty:     o.ExecutedQty,
-		AvgPrice:        o.AvgPrice,
-		Price:           o.Price,
-		StopPrice:       o.StopPrice,
-		ClientOrderId:   o.ClientOrderID,
-		Time:            o.Time,
-		UpdateTime:      o.UpdateTime,
-		ReduceOnly:      o.ReduceOnly,
-		ClosePosition:   o.ClosePosition,
-		TimeInForce:     o.TimeInForce,
-		EstimatedFee:    estimatedFee,
-		ActualFee:       actualFee,
-		ActualFeeAsset:  actualFeeAsset,
-		ActionType:      actionType,
-		PositionCycleId: positionCycleID,
+		OrderId:                     o.OrderID,
+		Symbol:                      o.Symbol,
+		Status:                      o.Status,
+		Side:                        o.Side,
+		PositionSide:                o.PositionSide,
+		Type:                        o.Type,
+		OrigQty:                     o.OrigQty,
+		ExecutedQty:                 o.ExecutedQty,
+		AvgPrice:                    o.AvgPrice,
+		Price:                       o.Price,
+		StopPrice:                   o.StopPrice,
+		ClientOrderId:               o.ClientOrderID,
+		Time:                        o.Time,
+		UpdateTime:                  o.UpdateTime,
+		ReduceOnly:                  o.ReduceOnly,
+		ClosePosition:               o.ClosePosition,
+		TimeInForce:                 o.TimeInForce,
+		EstimatedFee:                estimatedFee,
+		ActualFee:                   actualFee,
+		ActualFeeAsset:              actualFeeAsset,
+		ActionType:                  actionType,
+		PositionCycleId:             positionCycleID,
+		HarvestPathProbability:      harvestPathProbability,
+		HarvestPathRuleProbability:  harvestPathRuleProbability,
+		HarvestPathLstmProbability:  harvestPathLSTMProbability,
+		HarvestPathBookProbability:  harvestPathBookProbability,
+		HarvestPathBookSummary:      harvestPathBookSummary,
+		HarvestPathVolatilityRegime: harvestPathVolatilityRegime,
+		HarvestPathThresholdSource:  harvestPathThresholdSource,
+		HarvestPathAppliedThreshold: harvestPathAppliedThreshold,
+		HarvestPathAction:           harvestPathAction,
+		HarvestPathRiskLevel:        harvestPathRiskLevel,
+		HarvestPathTargetSide:       harvestPathTargetSide,
+		HarvestPathReferencePrice:   harvestPathReferencePrice,
+		HarvestPathMarketPrice:      harvestPathMarketPrice,
+		Reason:                      reason,
+		SignalReason:                signalReason,
 	}
 }

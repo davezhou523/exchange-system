@@ -10,6 +10,7 @@ import (
 	"exchange-system/app/strategy/rpc/internal/config"
 	"exchange-system/app/strategy/rpc/internal/kafka"
 	strategyengine "exchange-system/app/strategy/rpc/internal/strategy"
+	harvestpathmodel "exchange-system/app/strategy/rpc/internal/strategy/harvestpath"
 	commonkafka "exchange-system/common/kafka"
 	"exchange-system/common/pb/market"
 	strategypb "exchange-system/common/pb/strategy"
@@ -20,9 +21,12 @@ import (
 type ServiceContext struct {
 	Config config.Config
 
-	signalProducer *kafka.Producer
-	marketConsumer *kafka.Consumer
-	executionCli   executionservice.ExecutionService
+	signalProducer           *kafka.Producer
+	harvestPathProducer      *kafka.Producer
+	harvestPathLSTMPredictor *harvestpathmodel.LSTMPredictor
+	marketConsumer           *kafka.Consumer
+	depthConsumer            *kafka.Consumer
+	executionCli             executionservice.ExecutionService
 
 	mu         sync.RWMutex
 	strategies map[string]*strategyengine.TrendFollowingStrategy
@@ -37,6 +41,15 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		cancel()
 		return nil, err
 	}
+	var harvestPathProducer *kafka.Producer
+	if c.Kafka.Topics.HarvestPathSignal != "" {
+		harvestPathProducer, err = kafka.NewProducerWithContext(ctx, c.Kafka.Addrs, c.Kafka.Topics.HarvestPathSignal)
+		if err != nil {
+			_ = signalProducer.Close()
+			cancel()
+			return nil, err
+		}
+	}
 
 	groupID := c.Kafka.Group
 	if groupID == "" {
@@ -48,20 +61,48 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	}
 	marketConsumer, err := kafka.NewConsumer(c.Kafka.Addrs, groupID, c.Kafka.Topics.Kline, c.KlineLogDir)
 	if err != nil {
+		if harvestPathProducer != nil {
+			_ = harvestPathProducer.Close()
+		}
 		_ = signalProducer.Close()
 		cancel()
 		return nil, err
 	}
+	var depthConsumer *kafka.Consumer
+	if c.Kafka.Topics.Depth != "" {
+		depthGroupID := groupID + "-depth"
+		depthConsumer, err = kafka.NewConsumer(c.Kafka.Addrs, depthGroupID, c.Kafka.Topics.Depth, "")
+		if err != nil {
+			_ = marketConsumer.Close()
+			if harvestPathProducer != nil {
+				_ = harvestPathProducer.Close()
+			}
+			_ = signalProducer.Close()
+			cancel()
+			return nil, err
+		}
+	}
 
 	executionCli := executionservice.NewExecutionService(zrpc.MustNewClient(c.Execution))
+	harvestPathLSTMPredictor := harvestpathmodel.NewLSTMPredictor(harvestpathmodel.LSTMPredictorConfig{
+		Enabled:      c.HarvestPathLSTM.Enabled,
+		PythonBin:    c.HarvestPathLSTM.PythonBin,
+		ScriptPath:   c.HarvestPathLSTM.ScriptPath,
+		DataDir:      c.HarvestPathLSTM.DataDir,
+		ArtifactsDir: c.HarvestPathLSTM.ArtifactsDir,
+		Timeout:      time.Duration(c.HarvestPathLSTM.TimeoutMs) * time.Millisecond,
+	})
 
 	svcCtx := &ServiceContext{
-		Config:         c,
-		signalProducer: signalProducer,
-		marketConsumer: marketConsumer,
-		executionCli:   executionCli,
-		strategies:     make(map[string]*strategyengine.TrendFollowingStrategy),
-		cancel:         cancel,
+		Config:                   c,
+		signalProducer:           signalProducer,
+		harvestPathProducer:      harvestPathProducer,
+		harvestPathLSTMPredictor: harvestPathLSTMPredictor,
+		marketConsumer:           marketConsumer,
+		depthConsumer:            depthConsumer,
+		executionCli:             executionCli,
+		strategies:               make(map[string]*strategyengine.TrendFollowingStrategy),
+		cancel:                   cancel,
 	}
 
 	for _, sc := range c.Strategies {
@@ -81,6 +122,9 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	svcCtx.mu.RUnlock()
 	if empty {
 		_ = marketConsumer.Close()
+		if harvestPathProducer != nil {
+			_ = harvestPathProducer.Close()
+		}
 		_ = signalProducer.Close()
 		cancel()
 		return nil, fmt.Errorf("no enabled strategies")
@@ -100,9 +144,36 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		return strat.OnKline(ctx, kline)
 	}); err != nil {
 		_ = marketConsumer.Close()
+		if harvestPathProducer != nil {
+			_ = harvestPathProducer.Close()
+		}
 		_ = signalProducer.Close()
 		cancel()
 		return nil, err
+	}
+	if depthConsumer != nil {
+		if err := depthConsumer.StartConsumingDepth(ctx, func(depth *market.Depth) error {
+			if depth == nil || depth.Symbol == "" {
+				return nil
+			}
+			svcCtx.mu.RLock()
+			strat := svcCtx.strategies[depth.Symbol]
+			svcCtx.mu.RUnlock()
+			if strat == nil {
+				return nil
+			}
+			strat.OnDepth(depth)
+			return nil
+		}); err != nil {
+			_ = marketConsumer.Close()
+			_ = depthConsumer.Close()
+			if harvestPathProducer != nil {
+				_ = harvestPathProducer.Close()
+			}
+			_ = signalProducer.Close()
+			cancel()
+			return nil, err
+		}
 	}
 
 	// Periodic lag print for ops/troubleshooting.
@@ -166,7 +237,16 @@ func (s *ServiceContext) upsertStrategyLocked(cfg *strategypb.StrategyConfig) {
 		delete(s.strategies, cfg.Symbol)
 		return
 	}
-	s.strategies[cfg.Symbol] = strategyengine.NewTrendFollowingStrategy(cfg.Symbol, cfg.Parameters, s.signalProducer, s.Config.SignalLogDir)
+	s.strategies[cfg.Symbol] = strategyengine.NewTrendFollowingStrategy(
+		cfg.Symbol,
+		cfg.Parameters,
+		s.signalProducer,
+		s.harvestPathProducer,
+		s.Config.SignalLogDir,
+		&strategyengine.RuntimeOptions{
+			HarvestPathLSTMPredictor: s.harvestPathLSTMPredictor,
+		},
+	)
 }
 
 func (s *ServiceContext) StopStrategy(strategyID string) {
@@ -206,8 +286,18 @@ func (s *ServiceContext) Close() error {
 			firstErr = err
 		}
 	}
+	if s.depthConsumer != nil {
+		if err := s.depthConsumer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	if s.signalProducer != nil {
 		if err := s.signalProducer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if s.harvestPathProducer != nil {
+		if err := s.harvestPathProducer.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

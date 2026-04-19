@@ -16,6 +16,7 @@ type ServiceContext struct {
 	Config config.Config
 
 	marketProducer *kafka.Producer
+	depthProducer  *kafka.Producer
 	wsClient       *websocket.BinanceWebSocketClient
 	agg            *aggregator.KlineAggregator
 	cancel         context.CancelFunc
@@ -28,6 +29,15 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	if err != nil {
 		cancel()
 		return nil, err
+	}
+	var depthProducer *kafka.Producer
+	if c.Kafka.Topics.Depth != "" {
+		depthProducer, err = kafka.NewProducerWithContext(ctx, c.Kafka.Addrs, c.Kafka.Topics.Depth)
+		if err != nil {
+			_ = producer.Close()
+			cancel()
+			return nil, err
+		}
 	}
 
 	agg := aggregator.NewKlineAggregator(aggregator.StandardIntervals, producer, c.KlineLogDir, c.WatermarkDelay, aggregator.IndicatorParams{
@@ -95,6 +105,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		c.Binance.Symbols,
 		c.Binance.Intervals,
 		producer,
+		depthProducer,
 		agg,
 	)
 
@@ -103,6 +114,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	return &ServiceContext{
 		Config:         c,
 		marketProducer: producer,
+		depthProducer:  depthProducer,
 		wsClient:       wsClient,
 		agg:            agg,
 		cancel:         cancel,
@@ -127,6 +139,11 @@ func (s *ServiceContext) Close() error {
 	}
 	if s.marketProducer != nil {
 		if err := s.marketProducer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if s.depthProducer != nil {
+		if err := s.depthProducer.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
