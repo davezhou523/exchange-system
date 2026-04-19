@@ -9,6 +9,7 @@ type Config struct {
 	rest.RestConf
 
 	Execution zrpc.RpcClientConf
+	Order     zrpc.RpcClientConf
 	Strategy  zrpc.RpcClientConf
 	Market    zrpc.RpcClientConf
 }

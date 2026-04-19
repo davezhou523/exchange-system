@@ -59,6 +59,11 @@ message AllOrderItem {
   bool reduce_only = 15;
   bool close_position = 16;
   string time_in_force = 17;
+  string estimated_fee = 18;
+  string actual_fee = 19;
+  string actual_fee_asset = 20;
+  string action_type = 21;
+  string position_cycle_id = 22;
 }
 
 // 历史成交条目
@@ -78,6 +83,8 @@ message UserTradeItem {
   int64 time = 13;
   bool buyer = 14;
   bool maker = 15;
+  string estimated_fee = 16;
+  string actual_fee = 17;
 }
 
 // 资金流水条目

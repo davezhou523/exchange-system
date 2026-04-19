@@ -47,16 +47,20 @@ func (l *GetUserTradesLogic) GetUserTrades(in *pb.OrderQueryRequest) (*pb.UserTr
 
 	items := make([]*pb.UserTradeItem, 0, len(trades))
 	for _, t := range trades {
-		items = append(items, convertUserTrade(&t))
+		items = append(items, convertUserTrade(l.svcCtx, &t))
 	}
 
 	return &pb.UserTradeResponse{Items: items}, nil
 }
 
 // convertUserTrade 将 binance.UserTrade 转换为 protobuf UserTradeItem
-func convertUserTrade(t *binance.UserTrade) *pb.UserTradeItem {
+func convertUserTrade(svcCtx *svc.ServiceContext, t *binance.UserTrade) *pb.UserTradeItem {
 	if t == nil {
 		return nil
+	}
+	estimatedFee, actualFee := "", ""
+	if svcCtx != nil {
+		estimatedFee, actualFee = svcCtx.UserTradeFeeFields(*t)
 	}
 	return &pb.UserTradeItem{
 		Id:              t.ID,
@@ -74,5 +78,7 @@ func convertUserTrade(t *binance.UserTrade) *pb.UserTradeItem {
 		Time:            t.Time,
 		Buyer:           t.Buyer,
 		Maker:           t.Maker,
+		EstimatedFee:    estimatedFee,
+		ActualFee:       actualFee,
 	}
 }

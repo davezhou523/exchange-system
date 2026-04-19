@@ -266,6 +266,10 @@ func (c *BinanceClient) ensureSymbolLeverage(ctx context.Context, symbol string)
 
 // SetStopLossTakeProfit 设置止损止盈
 func (c *BinanceClient) SetStopLossTakeProfit(ctx context.Context, symbol string, positionSide string, quantity float64, stopLossPrice float64, takeProfitPrices []float64) error {
+	if err := c.CancelStopLossTakeProfit(ctx, symbol, positionSide); err != nil {
+		return fmt.Errorf("cancel existing stop loss/take profit failed: %v", err)
+	}
+
 	// 设置止损单
 	if stopLossPrice > 0 {
 		side := "SELL"
@@ -299,6 +303,87 @@ func (c *BinanceClient) SetStopLossTakeProfit(ctx context.Context, symbol string
 	}
 
 	return nil
+}
+
+type binanceAlgoCancelResponse struct {
+	AlgoID  int64  `json:"algoId"`
+	Success bool   `json:"success"`
+	Code    int    `json:"code"`
+	Msg     string `json:"msg"`
+}
+
+// CancelStopLossTakeProfit cancels existing protection orders for the symbol.
+// The current strategy keeps a single net position per symbol, so clearing stale
+// SL/TP before placing new protection orders avoids old conditions lingering on UI.
+func (c *BinanceClient) CancelStopLossTakeProfit(ctx context.Context, symbol string, positionSide string) error {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		return fmt.Errorf("symbol is required")
+	}
+
+	if err := c.cancelBasicRiskOrders(ctx, symbol, positionSide); err != nil {
+		return err
+	}
+	// Best effort: algo open orders may not be used for every account mode.
+	_ = c.cancelAlgoRiskOrders(ctx, symbol, positionSide)
+	return nil
+}
+
+func (c *BinanceClient) cancelBasicRiskOrders(ctx context.Context, symbol string, positionSide string) error {
+	openOrders, err := c.GetOpenOrders(ctx, symbol)
+	if err != nil {
+		return err
+	}
+	for _, order := range openOrders {
+		if !matchesRiskOrder(order.Type, order.ClosePosition) {
+			continue
+		}
+		if positionSide != "" && !strings.EqualFold(order.PositionSide, positionSide) {
+			continue
+		}
+		_, err := c.CancelOrder(ctx, CancelOrderParam{
+			Symbol:  symbol,
+			OrderID: strconv.FormatInt(order.OrderID, 10),
+		})
+		if err != nil {
+			return fmt.Errorf("cancel open risk order %d failed: %w", order.OrderID, err)
+		}
+	}
+	return nil
+}
+
+func (c *BinanceClient) cancelAlgoRiskOrders(ctx context.Context, symbol string, positionSide string) error {
+	q := url.Values{}
+	q.Set("recvWindow", "5000")
+
+	var lastErr error
+	for _, baseURL := range c.algoBaseURLs() {
+		var resp binanceAlgoOpenOrdersResponse
+		if err := c.doSignedRequestBase(ctx, baseURL, http.MethodGet, "/sapi/v1/algo/futures/openOrders", q, &resp); err != nil {
+			lastErr = err
+			continue
+		}
+		for _, order := range resp.Orders {
+			if !strings.EqualFold(order.Symbol, symbol) {
+				continue
+			}
+			if positionSide != "" && !strings.EqualFold(order.PositionSide, positionSide) {
+				continue
+			}
+			if !matchesRiskOrder(firstNonEmpty(order.OrderType, order.AlgoType), order.ClosePosition) {
+				continue
+			}
+			var cancelResp binanceAlgoCancelResponse
+			cq := url.Values{}
+			cq.Set("algoId", strconv.FormatInt(order.AlgoID, 10))
+			cq.Set("recvWindow", "5000")
+			if err := c.doSignedRequestBase(ctx, "https://api.binance.com", http.MethodDelete, "/sapi/v1/algo/futures/order", cq, &cancelResp); err != nil {
+				return fmt.Errorf("cancel algo risk order %d failed: %w", order.AlgoID, err)
+			}
+		}
+		return nil
+	}
+	return lastErr
 }
 
 type binanceAlgoOrderResponse struct {
@@ -782,6 +867,19 @@ func normalizeMarginType(marginType string, isolated bool) string {
 		return "ISOLATED"
 	}
 	return "CROSSED"
+}
+
+func matchesRiskOrder(orderType string, closePosition bool) bool {
+	if closePosition {
+		return true
+	}
+	t := strings.ToUpper(strings.TrimSpace(orderType))
+	switch t {
+	case "STOP", "STOP_MARKET", "TAKE_PROFIT", "TAKE_PROFIT_MARKET":
+		return true
+	default:
+		return strings.Contains(t, "STOP") || strings.Contains(t, "TAKE_PROFIT")
+	}
 }
 
 type sltpInfo struct {

@@ -324,6 +324,13 @@ func (s *ServiceContext) HandleSignal(ctx context.Context, sig *strategypb.Signa
 			return fmt.Errorf("risk check failed: %v", err)
 		}
 		quantity = adjustedQty
+
+		// 新开仓前先清理该交易对遗留的保护单，避免官网页面残留旧止损止盈造成混淆。
+		if err := s.cancelRiskOrdersBeforeOpen(ctx, symbol); err != nil {
+			s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("cancel stale stop/take orders failed: %v", err), quantity)
+			s.deduplicator.Remove(sigKey)
+			return fmt.Errorf("cancel stale stop/take orders failed: %v", err)
+		}
 	}
 
 	// 4. 路由下单
@@ -803,6 +810,25 @@ func (s *ServiceContext) GetRiskTargetsFromSignalLog(symbol, positionSide string
 	}
 
 	return 0, 0, false
+}
+
+func (s *ServiceContext) cancelRiskOrdersBeforeOpen(ctx context.Context, symbol string) error {
+	if s == nil || s.router == nil || strings.TrimSpace(symbol) == "" {
+		return nil
+	}
+	ex, err := s.router.Route(symbol)
+	if err != nil {
+		return err
+	}
+
+	type riskOrderCleaner interface {
+		CancelStopLossTakeProfit(ctx context.Context, symbol string, positionSide string) error
+	}
+	cleaner, ok := ex.(riskOrderCleaner)
+	if !ok {
+		return nil
+	}
+	return cleaner.CancelStopLossTakeProfit(ctx, symbol, "")
 }
 
 // ---------------------------------------------------------------------------

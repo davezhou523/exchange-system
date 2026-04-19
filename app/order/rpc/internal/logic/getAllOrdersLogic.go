@@ -46,35 +46,46 @@ func (l *GetAllOrdersLogic) GetAllOrders(in *pb.OrderQueryRequest) (*pb.AllOrder
 	}
 
 	items := make([]*pb.AllOrderItem, 0, len(orders))
+	lifecycleMap := svc.BuildOrderLifecycleMap(orders)
 	for _, o := range orders {
-		items = append(items, convertAllOrder(&o))
+		items = append(items, convertAllOrder(l.svcCtx, lifecycleMap, &o))
 	}
 
 	return &pb.AllOrderResponse{Items: items}, nil
 }
 
 // convertAllOrder 将 binance.AllOrder 转换为 protobuf AllOrderItem
-func convertAllOrder(o *binance.AllOrder) *pb.AllOrderItem {
+func convertAllOrder(svcCtx *svc.ServiceContext, lifecycleMap map[int64]svc.OrderLifecycleInfo, o *binance.AllOrder) *pb.AllOrderItem {
 	if o == nil {
 		return nil
 	}
+	estimatedFee, actualFee, actualFeeAsset, actionType, positionCycleID := "", "", "", "", ""
+	if svcCtx != nil {
+		estimatedFee, actualFee, actualFeeAsset = svcCtx.AllOrderFeeFields(*o)
+		actionType, positionCycleID = svcCtx.AllOrderLifecycleFields(*o, lifecycleMap)
+	}
 	return &pb.AllOrderItem{
-		OrderId:       o.OrderID,
-		Symbol:        o.Symbol,
-		Status:        o.Status,
-		Side:          o.Side,
-		PositionSide:  o.PositionSide,
-		Type:          o.Type,
-		OrigQty:       o.OrigQty,
-		ExecutedQty:   o.ExecutedQty,
-		AvgPrice:      o.AvgPrice,
-		Price:         o.Price,
-		StopPrice:     o.StopPrice,
-		ClientOrderId: o.ClientOrderID,
-		Time:          o.Time,
-		UpdateTime:    o.UpdateTime,
-		ReduceOnly:    o.ReduceOnly,
-		ClosePosition: o.ClosePosition,
-		TimeInForce:   o.TimeInForce,
+		OrderId:         o.OrderID,
+		Symbol:          o.Symbol,
+		Status:          o.Status,
+		Side:            o.Side,
+		PositionSide:    o.PositionSide,
+		Type:            o.Type,
+		OrigQty:         o.OrigQty,
+		ExecutedQty:     o.ExecutedQty,
+		AvgPrice:        o.AvgPrice,
+		Price:           o.Price,
+		StopPrice:       o.StopPrice,
+		ClientOrderId:   o.ClientOrderID,
+		Time:            o.Time,
+		UpdateTime:      o.UpdateTime,
+		ReduceOnly:      o.ReduceOnly,
+		ClosePosition:   o.ClosePosition,
+		TimeInForce:     o.TimeInForce,
+		EstimatedFee:    estimatedFee,
+		ActualFee:       actualFee,
+		ActualFeeAsset:  actualFeeAsset,
+		ActionType:      actionType,
+		PositionCycleId: positionCycleID,
 	}
 }

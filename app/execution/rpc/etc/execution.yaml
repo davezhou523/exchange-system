@@ -7,9 +7,9 @@ Log:
 
 Kafka:
   Addrs:
-    - kafka1:19092
-    - kafka2:29092
-    - kafka3:39092
+    - 127.0.0.1:9092
+    - 127.0.0.1:29092
+    - 127.0.0.1:39092
   Group: execution-rpc-signal
   Topics:
     Signal: signal

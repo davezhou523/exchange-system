@@ -15,6 +15,9 @@ type accountView struct {
 	TotalMarginBalance float64        `json:"total_margin_balance"`
 	AvailableBalance   float64        `json:"available_balance"`
 	MaxWithdrawAmount  float64        `json:"max_withdraw_amount"`
+	WalletBalance      float64        `json:"wallet_balance"`
+	UnrealizedPnl      float64        `json:"unrealized_pnl"`
+	MarginBalance      float64        `json:"margin_balance"`
 	Positions          []positionView `json:"positions"`
 }
 
@@ -43,6 +46,21 @@ type positionView struct {
 	Adl                    int32   `json:"adl"`
 	UpdateTime             int64   `json:"update_time"`
 	UpdateTimeText         string  `json:"update_time_text"`
+
+	// UI aliases that are closer to the Binance position page wording.
+	Side            string  `json:"side"`
+	Size            float64 `json:"size"`
+	OpenPrice       float64 `json:"open_price"`
+	BreakevenPrice  float64 `json:"breakeven_price"`
+	LiqPrice        float64 `json:"liq_price"`
+	Pnl             float64 `json:"pnl"`
+	Roe             float64 `json:"roe"`
+	Margin          float64 `json:"margin"`
+	SlPrice         float64 `json:"sl_price"`
+	TpPrice         float64 `json:"tp_price"`
+	EstimatedFee    float64 `json:"estimated_fee"`
+	MarginMode      string  `json:"margin_mode"`
+	UpdateTimeLabel string  `json:"update_time_label"`
 }
 
 func AccountHandler(serviceContext *svc.ServiceContext) http.HandlerFunc {
@@ -92,6 +110,19 @@ func formatAccountView(resp *execution.AccountInfo) accountView {
 			Adl:                    p.GetAdl(),
 			UpdateTime:             p.GetUpdateTime(),
 			UpdateTimeText:         formatMillis(p.GetUpdateTime()),
+			Side:                   p.GetPositionSide(),
+			Size:                   p.GetPositionAmount(),
+			OpenPrice:              p.GetEntryPrice(),
+			BreakevenPrice:         p.GetBreakEvenPrice(),
+			LiqPrice:               p.GetLiquidationPrice(),
+			Pnl:                    p.GetUnrealizedPnl(),
+			Roe:                    p.GetPnlPercent(),
+			Margin:                 p.GetInitialMargin(),
+			SlPrice:                p.GetStopLossPrice(),
+			TpPrice:                p.GetTakeProfitPrice(),
+			EstimatedFee:           p.GetEstimatedFundingFee(),
+			MarginMode:             p.GetMarginType(),
+			UpdateTimeLabel:        formatMillis(p.GetUpdateTime()),
 		})
 	}
 
@@ -101,6 +132,9 @@ func formatAccountView(resp *execution.AccountInfo) accountView {
 		TotalMarginBalance: resp.GetTotalMarginBalance(),
 		AvailableBalance:   resp.GetAvailableBalance(),
 		MaxWithdrawAmount:  resp.GetMaxWithdrawAmount(),
+		WalletBalance:      resp.GetTotalWalletBalance(),
+		UnrealizedPnl:      resp.GetTotalUnrealizedPnl(),
+		MarginBalance:      resp.GetTotalMarginBalance(),
 		Positions:          positions,
 	}
 }

@@ -11,6 +11,8 @@ import "github.com/zeromicro/go-zero/zrpc"
 type Config struct {
 	zrpc.RpcServerConf
 
+	Kafka KafkaConfig
+
 	// 币安合约 API 配置
 	Binance BinanceConfig
 
@@ -19,6 +21,16 @@ type Config struct {
 
 	// execution 服务订单日志目录（simulated 模式下的成交来源）
 	ExecutionOrderLogDir string
+}
+
+type KafkaConfig struct {
+	Addrs  []string
+	Group  string
+	Topics KafkaTopics
+}
+
+type KafkaTopics struct {
+	Order string
 }
 
 // BinanceConfig 币安合约 API 配置

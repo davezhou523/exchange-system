@@ -40,6 +40,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to init service context: %v", err)
 	}
+	defer func() {
+		if err := ctx.Close(); err != nil {
+			log.Printf("failed to close order service context: %v", err)
+		}
+	}()
 
 	s := zrpc.MustNewServer(c.RpcServerConf, func(grpcServer *grpc.Server) {
 		pb.RegisterOrderServiceServer(grpcServer, server.NewOrderServiceServer(ctx))
@@ -58,10 +63,15 @@ func clearAllOrdersDir(dataDir string) error {
 	if dataDir == "" {
 		dataDir = "data/futures"
 	}
-	allOrdersDir := filepath.Join(dataDir, "all_orders")
-	if err := os.RemoveAll(allOrdersDir); err != nil {
-		return err
+	dirs := []string{
+		filepath.Join(dataDir, "all_orders"),
+		filepath.Join(dataDir, "positions"),
 	}
-	log.Printf("[Order服务] 启动清理 all_orders 目录: %s", allOrdersDir)
+	for _, dir := range dirs {
+		if err := os.RemoveAll(dir); err != nil {
+			return err
+		}
+		log.Printf("[Order服务] 启动清理目录: %s", dir)
+	}
 	return nil
 }

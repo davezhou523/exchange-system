@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,10 +26,13 @@ import (
 
 // Client 币安期货 API 客户端
 type Client struct {
-	baseURL   string
-	apiKey    string
-	secretKey string
-	client    *http.Client
+	baseURL              string
+	apiKey               string
+	secretKey            string
+	client               *http.Client
+	precisionMu          sync.RWMutex
+	pricePrecisionMap    map[string]int
+	quantityPrecisionMap map[string]int
 }
 
 // NewClient 创建币安期货客户端
@@ -51,6 +55,8 @@ func NewClient(baseURL, apiKey, secretKey, proxyURL string) *Client {
 			Transport: transport,
 			Timeout:   30 * time.Second,
 		},
+		pricePrecisionMap:    make(map[string]int),
+		quantityPrecisionMap: make(map[string]int),
 	}
 }
 
@@ -333,6 +339,66 @@ type AllOrder struct {
 	ReduceOnly    bool   `json:"reduceOnly"`
 	ClosePosition bool   `json:"closePosition"`
 	TimeInForce   string `json:"timeInForce"`
+}
+
+const (
+	fallbackPricePrecision    = 2
+	fallbackQuantityPrecision = 3
+)
+
+type exchangeInfoResponse struct {
+	Symbols []struct {
+		Symbol            string `json:"symbol"`
+		PricePrecision    int    `json:"pricePrecision"`
+		QuantityPrecision int    `json:"quantityPrecision"`
+	} `json:"symbols"`
+}
+
+func (c *Client) GetSymbolPrecisions(ctx context.Context, symbol string) (int, int, error) {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		return fallbackPricePrecision, fallbackQuantityPrecision, fmt.Errorf("symbol is required")
+	}
+
+	c.precisionMu.RLock()
+	pricePrecision, priceOK := c.pricePrecisionMap[symbol]
+	quantityPrecision, qtyOK := c.quantityPrecisionMap[symbol]
+	c.precisionMu.RUnlock()
+	if priceOK && qtyOK {
+		return pricePrecision, quantityPrecision, nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/fapi/v1/exchangeInfo", nil)
+	if err != nil {
+		return fallbackPricePrecision, fallbackQuantityPrecision, err
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fallbackPricePrecision, fallbackQuantityPrecision, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fallbackPricePrecision, fallbackQuantityPrecision, fmt.Errorf("binance exchangeInfo failed: status=%d body=%s", resp.StatusCode, string(body))
+	}
+
+	var info exchangeInfoResponse
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return fallbackPricePrecision, fallbackQuantityPrecision, err
+	}
+	for _, item := range info.Symbols {
+		if strings.EqualFold(item.Symbol, symbol) {
+			c.precisionMu.Lock()
+			c.pricePrecisionMap[symbol] = item.PricePrecision
+			c.quantityPrecisionMap[symbol] = item.QuantityPrecision
+			c.precisionMu.Unlock()
+			return item.PricePrecision, item.QuantityPrecision, nil
+		}
+	}
+
+	return fallbackPricePrecision, fallbackQuantityPrecision, fmt.Errorf("symbol %s not found in exchangeInfo", symbol)
 }
 
 // GetAllOrders 查询历史委托（所有订单）

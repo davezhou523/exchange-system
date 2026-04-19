@@ -6,6 +6,9 @@ Execution:
   Target: 127.0.0.1:9082
   Timeout: 5000
 
+Order:
+  Target: 127.0.0.1:9083
+
 Strategy:
   Target: 127.0.0.1:9081
 

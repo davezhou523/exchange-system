@@ -12,10 +12,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"exchange-system/app/order/rpc/internal/config"
+	orderkafka "exchange-system/app/order/rpc/internal/kafka"
 	"exchange-system/common/binance"
+	commonkafka "exchange-system/common/kafka"
 )
 
 const defaultAllOrdersLookback = 7 * 24 * time.Hour
@@ -35,10 +38,36 @@ type ServiceContext struct {
 	client               *binance.Client
 	dataDir              string
 	executionOrderLogDir string
+	orderConsumer        *orderkafka.Consumer
+	cancel               context.CancelFunc
+	feeSummaryMu         sync.RWMutex
+	feeSummaries         map[string]map[int64]tradeFeeSummary
+}
+
+type refreshSummary struct {
+	Symbol         string
+	PositionsPath  string
+	PositionsCount int
+	AllOrdersPath  string
+	AllOrdersCount int
+	NoOpenPosition bool
+}
+
+type tradeFeeSummary struct {
+	ActualFee      float64
+	EstimatedFee   float64
+	ActualFeeAsset string
+	MixedAsset     bool
+}
+
+type OrderLifecycleInfo struct {
+	ActionType      string
+	PositionCycleID string
 }
 
 // NewServiceContext 创建 Order 服务上下文
 func NewServiceContext(c config.Config) (*ServiceContext, error) {
+	ctx, cancel := context.WithCancel(context.Background())
 	client := binance.NewClient(
 		c.Binance.BaseURL,
 		c.Binance.APIKey,
@@ -58,6 +87,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 
 	// 确保数据目录存在
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		cancel()
 		return nil, fmt.Errorf("create data dir %s: %w", dataDir, err)
 	}
 
@@ -66,17 +96,141 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	log.Printf("[Order服务] GetAllOrders 查询上下文 | baseURL=%s defaultSymbol=%s startTime=%d(%s) endTime=0(no-limit)",
 		c.Binance.BaseURL, "ETHUSDT", defaultStartTime, formatMillis(defaultStartTime))
 
-	return &ServiceContext{
+	svcCtx := &ServiceContext{
 		Config:               c,
 		client:               client,
 		dataDir:              dataDir,
 		executionOrderLogDir: executionOrderLogDir,
-	}, nil
+		cancel:               cancel,
+		feeSummaries:         make(map[string]map[int64]tradeFeeSummary),
+	}
+
+	orderTopic := c.Kafka.Topics.Order
+	if len(c.Kafka.Addrs) > 0 && strings.TrimSpace(orderTopic) != "" {
+		groupID := c.Kafka.Group
+		if groupID == "" {
+			if c.Name != "" {
+				groupID = c.Name + "-order"
+			} else {
+				groupID = "order-rpc-order"
+			}
+		}
+
+		consumer, err := orderkafka.NewConsumer(c.Kafka.Addrs, groupID, orderTopic)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("init order consumer: %w", err)
+		}
+		svcCtx.orderConsumer = consumer
+		if err := consumer.StartConsuming(ctx, svcCtx.handleOrderEvent); err != nil {
+			_ = consumer.Close()
+			cancel()
+			return nil, fmt.Errorf("start order consumer: %w", err)
+		}
+		commonkafka.StartConsumerGroupLagReporter(ctx, c.Kafka.Addrs, groupID, orderTopic, 30*time.Second)
+		log.Printf("[Order服务] Kafka order consumer started | group=%s topic=%s brokers=%v", groupID, orderTopic, c.Kafka.Addrs)
+	}
+
+	return svcCtx, nil
 }
 
 // GetClient 获取币安合约 API 客户端
 func (s *ServiceContext) GetClient() *binance.Client {
 	return s.client
+}
+
+func (s *ServiceContext) handleOrderEvent(event *orderkafka.OrderEvent) error {
+	if s == nil || event == nil {
+		return nil
+	}
+	if !event.HasExecution() {
+		return nil
+	}
+	symbol := strings.ToUpper(strings.TrimSpace(event.Symbol))
+	if symbol == "" {
+		return nil
+	}
+
+	log.Printf("[Order服务] 收到成交订单事件 -> 开始刷新 | symbol=%s order_id=%s client_id=%s signal_type=%s side=%s position_side=%s status=%s qty=%.6f avg_price=%.6f",
+		symbol, event.OrderID, event.ClientID, event.SignalType, event.Side, event.PositionSide, event.Status, event.Quantity, event.AvgPrice)
+
+	refreshCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	summary, err := s.refreshSymbolDataDetailed(refreshCtx, symbol)
+	if err != nil {
+		return err
+	}
+	positionMsg := fmt.Sprintf("positions=%s(%d)", summary.PositionsPath, summary.PositionsCount)
+	if summary.NoOpenPosition {
+		positionMsg = fmt.Sprintf("positions=no-open-position(%s)", summary.PositionsPath)
+	}
+	log.Printf("[Order服务] 成交订单事件刷新完成 | symbol=%s order_id=%s -> %s, all_orders=%s(%d)",
+		symbol, event.OrderID, positionMsg, summary.AllOrdersPath, summary.AllOrdersCount)
+	return nil
+}
+
+func (s *ServiceContext) RefreshSymbolData(ctx context.Context, symbol string) error {
+	_, err := s.refreshSymbolDataDetailed(ctx, symbol)
+	return err
+}
+
+func (s *ServiceContext) refreshSymbolDataDetailed(ctx context.Context, symbol string) (refreshSummary, error) {
+	if s == nil || strings.TrimSpace(symbol) == "" {
+		return refreshSummary{}, nil
+	}
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	summary := refreshSummary{
+		Symbol:        symbol,
+		PositionsPath: s.categoryJSONLPath("positions", symbol),
+		AllOrdersPath: s.categoryJSONLPath("all_orders", symbol),
+	}
+
+	posCount, posErr := s.refreshPositions(ctx, symbol)
+	summary.PositionsCount = posCount
+	summary.NoOpenPosition = posCount == 0
+	if posErr != nil {
+		log.Printf("[Order服务] 刷新当前仓位失败 | symbol=%s err=%v", symbol, posErr)
+	} else {
+		log.Printf("[Order服务] 当前仓位已刷新 | symbol=%s file=%s rows=%d", symbol, summary.PositionsPath, posCount)
+	}
+
+	orders, err := s.GetAllOrders(ctx, symbol, 0, 0, 1000)
+	if err != nil {
+		return summary, fmt.Errorf("refresh all orders for %s: %w", symbol, err)
+	}
+	summary.AllOrdersCount = len(orders)
+	if posErr != nil {
+		return summary, posErr
+	}
+	return summary, nil
+}
+
+func (s *ServiceContext) refreshPositions(ctx context.Context, symbol string) (int, error) {
+	account, err := s.client.GetAccountInfo(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	items := make([]positionJSONLEntry, 0, len(account.Positions))
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	for _, p := range account.Positions {
+		if strings.ToUpper(strings.TrimSpace(p.Symbol)) != symbol {
+			continue
+		}
+		if parseFloatString(p.PositionAmt) == 0 {
+			continue
+		}
+		items = append(items, s.toPositionJSONLEntry(p))
+	}
+
+	if len(items) == 0 {
+		return 0, nil
+	}
+	if err := s.writeJSONL("positions", symbol, items); err != nil {
+		return 0, err
+	}
+	return len(items), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +248,11 @@ func (s *ServiceContext) GetAllOrders(ctx context.Context, symbol string, startT
 	log.Printf("[Order服务] GetAllOrders 请求 | baseURL=%s symbol=%s startTime=%d(%s) endTime=%d(%s) limit=%d",
 		s.Config.Binance.BaseURL, symbol, startTime, formatMillis(startTime), endTime, formatMillis(endTime), limit)
 	orders, apiErr := s.client.GetAllOrders(ctx, symbol, startTime, endTime, limit)
+	if trades, tradeErr := s.GetUserTrades(ctx, symbol, startTime, endTime, maxInt(limit, 1000)); tradeErr == nil {
+		s.cacheTradeFeeSummaries(symbol, trades)
+	} else {
+		log.Printf("[Order服务] 预取手续费汇总失败 | symbol=%s err=%v", symbol, tradeErr)
+	}
 	simOrders, simErr := s.readSimulatedAllOrders(symbol, startTime, endTime)
 	if simErr != nil {
 		log.Printf("[Order服务] 读取 simulated 历史委托失败: %v", simErr)
@@ -194,15 +353,22 @@ func (s *ServiceContext) writeJSONL(category, symbol string, items interface{}) 
 			}
 		}
 	case []binance.AllOrder:
+		lifecycleMap := BuildOrderLifecycleMap(v)
 		for _, item := range v {
-			entry := toAllOrderJSONLEntry(item)
+			entry := s.toAllOrderJSONLEntry(item, lifecycleMap[item.OrderID])
 			if err := enc.Encode(entry); err != nil {
+				return err
+			}
+		}
+	case []positionJSONLEntry:
+		for _, item := range v {
+			if err := enc.Encode(item); err != nil {
 				return err
 			}
 		}
 	case []binance.UserTrade:
 		for _, item := range v {
-			if err := enc.Encode(item); err != nil {
+			if err := enc.Encode(s.toUserTradeJSONLEntry(item)); err != nil {
 				return err
 			}
 		}
@@ -227,6 +393,11 @@ func (s *ServiceContext) writeJSONL(category, symbol string, items interface{}) 
 	}
 
 	return nil
+}
+
+func (s *ServiceContext) categoryJSONLPath(category, symbol string) string {
+	dateStr := time.Now().UTC().Format("2006-01-02")
+	return filepath.Join(s.dataDir, category, symbol, dateStr+".jsonl")
 }
 
 type executionOrderLogEntry struct {
@@ -254,23 +425,68 @@ type executionOrderLogEntry struct {
 }
 
 type allOrderJSONLEntry struct {
-	Time          string `json:"time"`
-	OrderID       int64  `json:"order_id"`
-	Symbol        string `json:"symbol"`
-	Status        string `json:"status"`
-	Side          string `json:"side"`
-	PositionSide  string `json:"position_side"`
-	Type          string `json:"type"`
-	OrigQty       string `json:"orig_qty"`
-	ExecutedQty   string `json:"executed_qty"`
-	AvgPrice      string `json:"avg_price"`
-	Price         string `json:"price"`
-	StopPrice     string `json:"stop_price"`
-	ClientOrderID string `json:"client_order_id"`
-	ReduceOnly    bool   `json:"reduce_only"`
-	ClosePosition bool   `json:"close_position"`
-	UpdateTime    string `json:"update_time"`
-	TimeInForce   string `json:"time_in_force"`
+	Time            string `json:"time"`
+	TimeLocal       string `json:"time_local"`
+	OrderID         int64  `json:"order_id"`
+	Symbol          string `json:"symbol"`
+	Status          string `json:"status"`
+	Side            string `json:"side"`
+	PositionSide    string `json:"position_side"`
+	Type            string `json:"type"`
+	OrigQty         string `json:"orig_qty"`
+	ExecutedQty     string `json:"executed_qty"`
+	BaseQty         string `json:"base_qty"`
+	QuoteQty        string `json:"quote_qty"`
+	AvgPrice        string `json:"avg_price"`
+	Price           string `json:"price"`
+	StopPrice       string `json:"stop_price"`
+	ClientOrderID   string `json:"client_order_id"`
+	EstimatedFee    string `json:"estimated_fee"`
+	ActualFee       string `json:"actual_fee"`
+	ActualFeeAsset  string `json:"actual_fee_asset"`
+	ActionType      string `json:"action_type"`
+	PositionCycleID string `json:"position_cycle_id"`
+	ReduceOnly      bool   `json:"reduce_only"`
+	ClosePosition   bool   `json:"close_position"`
+	UpdateTime      string `json:"update_time"`
+	TimeInForce     string `json:"time_in_force"`
+}
+
+type positionJSONLEntry struct {
+	TimeLocal         string `json:"time_local"`
+	Symbol            string `json:"symbol"`
+	PositionSide      string `json:"position_side"`
+	PositionAmt       string `json:"position_amt"`
+	BaseQty           string `json:"base_qty"`
+	EntryPrice        string `json:"entry_price"`
+	MarkPrice         string `json:"mark_price"`
+	UnrealizedProfit  string `json:"unrealized_profit"`
+	LiquidationPrice  string `json:"liquidation_price"`
+	Leverage          string `json:"leverage"`
+	MarginType        string `json:"margin_type"`
+	TimeUTC           string `json:"time_utc"`
+	SnapshotTimestamp int64  `json:"snapshot_timestamp"`
+}
+
+type userTradeJSONLEntry struct {
+	ID              int64  `json:"id"`
+	Symbol          string `json:"symbol"`
+	OrderID         int64  `json:"order_id"`
+	Side            string `json:"side"`
+	PositionSide    string `json:"position_side"`
+	Price           string `json:"price"`
+	Qty             string `json:"qty"`
+	RealizedPnl     string `json:"realized_pnl"`
+	MarginAsset     string `json:"margin_asset"`
+	QuoteQty        string `json:"quote_qty"`
+	Commission      string `json:"commission"`
+	CommissionAsset string `json:"commission_asset"`
+	EstimatedFee    string `json:"estimated_fee"`
+	ActualFee       string `json:"actual_fee"`
+	Time            string `json:"time"`
+	TimeLocal       string `json:"time_local"`
+	Buyer           bool   `json:"buyer"`
+	Maker           bool   `json:"maker"`
 }
 
 func (s *ServiceContext) readSimulatedAllOrders(symbol string, startTime, endTime int64) ([]binance.AllOrder, error) {
@@ -429,26 +645,417 @@ func formatOrderTime(ms int64) string {
 	return time.UnixMilli(ms).UTC().Format("2006-01-02 15:04:05")
 }
 
-func toAllOrderJSONLEntry(item binance.AllOrder) allOrderJSONLEntry {
-	return allOrderJSONLEntry{
-		Time:          formatOrderTime(item.Time),
-		OrderID:       item.OrderID,
-		Symbol:        item.Symbol,
-		Status:        item.Status,
-		Side:          item.Side,
-		PositionSide:  item.PositionSide,
-		Type:          item.Type,
-		OrigQty:       item.OrigQty,
-		ExecutedQty:   item.ExecutedQty,
-		AvgPrice:      item.AvgPrice,
-		Price:         item.Price,
-		StopPrice:     item.StopPrice,
-		ClientOrderID: item.ClientOrderID,
-		ReduceOnly:    item.ReduceOnly,
-		ClosePosition: item.ClosePosition,
-		UpdateTime:    formatOrderTime(item.UpdateTime),
-		TimeInForce:   item.TimeInForce,
+func formatOrderTimeLocal(ms int64) string {
+	if ms <= 0 {
+		return ""
 	}
+	loc := orderDisplayLocation()
+	return time.UnixMilli(ms).In(loc).Format("2006-01-02 15:04:05")
+}
+
+func orderDisplayLocation() *time.Location {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err == nil {
+		return loc
+	}
+	return time.FixedZone("UTC+8", 8*60*60)
+}
+
+func parseFloatString(v string) float64 {
+	if strings.TrimSpace(v) == "" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0
+	}
+	return f
+}
+
+func (s *ServiceContext) toAllOrderJSONLEntry(item binance.AllOrder, lifecycle OrderLifecycleInfo) allOrderJSONLEntry {
+	pricePrecision, quantityPrecision := s.symbolPrecisions(item.Symbol)
+	feeSummary := s.tradeFeeSummary(item.Symbol, item.OrderID)
+	baseQty := parseFloatString(item.ExecutedQty)
+	if baseQty == 0 {
+		baseQty = parseFloatString(item.OrigQty)
+	}
+	quoteQty := parseFloatString(item.AvgPrice) * baseQty
+	estimatedFee := feeSummary.EstimatedFee
+	if estimatedFee == 0 {
+		estimatedFee = quoteQty * estimateFeeRate(item.Type, false)
+	}
+	actualFeeAsset := feeSummary.ActualFeeAsset
+	if feeSummary.MixedAsset {
+		actualFeeAsset = "MIXED"
+	}
+
+	return allOrderJSONLEntry{
+		Time:            formatOrderTime(item.Time),
+		TimeLocal:       formatOrderTimeLocal(item.Time),
+		OrderID:         item.OrderID,
+		Symbol:          item.Symbol,
+		Status:          item.Status,
+		Side:            item.Side,
+		PositionSide:    item.PositionSide,
+		Type:            item.Type,
+		OrigQty:         formatDecimalString(item.OrigQty, quantityPrecision, "0"),
+		ExecutedQty:     formatDecimalString(item.ExecutedQty, quantityPrecision, "0"),
+		BaseQty:         formatFloatWithPrecision(baseQty, quantityPrecision),
+		QuoteQty:        formatFloatWithPrecision(quoteQty, 2),
+		AvgPrice:        formatDecimalString(item.AvgPrice, pricePrecision, "0"),
+		Price:           formatDecimalString(item.Price, pricePrecision, "0"),
+		StopPrice:       formatDecimalString(item.StopPrice, pricePrecision, "0"),
+		ClientOrderID:   item.ClientOrderID,
+		EstimatedFee:    formatFloatWithPrecision(estimatedFee, 8),
+		ActualFee:       formatFloatWithPrecision(feeSummary.ActualFee, 8),
+		ActualFeeAsset:  actualFeeAsset,
+		ActionType:      lifecycle.ActionType,
+		PositionCycleID: lifecycle.PositionCycleID,
+		ReduceOnly:      item.ReduceOnly,
+		ClosePosition:   item.ClosePosition,
+		UpdateTime:      formatOrderTime(item.UpdateTime),
+		TimeInForce:     item.TimeInForce,
+	}
+}
+
+func (s *ServiceContext) toPositionJSONLEntry(item binance.PositionResp) positionJSONLEntry {
+	pricePrecision, quantityPrecision := s.symbolPrecisions(item.Symbol)
+	positionAmt := parseFloatString(item.PositionAmt)
+	positionSide := "BOTH"
+	if positionAmt > 0 {
+		positionSide = "LONG"
+	} else if positionAmt < 0 {
+		positionSide = "SHORT"
+	}
+	now := time.Now().UTC()
+	return positionJSONLEntry{
+		Symbol:            item.Symbol,
+		PositionSide:      positionSide,
+		PositionAmt:       formatDecimalString(item.PositionAmt, quantityPrecision, "0"),
+		BaseQty:           formatFloatWithPrecision(absFloat(positionAmt), quantityPrecision),
+		EntryPrice:        formatDecimalString(item.EntryPrice, pricePrecision, ""),
+		MarkPrice:         formatDecimalString(item.MarkPrice, pricePrecision, ""),
+		UnrealizedProfit:  item.UnrealizedProfit,
+		LiquidationPrice:  formatDecimalString(item.LiquidationPrice, pricePrecision, ""),
+		Leverage:          item.Leverage,
+		MarginType:        item.MarginType,
+		TimeUTC:           now.Format("2006-01-02 15:04:05"),
+		TimeLocal:         now.In(orderDisplayLocation()).Format("2006-01-02 15:04:05"),
+		SnapshotTimestamp: now.UnixMilli(),
+	}
+}
+
+func (s *ServiceContext) toUserTradeJSONLEntry(item binance.UserTrade) userTradeJSONLEntry {
+	pricePrecision, quantityPrecision := s.symbolPrecisions(item.Symbol)
+	quoteQty := parseFloatString(item.QuoteQty)
+	if quoteQty == 0 {
+		quoteQty = parseFloatString(item.Price) * parseFloatString(item.Qty)
+	}
+	estimatedFee := quoteQty * estimateFeeRate("", item.Maker)
+	return userTradeJSONLEntry{
+		ID:              item.ID,
+		Symbol:          item.Symbol,
+		OrderID:         item.OrderID,
+		Side:            item.Side,
+		PositionSide:    item.PositionSide,
+		Price:           formatDecimalString(item.Price, pricePrecision, "0"),
+		Qty:             formatDecimalString(item.Qty, quantityPrecision, "0"),
+		RealizedPnl:     item.RealizedPnl,
+		MarginAsset:     item.MarginAsset,
+		QuoteQty:        formatDecimalString(item.QuoteQty, 2, "0"),
+		Commission:      item.Commission,
+		CommissionAsset: item.CommissionAsset,
+		EstimatedFee:    formatFloatWithPrecision(estimatedFee, 8),
+		ActualFee:       formatDecimalString(item.Commission, 8, "0"),
+		Time:            formatOrderTime(item.Time),
+		TimeLocal:       formatOrderTimeLocal(item.Time),
+		Buyer:           item.Buyer,
+		Maker:           item.Maker,
+	}
+}
+
+func (s *ServiceContext) symbolPrecisions(symbol string) (int, int) {
+	if s == nil || s.client == nil || strings.TrimSpace(symbol) == "" {
+		return 2, 3
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	pricePrecision, quantityPrecision, err := s.client.GetSymbolPrecisions(ctx, symbol)
+	if err != nil {
+		return 2, 3
+	}
+	if pricePrecision < 0 {
+		pricePrecision = 2
+	}
+	if quantityPrecision < 0 {
+		quantityPrecision = 3
+	}
+	if pricePrecision > 8 {
+		pricePrecision = 8
+	}
+	if quantityPrecision > 8 {
+		quantityPrecision = 8
+	}
+	return pricePrecision, quantityPrecision
+}
+
+func formatDecimalString(v string, precision int, zeroValue string) string {
+	raw := strings.TrimSpace(v)
+	if raw == "" {
+		return ""
+	}
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return raw
+	}
+	if f == 0 {
+		return zeroValue
+	}
+	return formatFloatWithPrecision(f, precision)
+}
+
+func formatFloatWithPrecision(v float64, precision int) string {
+	if precision < 0 {
+		precision = 0
+	}
+	if precision > 8 {
+		precision = 8
+	}
+	return strconv.FormatFloat(v, 'f', precision, 64)
+}
+
+const (
+	defaultMakerFeeRate = 0.0002
+	defaultTakerFeeRate = 0.0005
+)
+
+func estimateFeeRate(orderType string, maker bool) float64 {
+	if maker {
+		return defaultMakerFeeRate
+	}
+	if strings.EqualFold(strings.TrimSpace(orderType), "MARKET") {
+		return defaultTakerFeeRate
+	}
+	return defaultMakerFeeRate
+}
+
+func (s *ServiceContext) cacheTradeFeeSummaries(symbol string, trades []binance.UserTrade) {
+	if s == nil || strings.TrimSpace(symbol) == "" {
+		return
+	}
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	summaryMap := buildTradeFeeSummaryMap(trades)
+
+	s.feeSummaryMu.Lock()
+	s.feeSummaries[symbol] = summaryMap
+	s.feeSummaryMu.Unlock()
+}
+
+func (s *ServiceContext) tradeFeeSummary(symbol string, orderID int64) tradeFeeSummary {
+	if s == nil || strings.TrimSpace(symbol) == "" || orderID == 0 {
+		return tradeFeeSummary{}
+	}
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	s.feeSummaryMu.RLock()
+	defer s.feeSummaryMu.RUnlock()
+	if orderMap, ok := s.feeSummaries[symbol]; ok {
+		return orderMap[orderID]
+	}
+	return tradeFeeSummary{}
+}
+
+func (s *ServiceContext) AllOrderFeeFields(order binance.AllOrder) (string, string, string) {
+	summary := s.tradeFeeSummary(order.Symbol, order.OrderID)
+	baseQty := parseFloatString(order.ExecutedQty)
+	if baseQty == 0 {
+		baseQty = parseFloatString(order.OrigQty)
+	}
+	quoteQty := parseFloatString(order.AvgPrice) * baseQty
+	estimatedFee := summary.EstimatedFee
+	if estimatedFee == 0 {
+		estimatedFee = quoteQty * estimateFeeRate(order.Type, false)
+	}
+	actualFeeAsset := summary.ActualFeeAsset
+	if summary.MixedAsset {
+		actualFeeAsset = "MIXED"
+	}
+	return formatFloatWithPrecision(estimatedFee, 8), formatFloatWithPrecision(summary.ActualFee, 8), actualFeeAsset
+}
+
+func (s *ServiceContext) AllOrderLifecycleFields(order binance.AllOrder, lifecycleMap map[int64]OrderLifecycleInfo) (string, string) {
+	if len(lifecycleMap) == 0 {
+		return inferOrderActionType(order), ""
+	}
+	info := lifecycleMap[order.OrderID]
+	return info.ActionType, info.PositionCycleID
+}
+
+func (s *ServiceContext) UserTradeFeeFields(trade binance.UserTrade) (string, string) {
+	quoteQty := parseFloatString(trade.QuoteQty)
+	if quoteQty == 0 {
+		quoteQty = parseFloatString(trade.Price) * parseFloatString(trade.Qty)
+	}
+	estimatedFee := quoteQty * estimateFeeRate("", trade.Maker)
+	return formatFloatWithPrecision(estimatedFee, 8), formatDecimalString(trade.Commission, 8, "0")
+}
+
+func buildTradeFeeSummaryMap(trades []binance.UserTrade) map[int64]tradeFeeSummary {
+	result := make(map[int64]tradeFeeSummary)
+	for _, trade := range trades {
+		if trade.OrderID == 0 {
+			continue
+		}
+		summary := result[trade.OrderID]
+		summary.ActualFee += parseFloatString(trade.Commission)
+
+		quoteQty := parseFloatString(trade.QuoteQty)
+		if quoteQty == 0 {
+			quoteQty = parseFloatString(trade.Price) * parseFloatString(trade.Qty)
+		}
+		summary.EstimatedFee += quoteQty * estimateFeeRate("", trade.Maker)
+
+		asset := strings.ToUpper(strings.TrimSpace(trade.CommissionAsset))
+		if asset != "" {
+			if summary.ActualFeeAsset == "" {
+				summary.ActualFeeAsset = asset
+			} else if summary.ActualFeeAsset != asset {
+				summary.MixedAsset = true
+			}
+		}
+
+		result[trade.OrderID] = summary
+	}
+	return result
+}
+
+func BuildOrderLifecycleMap(orders []binance.AllOrder) map[int64]OrderLifecycleInfo {
+	result := make(map[int64]OrderLifecycleInfo, len(orders))
+	if len(orders) == 0 {
+		return result
+	}
+
+	sorted := append([]binance.AllOrder(nil), orders...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		ti := orderEventTime(sorted[i])
+		tj := orderEventTime(sorted[j])
+		if ti == tj {
+			return sorted[i].OrderID < sorted[j].OrderID
+		}
+		return ti < tj
+	})
+
+	type cycleTracker struct {
+		seq     int
+		balance float64
+		cycleID string
+	}
+	trackers := map[string]*cycleTracker{
+		"LONG":  {},
+		"SHORT": {},
+	}
+
+	for _, order := range sorted {
+		actionType := inferOrderActionType(order)
+		info := OrderLifecycleInfo{ActionType: actionType}
+		qty := parseFloatString(order.ExecutedQty)
+		if qty <= 0 {
+			result[order.OrderID] = info
+			continue
+		}
+
+		positionSide := normalizeOrderPositionSide(order.PositionSide)
+		tracker, ok := trackers[positionSide]
+		if !ok || actionType == "" {
+			result[order.OrderID] = info
+			continue
+		}
+
+		if isOpenAction(actionType) {
+			if tracker.balance <= 1e-9 || tracker.cycleID == "" {
+				tracker.seq++
+				tracker.cycleID = buildPositionCycleID(order.Symbol, positionSide, orderEventTime(order), tracker.seq)
+			}
+			tracker.balance += qty
+			info.PositionCycleID = tracker.cycleID
+		} else {
+			if tracker.balance <= 1e-9 || tracker.cycleID == "" {
+				tracker.seq++
+				tracker.cycleID = buildPositionCycleID(order.Symbol, positionSide, orderEventTime(order), tracker.seq)
+			}
+			info.PositionCycleID = tracker.cycleID
+			tracker.balance -= qty
+			if tracker.balance <= 1e-9 {
+				tracker.balance = 0
+				tracker.cycleID = ""
+			}
+		}
+		result[order.OrderID] = info
+	}
+
+	return result
+}
+
+func inferOrderActionType(order binance.AllOrder) string {
+	side := strings.ToUpper(strings.TrimSpace(order.Side))
+	positionSide := normalizeOrderPositionSide(order.PositionSide)
+	switch positionSide {
+	case "LONG":
+		if side == "BUY" {
+			return "OPEN_LONG"
+		}
+		if side == "SELL" {
+			return "CLOSE_LONG"
+		}
+	case "SHORT":
+		if side == "SELL" {
+			return "OPEN_SHORT"
+		}
+		if side == "BUY" {
+			return "CLOSE_SHORT"
+		}
+	}
+	return ""
+}
+
+func normalizeOrderPositionSide(positionSide string) string {
+	ps := strings.ToUpper(strings.TrimSpace(positionSide))
+	switch ps {
+	case "LONG", "SHORT":
+		return ps
+	default:
+		return ""
+	}
+}
+
+func isOpenAction(actionType string) bool {
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(actionType)), "OPEN_")
+}
+
+func buildPositionCycleID(symbol, positionSide string, eventTime int64, seq int) string {
+	ts := time.UnixMilli(eventTime).UTC().Format("20060102T150405")
+	return fmt.Sprintf("%s-%s-%s-%04d", strings.ToUpper(strings.TrimSpace(symbol)), positionSide, ts, seq)
+}
+
+func orderEventTime(order binance.AllOrder) int64 {
+	if order.UpdateTime > 0 {
+		return order.UpdateTime
+	}
+	return order.Time
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func absFloat(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func normalizeAllOrdersStartTime(startTime int64) int64 {
@@ -460,6 +1067,19 @@ func normalizeAllOrdersStartTime(startTime int64) int64 {
 
 func defaultAllOrdersStartTime() int64 {
 	return time.Now().Add(-defaultAllOrdersLookback).UnixMilli()
+}
+
+func (s *ServiceContext) Close() error {
+	if s == nil {
+		return nil
+	}
+	if s.cancel != nil {
+		s.cancel()
+	}
+	if s.orderConsumer != nil {
+		return s.orderConsumer.Close()
+	}
+	return nil
 }
 
 // FetchAllData 拉取全部合约数据并保存到本地 JSONL
