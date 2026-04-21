@@ -111,6 +111,44 @@ go run app/order/rpc/order.go -f app/order/rpc/etc/order.sim.yaml
 go run app/api/gateway/main.go -f app/api/gateway/etc/gateway.yaml
 ```
 
+### 3. 启动 Demo 真下单环境
+如果你希望 `Market/Strategy` 仍在本地运行，但 `Execution/Order` 对接 Binance Demo，可使用 `demo` 组合：
+
+- `market`: `app/market/rpc/etc/market.sim.yaml`
+- `strategy`: `app/strategy/rpc/etc/strategy.sim.yaml`
+- `execution`: `app/execution/rpc/etc/execution.demo.yaml`
+- `order`: `app/order/rpc/etc/order.demo.yaml`
+- `gateway`: `app/api/gateway/etc/gateway.yaml`
+
+启动前请先在以下文件中填入有效的 Binance Demo 凭证：
+
+- `app/execution/rpc/etc/execution.demo.yaml`
+- `app/order/rpc/etc/order.demo.yaml`
+
+一键启动：
+
+```bash
+./scripts/run-demo.sh start
+```
+
+查看状态：
+
+```bash
+./scripts/run-demo.sh status
+```
+
+停止环境：
+
+```bash
+./scripts/run-demo.sh stop
+```
+
+跟踪全部服务日志：
+
+```bash
+./scripts/tail-demo.sh
+```
+
 ## 环境说明
 ### dev
 - 适合本地调试
@@ -123,6 +161,12 @@ go run app/api/gateway/main.go -f app/api/gateway/etc/gateway.yaml
 - 执行层默认使用 `simulated`
 - 不依赖真实交易所密钥也能完成主链路验证
 
+### demo
+- 适合本地策略联调 + Binance Demo 真下单
+- `market/strategy` 继续使用本地 `sim` 配置
+- `execution/order` 切换到 `demo-fapi` 与 Demo API Key
+- 可以在 Binance Demo 页面验证真实下单结果
+
 ### prod
 - 作为真实运行模板
 - 默认关闭 `debug_skip_*`
@@ -134,6 +178,18 @@ go run app/api/gateway/main.go -f app/api/gateway/etc/gateway.yaml
 
 ```bash
 go test ./...
+```
+
+### 启动 Demo 环境
+
+```bash
+./scripts/run-demo.sh start
+```
+
+### 跟踪 Demo 日志
+
+```bash
+./scripts/tail-demo.sh
 ```
 
 ### 回放历史 K 线
@@ -159,6 +215,7 @@ go run app/market/rpc/market.go \
 - 默认 `strategy.yaml` 仍可能带有调试参数，不建议直接当作生产配置
 - `Order` 服务当前将本地 JSONL 视为“每日查询快照”，不是永远追加的事件日志
 - `sim` profile 是当前最适合联调和回归验证的入口
+- `demo` profile 适合验证 Binance Demo 真下单与查询链路
 
 ## 数据目录说明
 - `app/market/rpc/data/kline`: 行情与聚合 K 线日志

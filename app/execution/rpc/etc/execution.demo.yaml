@@ -1,0 +1,53 @@
+Name: execution-rpc
+ListenOn: 0.0.0.0:9082
+Log:
+  Level: info
+  Mode: file
+  File: execution.log
+
+Kafka:
+  Addrs:
+    - 127.0.0.1:9092
+    - 127.0.0.1:29092
+    - 127.0.0.1:39092
+  Group: execution-rpc-signal
+  Topics:
+    Signal: signal
+    HarvestPathSignal: harvest_path_signal
+    Order: order
+    Kline: kline
+
+Exchange:
+  RouteStrategy: direct
+  DefaultExchange: binance
+  Binance:
+    BaseURL: https://demo-fapi.binance.com
+    Testnet: true
+    APIKey: ""
+    SecretKey: ""
+    Proxy: socks5://192.168.10.13:1080
+  Simulated:
+    Enabled: false
+    InitialBalance: 10000
+    SlippageBPS: 5
+    SlippageModel: fixed
+    CommissionRate: 0.0004
+    CommissionAsset: USDT
+    FillDelayMs: 0
+    MatchMode: instant
+
+Risk:
+  MaxPositionSize: 0.2
+  MaxLeverage: 7.0
+  MaxDailyLossPct: 0.07
+  MaxDrawdownPct: 0.15
+  MaxOpenPositions: 3
+  MaxPositionExposure: 2.0
+  StopLossPercent: 0.02
+  MinOrderNotional: 5.0
+
+Idempotent:
+  TTLSeconds: 600
+
+SignalLogDir: data/signal
+OrderLogDir: data/order
