@@ -454,6 +454,9 @@ func (s *ServiceContext) HandleSignal(ctx context.Context, sig *strategypb.Signa
 			TakeProfits:  takeProfits,
 			Atr:          atr,
 			RiskReward:   riskReward,
+			Reason:       sig.GetReason(),
+			SignalReason: cloneSignalReason(sig.GetSignalReason()),
+			Indicators:   cloneIndicators(sig.GetIndicators()),
 		})
 
 		// 1m撮合模式：开仓信号设置止损止盈，等成交后由回调处理后续逻辑
@@ -496,6 +499,9 @@ func (s *ServiceContext) handleFilledOrder(sig *strategypb.Signal, orderResult *
 		TakeProfits:     takeProfits,
 		Atr:             atr,
 		RiskReward:      riskReward,
+		Reason:          sig.GetReason(),
+		SignalReason:    cloneSignalReason(sig.GetSignalReason()),
+		Indicators:      cloneIndicators(sig.GetIndicators()),
 	})
 
 	// 更新仓位管理器
@@ -595,17 +601,86 @@ func (s *ServiceContext) handleSimFill(result *exchange.OrderResult) {
 		log.Printf("[1m撮合回调] 更新订单失败: %v", err)
 	}
 
-	// 2. 更新仓位管理器
-	s.posManager.UpdateFromOrder(result, "", 0, nil)
+	state, _ := s.orderManager.GetOrder(result.OrderID)
+	sig := buildSignalFromOrderState(state, result)
 
-	// 3. 构建简化信号并记录日志
+	// 2. 更新仓位管理器
+	strategyID := ""
+	stopLoss := 0.0
+	takeProfits := []float64(nil)
+	signalType := ""
+	if state != nil {
+		strategyID = state.StrategyID
+		stopLoss = state.StopLoss
+		takeProfits = append([]float64(nil), state.TakeProfits...)
+		signalType = state.SignalType
+	}
+	s.posManager.UpdateFromOrder(result, strategyID, stopLoss, takeProfits)
+
+	// 3. 发布订单结果到 Kafka，并记录订单执行结果日志
+	if s.orderProducer != nil {
+		orderEvent := s.buildOrderEvent(sig, result)
+		if err := s.orderProducer.SendMarketData(context.Background(), orderEvent); err != nil {
+			log.Printf("[1m撮合回调] 发布订单结果失败: %v", err)
+		}
+	}
+	s.logger.LogOrder(sig, result, result.ExecutedQuantity, s.currentHarvestPathMeta(result.Symbol, string(result.PositionSide)))
+
+	// 4. 1m撮合模式下，开仓成交后补设模拟止损止盈。
+	if signalType == "OPEN" && s.shouldUseSimulatedSLTP(result.Symbol) {
+		s.simExchange.SetPositionSLTP(result.Symbol, result.PositionSide, result.ExecutedQuantity, stopLoss, takeProfits, strategyID)
+	}
+}
+
+func buildSignalFromOrderState(state *order.OrderState, result *exchange.OrderResult) *strategypb.Signal {
 	sig := &strategypb.Signal{
 		Symbol:   result.Symbol,
 		Action:   string(result.Side),
 		Side:     string(result.PositionSide),
 		Quantity: result.ExecutedQuantity,
 	}
-	s.logger.LogOrder(sig, result, result.ExecutedQuantity, s.currentHarvestPathMeta(result.Symbol, string(result.PositionSide)))
+	if state == nil {
+		return sig
+	}
+	sig.StrategyId = state.StrategyID
+	sig.SignalType = state.SignalType
+	sig.StopLoss = state.StopLoss
+	sig.TakeProfits = append([]float64(nil), state.TakeProfits...)
+	sig.Atr = state.Atr
+	sig.RiskReward = state.RiskReward
+	sig.Reason = state.Reason
+	sig.SignalReason = cloneSignalReason(state.SignalReason)
+	sig.Indicators = cloneIndicators(state.Indicators)
+	return sig
+}
+
+func cloneSignalReason(v *strategypb.SignalReason) *strategypb.SignalReason {
+	if v == nil {
+		return nil
+	}
+	out := &strategypb.SignalReason{
+		Summary:          v.GetSummary(),
+		Phase:            v.GetPhase(),
+		TrendContext:     v.GetTrendContext(),
+		SetupContext:     v.GetSetupContext(),
+		PathContext:      v.GetPathContext(),
+		ExecutionContext: v.GetExecutionContext(),
+	}
+	if tags := v.GetTags(); len(tags) > 0 {
+		out.Tags = append([]string(nil), tags...)
+	}
+	return out
+}
+
+func cloneIndicators(v map[string]float64) map[string]float64 {
+	if len(v) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(v))
+	for key, value := range v {
+		out[key] = value
+	}
+	return out
 }
 
 // performRiskCheck 执行风控检查

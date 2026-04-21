@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"exchange-system/app/execution/rpc/internal/exchange"
+	strategypb "exchange-system/common/pb/strategy"
 )
 
 // ---------------------------------------------------------------------------
@@ -42,10 +43,13 @@ type OrderState struct {
 	SignalType string // 信号类型：OPEN/CLOSE
 
 	// 策略信号关联
-	StopLoss    float64   // 止损价
-	TakeProfits []float64 // 止盈价列表
-	Atr         float64   // 入场时ATR
-	RiskReward  float64   // 风险收益比
+	StopLoss     float64   // 止损价
+	TakeProfits  []float64 // 止盈价列表
+	Atr          float64   // 入场时ATR
+	RiskReward   float64   // 风险收益比
+	Reason       string
+	SignalReason *strategypb.SignalReason
+	Indicators   map[string]float64
 
 	// 时间
 	CreateTime   time.Time // 创建时间

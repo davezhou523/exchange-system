@@ -1,0 +1,85 @@
+Name: strategy-rpc
+ListenOn: 0.0.0.0:9081
+
+Kafka:
+  Addrs:
+    - kafka1:9092
+  Group: strategy-rpc-kline
+  Topics:
+    Kline: kline
+    Depth: depth
+    Signal: signal
+    HarvestPathSignal: harvest_path_signal
+
+Execution:
+  Target: execution:9082
+
+Strategies:
+  - name: trend-following
+    symbol: ETHUSDT
+    enabled: true
+    parameters:
+      risk_per_trade: 0.03
+      max_position_size: 0.55
+      leverage: 7.0
+      max_leverage_ratio: 0.92
+      equity: 10000
+      stop_loss_atr_multiplier: 1.5
+      ema_exit_buffer_atr: 0.30
+      min_holding_bars: 5
+      ema_exit_confirm_bars: 2
+      deep_pullback_scale: 0.9
+      pullback_deep_band: 0.003
+      require_both_entry_signals: 0
+      h1_rsi_long_low: 42
+      h1_rsi_long_high: 60
+      h1_rsi_short_low: 40
+      h1_rsi_short_high: 58
+      m15_breakout_lookback: 6
+      m15_rsi_bias_long: 52
+      m15_rsi_bias_short: 48
+      debug_skip_4h_trend: 0
+      debug_skip_pullback: 0
+      debug_skip_15m_entry: 0
+      signal_mode: 0
+      1m_trading_paused: 0
+      1m_atr_multiplier: 1.5
+      1m_breakout_lookback: 20
+      1m_rsi_bias_long: 55
+      1m_rsi_bias_short: 45
+      1m_min_holding_bars: 5
+      1m_ema_exit_buffer_atr: 0.30
+      harvest_path_model_enabled: 1
+      harvest_path_publish_threshold: 0.60
+      harvest_path_lookback: 20
+      harvest_path_block_threshold: 0.80
+      harvest_path_log_threshold: 0.60
+      harvest_path_lstm_enabled: 0
+      harvest_path_lstm_weight: 0.35
+      harvest_path_book_enabled: 0
+      harvest_path_book_weight: 0.35
+      harvest_path_book_top_n: 10
+      harvest_path_book_spread_bps_cap: 12
+      harvest_path_regime_aware_threshold_enabled: 1
+      harvest_path_regime_lookback: 120
+      max_consecutive_losses: 3
+      max_daily_loss_pct: 0.07
+      max_drawdown_pct: 0.15
+      drawdown_position_scale: 0.5
+      max_positions: 1
+
+Strategy:
+  Symbol: ETHUSDT
+  Name: strategy3-prod
+  RuntimeMode: kafka
+
+HarvestPathLSTM:
+  Enabled: false
+  PythonBin: python3
+  ScriptPath: tools/harvestpath_lstm/predict.py
+  DataDir: app/strategy/rpc/data/kline
+  ArtifactsDir: tools/harvestpath_lstm/artifacts
+  TimeoutMs: 2500
+
+KlineLogDir: data/kline
+SignalLogDir: data/signal
