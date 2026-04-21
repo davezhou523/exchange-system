@@ -249,6 +249,9 @@ func (s *ServiceContext) refreshPositions(ctx context.Context, symbol string) (i
 	}
 
 	if len(items) == 0 {
+		if err := s.removeCategoryJSONL("positions", symbol); err != nil && !os.IsNotExist(err) {
+			return 0, err
+		}
 		return 0, nil
 	}
 	if err := s.writeJSONL("positions", symbol, items); err != nil {
@@ -350,8 +353,9 @@ func (s *ServiceContext) GetFundingFees(ctx context.Context, symbol string, star
 // JSONL 数据保存
 // ---------------------------------------------------------------------------
 
-// writeJSONL 将数据以 JSONL 格式写入文件
+// writeJSONL 将订单查询结果按“每日快照”写入 JSONL 文件。
 // 目录结构：{dataDir}/{category}/{symbol}/2026-04-17.jsonl
+// 同一 category/symbol/date 会被覆盖，以避免查询或刷新时不断追加重复数据。
 func (s *ServiceContext) writeJSONL(category, symbol string, items interface{}) error {
 	dateStr := time.Now().UTC().Format("2006-01-02")
 	dir := filepath.Join(s.dataDir, category, symbol)
@@ -360,7 +364,7 @@ func (s *ServiceContext) writeJSONL(category, symbol string, items interface{}) 
 	}
 
 	filePath := filepath.Join(dir, dateStr+".jsonl")
-	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("open file %s: %w", filePath, err)
 	}
@@ -416,6 +420,14 @@ func (s *ServiceContext) writeJSONL(category, symbol string, items interface{}) 
 		}
 	}
 
+	return nil
+}
+
+func (s *ServiceContext) removeCategoryJSONL(category, symbol string) error {
+	filePath := s.categoryJSONLPath(category, symbol)
+	if err := os.Remove(filePath); err != nil { // ignore_security_alert
+		return err
+	}
 	return nil
 }
 
@@ -1334,6 +1346,10 @@ func (s *ServiceContext) FetchAllData(ctx context.Context, symbol string, startT
 			}
 		}
 		log.Printf("[Order服务] 当前委托 | 共 %d 条", len(orders))
+	} else if symbol != "" {
+		if err := s.writeJSONL("open_orders", symbol, []binance.OpenOrder{}); err != nil {
+			log.Printf("[Order服务] 清空当前委托快照失败: %v", err)
+		}
 	}
 
 	// 2. 历史委托
@@ -1342,9 +1358,6 @@ func (s *ServiceContext) FetchAllData(ctx context.Context, symbol string, startT
 		if err != nil {
 			log.Printf("[Order服务] 历史委托拉取失败: %v", err)
 		} else {
-			if err := s.writeJSONL("all_orders", symbol, allOrders); err != nil {
-				log.Printf("[Order服务] 写入历史委托失败: %v", err)
-			}
 			log.Printf("[Order服务] 历史委托 | 共 %d 条", len(allOrders))
 		}
 	}
@@ -1408,6 +1421,10 @@ func (s *ServiceContext) FetchAllData(ctx context.Context, symbol string, startT
 			}
 		}
 		log.Printf("[Order服务] 资金费用 | 共 %d 条", len(fees))
+	} else if symbol != "" {
+		if err := s.writeJSONL("funding_fee", symbol, []binance.FundingFee{}); err != nil {
+			log.Printf("[Order服务] 清空资金费用快照失败: %v", err)
+		}
 	}
 
 	log.Printf("[Order服务] 全部数据拉取完成 | symbol=%s", symbol)

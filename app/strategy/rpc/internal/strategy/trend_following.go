@@ -100,6 +100,9 @@ type TrendFollowingStrategy struct {
 	latest1m    klineSnapshot // 最新1m K线快照
 	latestDepth *harvestpathmodel.OrderBookSnapshot
 
+	// 1m trading paused log flag (atomic)
+	pause1mLogOnce sync.Once
+
 	// 持仓状态
 	pos position
 
@@ -240,6 +243,7 @@ const (
 
 	// 1m信号模式参数
 	paramSignalMode         = "signal_mode"            // 信号模式: 0=15m(默认) | 1=1m分钟周期
+	param1mTradingPaused    = "1m_trading_paused"      // 1m成交暂停: 0=正常(默认) | 1=暂停1m成交，仅用15m+1h+4h判断
 	param1mRsiPeriod        = "1m_rsi_period"          // 1m RSI周期（默认14）
 	param1mAtrMult          = "1m_atr_multiplier"      // 1m 止损ATR倍数（默认1.5）
 	param1mBreakoutLookback = "1m_breakout_lookback"   // 1m 突破回顾期（默认20）
@@ -335,6 +339,27 @@ func (s *TrendFollowingStrategy) OnKline(ctx context.Context, k *marketpb.Kline)
 	signalMode := int(s.getParam(paramSignalMode, 0))
 
 	if signalMode == 1 {
+		// 1m信号模式：检查1m成交暂停标志
+		pause1m := int(s.getParam(param1mTradingPaused, 0))
+		if pause1m == 1 && k.Interval == "1m" {
+			// 1m成交暂停：不生成交易信号，但继续更新1m指标快照供多周期判断使用
+			s.pause1mLogOnce.Do(func() {
+				log.Printf("[策略] %s 1m成交已暂停，仅保留指标计算用于多周期判断", s.symbol)
+			})
+			return nil
+		}
+
+		// 如果1m成交暂停，但收到15m K线，则降级到15m信号模式进行交易判断
+		if pause1m == 1 && k.Interval == "15m" {
+			if !k.IsFinal {
+				return nil
+			}
+			if s.pos.side != sideNone {
+				return s.checkExitConditions(ctx, k)
+			}
+			return s.checkEntryConditions(ctx, k)
+		}
+
 		// 1m信号模式：仅在1m K线到达时执行策略判断
 		if k.Interval != "1m" {
 			return nil

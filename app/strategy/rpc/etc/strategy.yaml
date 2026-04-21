@@ -64,6 +64,7 @@ Strategies:
 
       # === 1m信号模式 ===
       signal_mode: 1                  # 信号模式（0=15m默认, 1=1m分钟周期）
+      1m_trading_paused: 1            # 1m成交暂停（0=正常, 1=暂停1m成交，降级到15m模式）
       1m_atr_multiplier: 1.5          # 1m 止损ATR倍数
       1m_breakout_lookback: 20        # 1m 突破结构回顾期
       1m_rsi_bias_long: 55            # 1m 多头RSI偏置阈值
