@@ -27,7 +27,7 @@ import (
 )
 
 var (
-	configFile   = flag.String("f", "etc/market.yaml", "the config file")
+	configFile   = flag.String("f", "etc/market.demo.yaml", "the config file")
 	mockKafka    = flag.Bool("mock-kafka", false, "mock kafka producer")
 	mockCount    = flag.Int("mock-count", 200, "mock kafka producer send count")
 	mockInterval = flag.Duration("mock-interval", 0, "mock kafka producer send interval (0 means align to kline tf)")

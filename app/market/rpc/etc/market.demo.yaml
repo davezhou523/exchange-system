@@ -1,0 +1,47 @@
+Name: market-rpc
+ListenOn: 0.0.0.0:9080
+Mode: dev
+Log:
+  Level: info
+  Mode: file
+Kafka:
+  Addrs:
+    - 127.0.0.1:9092
+    - 127.0.0.1:29092
+    - 127.0.0.1:39092
+  Topics:
+    Kline: kline
+    Depth: depth
+
+KlineLogDir: data/kline
+WatermarkDelay: 1s
+MaxWatermarkBufferAge: 5m
+IndicatorMode: closed
+EmitMode: watermark
+WarmupPages: 3
+
+Indicators:
+  Ema21Period: 21
+  Ema55Period: 55
+  RsiPeriod: 14
+  AtrPeriod: 14
+
+WorkerGC:
+  GCInterval: 5m
+  MaxIdleTime: 30m
+
+IntervalIndicators:
+  1m: { Ema21Period: 21, Ema55Period: 55, RsiPeriod: 14, AtrPeriod: 14 }
+  3m: { Ema21Period: 21, Ema55Period: 55, RsiPeriod: 14, AtrPeriod: 14 }
+  5m: { Ema21Period: 21, Ema55Period: 55, RsiPeriod: 14, AtrPeriod: 14 }
+  15m: { Ema21Period: 21, Ema55Period: 55, RsiPeriod: 14, AtrPeriod: 14 }
+  1h: { Ema21Period: 21, Ema55Period: 55, RsiPeriod: 14, AtrPeriod: 14 }
+  4h: { Ema21Period: 21, Ema55Period: 55, RsiPeriod: 14, AtrPeriod: 14 }
+
+Binance:
+  WebSocketURL: wss://fstream.binance.com
+  Symbols:
+    - ETHUSDT
+  Intervals:
+    - 1m
+  Proxy: socks5://192.168.10.13:1080

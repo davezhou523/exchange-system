@@ -43,7 +43,6 @@ Strategies:
       debug_skip_4h_trend: 0
       debug_skip_pullback: 0
       debug_skip_15m_entry: 0
-
       decision_log_enabled: 1
       signal_mode: 0
       1m_trading_paused: 0
@@ -62,7 +61,7 @@ Strategies:
 
 Strategy:
   Symbol: ETHUSDT
-  Name: strategy3-sim
+  Name: strategy3-demo
   RuntimeMode: kafka
 
 HarvestPathLSTM:

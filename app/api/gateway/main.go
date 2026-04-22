@@ -14,12 +14,12 @@ import (
 )
 
 func main() {
-	configFile := flag.String("f", "app/api/gateway/etc/gateway.yaml", "配置文件路径")
+	configFile := flag.String("f", "app/api/gateway/etc/gateway.demo.yaml", "配置文件路径")
 	flag.Parse()
 
 	if _, err := os.Stat(*configFile); err != nil {
-		if _, fallbackErr := os.Stat("etc/gateway.yaml"); fallbackErr == nil {
-			*configFile = "etc/gateway.yaml"
+		if _, fallbackErr := os.Stat("etc/gateway.demo.yaml"); fallbackErr == nil {
+			*configFile = "etc/gateway.demo.yaml"
 		}
 	}
 

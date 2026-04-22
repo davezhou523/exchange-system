@@ -23,7 +23,7 @@ import (
 // 数据保存为 JSONL 到 data 目录
 // ---------------------------------------------------------------------------
 
-var configFile = flag.String("f", "etc/order.yaml", "the config file")
+var configFile = flag.String("f", "etc/order.demo.yaml", "the config file")
 
 func main() {
 	flag.Parse()

@@ -9,11 +9,11 @@ LOG_DIR="${RUN_DIR}/logs"
 mkdir -p "${PID_DIR}" "${LOG_DIR}"
 
 SERVICES=(
-  "market|app/market/rpc/market.go|app/market/rpc/etc/market.sim.yaml"
+  "market|app/market/rpc/market.go|app/market/rpc/etc/market.demo.yaml"
   "execution|app/execution/rpc/execution.go|app/execution/rpc/etc/execution.demo.yaml"
   "order|app/order/rpc/order.go|app/order/rpc/etc/order.demo.yaml"
-  "strategy|app/strategy/rpc/strategy.go|app/strategy/rpc/etc/strategy.sim.yaml"
-  "gateway|app/api/gateway/main.go|app/api/gateway/etc/gateway.yaml"
+  "strategy|app/strategy/rpc/strategy.go|app/strategy/rpc/etc/strategy.demo.yaml"
+  "gateway|app/api/gateway/main.go|app/api/gateway/etc/gateway.demo.yaml"
 )
 
 log() {

@@ -112,13 +112,13 @@ go run app/api/gateway/main.go -f app/api/gateway/etc/gateway.yaml
 ```
 
 ### 3. 启动 Demo 真下单环境
-如果你希望 `Market/Strategy` 仍在本地运行，但 `Execution/Order` 对接 Binance Demo，可使用 `demo` 组合：
+如果你希望整套服务都显式使用 `*.demo.yaml`，并让 `Execution/Order` 对接 Binance Demo，可使用 `demo` 组合：
 
-- `market`: `app/market/rpc/etc/market.sim.yaml`
-- `strategy`: `app/strategy/rpc/etc/strategy.sim.yaml`
+- `market`: `app/market/rpc/etc/market.demo.yaml`
+- `strategy`: `app/strategy/rpc/etc/strategy.demo.yaml`
 - `execution`: `app/execution/rpc/etc/execution.demo.yaml`
 - `order`: `app/order/rpc/etc/order.demo.yaml`
-- `gateway`: `app/api/gateway/etc/gateway.yaml`
+- `gateway`: `app/api/gateway/etc/gateway.demo.yaml`
 
 启动前请先在以下文件中填入有效的 Binance Demo 凭证：
 
@@ -163,8 +163,9 @@ go run app/api/gateway/main.go -f app/api/gateway/etc/gateway.yaml
 
 ### demo
 - 适合本地策略联调 + Binance Demo 真下单
-- `market/strategy` 继续使用本地 `sim` 配置
+- 全部服务都使用 `*.demo.yaml`
 - `execution/order` 切换到 `demo-fapi` 与 Demo API Key
+- `gateway.demo.yaml` 默认使用 `8889`，避免和本地 `sim` 的 `8888` 冲突
 - 可以在 Binance Demo 页面验证真实下单结果
 
 ### prod

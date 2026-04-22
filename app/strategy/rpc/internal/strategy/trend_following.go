@@ -116,6 +116,10 @@ type TrendFollowingStrategy struct {
 	signalLogDir   string
 	signalLogMu    sync.Mutex
 	signalLogFiles map[string]*os.File
+
+	// 决策日志（无信号也记录），目录：{SignalLogDir}/decision/{SYMBOL}/{YYYY-MM-DD}.jsonl
+	decisionLogMu    sync.Mutex
+	decisionLogFiles map[string]*os.File
 }
 
 type RuntimeOptions struct {
@@ -141,6 +145,7 @@ func NewTrendFollowingStrategy(symbol string, params map[string]float64, produce
 		harvestPathLSTMPredictor: runtimeHarvestPathLSTMPredictor(opts),
 		signalLogDir:             signalLogDir,
 		signalLogFiles:           make(map[string]*os.File),
+		decisionLogFiles:         make(map[string]*os.File),
 	}
 }
 
@@ -268,6 +273,9 @@ const (
 	paramHarvestPathBookSpreadBpsCap            = "harvest_path_book_spread_bps_cap"            // spread 风险归一化上限（默认12bps）
 	paramHarvestPathRegimeAwareThresholdEnabled = "harvest_path_regime_aware_threshold_enabled" // 0=关闭 | 1=开启
 	paramHarvestPathRegimeLookback              = "harvest_path_regime_lookback"                // 在线波动 regime 识别回看窗口（默认120根1m）
+
+	// 观测日志（无信号也记录）
+	paramDecisionLogEnabled = "decision_log_enabled" // 0=关闭(默认) | 1=开启：每根15m final K线写决策日志
 )
 
 // ---------------------------------------------------------------------------
@@ -674,6 +682,7 @@ func (s *TrendFollowingStrategy) judge15MEntry(pullback pullbackResult) entrySig
 func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *marketpb.Kline) error {
 	// 风控检查
 	if !s.checkRiskLimits() {
+		s.writeDecisionLogIfEnabled("entry", "skip", "risk_limits_block", k, nil)
 		return nil
 	}
 
@@ -687,6 +696,7 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 		m15 := s.latest15m
 		if m15.Atr == 0 {
 			log.Printf("[策略] %s 15M指标未就绪（ATR=0），跳过入场", s.symbol)
+			s.writeDecisionLogIfEnabled("entry", "skip", "m15_not_ready_atr_0", k, nil)
 			return nil
 		}
 
@@ -713,10 +723,21 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 			if entry == entryNone {
 				log.Printf("[策略] %s 15M无入场 | pullback=%v RSI=%.2f ATR=%.2f",
 					s.symbol, pullback, m15.Rsi, m15.Atr)
+				s.writeDecisionLogIfEnabled("entry", "skip", "m15_no_entry", k, map[string]interface{}{
+					"trend":    stringTrend(trend),
+					"pullback": stringPullback(pullback),
+					"m15_rsi":  m15.Rsi,
+					"m15_atr":  m15.Atr,
+				})
 				return nil
 			}
 		}
 		if s.shouldBlockForHarvestPathRisk(ctx, k, entry) {
+			s.writeDecisionLogIfEnabled("entry", "skip", "harvest_path_block", k, map[string]interface{}{
+				"trend":    stringTrend(trend),
+				"pullback": stringPullback(pullback),
+				"entry":    stringEntry(entry),
+			})
 			return nil
 		}
 
@@ -729,10 +750,18 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 	// 检查 4H/1H 指标是否就绪（需要先收到对应周期的闭K线）
 	if s.latest4h.Ema21 == 0 || s.latest4h.Ema55 == 0 {
 		log.Printf("[策略] %s 4H指标未就绪（等待4H闭K线），跳过入场", s.symbol)
+		s.writeDecisionLogIfEnabled("entry", "skip", "h4_not_ready", k, map[string]interface{}{
+			"h4_ema21": s.latest4h.Ema21,
+			"h4_ema55": s.latest4h.Ema55,
+		})
 		return nil
 	}
 	if s.latest1h.Ema21 == 0 || s.latest1h.Ema55 == 0 {
 		log.Printf("[策略] %s 1H指标未就绪（等待1H闭K线），跳过入场", s.symbol)
+		s.writeDecisionLogIfEnabled("entry", "skip", "h1_not_ready", k, map[string]interface{}{
+			"h1_ema21": s.latest1h.Ema21,
+			"h1_ema55": s.latest1h.Ema55,
+		})
 		return nil
 	}
 
@@ -740,6 +769,11 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 	if trend == trendNone {
 		log.Printf("[策略] %s 4H震荡/无趋势 | EMA21=%.2f EMA55=%.2f 价格=%.2f",
 			s.symbol, s.latest4h.Ema21, s.latest4h.Ema55, s.latest4h.Close)
+		s.writeDecisionLogIfEnabled("entry", "skip", "h4_no_trend", k, map[string]interface{}{
+			"h4_ema21": s.latest4h.Ema21,
+			"h4_ema55": s.latest4h.Ema55,
+			"h4_close": s.latest4h.Close,
+		})
 		return nil
 	}
 
@@ -748,6 +782,13 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 	if pullback == pullbackNone {
 		log.Printf("[策略] %s 1H无回调 | trend=%v EMA21=%.2f EMA55=%.2f 价格=%.2f RSI=%.2f",
 			s.symbol, trend, s.latest1h.Ema21, s.latest1h.Ema55, s.latest1h.Close, s.latest1h.Rsi)
+		s.writeDecisionLogIfEnabled("entry", "skip", "h1_no_pullback", k, map[string]interface{}{
+			"trend":    stringTrend(trend),
+			"h1_ema21": s.latest1h.Ema21,
+			"h1_ema55": s.latest1h.Ema55,
+			"h1_close": s.latest1h.Close,
+			"h1_rsi":   s.latest1h.Rsi,
+		})
 		return nil
 	}
 
@@ -756,9 +797,20 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 	if entry == entryNone {
 		log.Printf("[策略] %s 15M无入场 | pullback=%v RSI=%.2f ATR=%.2f",
 			s.symbol, pullback, s.latest15m.Rsi, s.latest15m.Atr)
+		s.writeDecisionLogIfEnabled("entry", "skip", "m15_no_entry", k, map[string]interface{}{
+			"trend":    stringTrend(trend),
+			"pullback": stringPullback(pullback),
+			"m15_rsi":  s.latest15m.Rsi,
+			"m15_atr":  s.latest15m.Atr,
+		})
 		return nil
 	}
 	if s.shouldBlockForHarvestPathRisk(ctx, k, entry) {
+		s.writeDecisionLogIfEnabled("entry", "skip", "harvest_path_block", k, map[string]interface{}{
+			"trend":    stringTrend(trend),
+			"pullback": stringPullback(pullback),
+			"entry":    stringEntry(entry),
+		})
 		return nil
 	}
 
@@ -861,6 +913,20 @@ func (s *TrendFollowingStrategy) openPosition(ctx context.Context, k *marketpb.K
 	log.Printf("[策略入场] %s %s | 价格=%.2f | 止损=%.2f | TP1=%.2f | TP2=%.2f | %s",
 		s.symbol, action, m15.Close, stopLoss, tp1, tp2, reason)
 
+	s.writeDecisionLogIfEnabled("entry", "signal", "open_signal_sent", k, map[string]interface{}{
+		"action":       action,
+		"side":         side,
+		"entry_price":  m15.Close,
+		"stop_loss":    stopLoss,
+		"take_profits": []float64{tp1, tp2},
+		"h4_ema21":     s.latest4h.Ema21,
+		"h4_ema55":     s.latest4h.Ema55,
+		"h1_ema21":     s.latest1h.Ema21,
+		"h1_ema55":     s.latest1h.Ema55,
+		"h1_rsi":       s.latest1h.Rsi,
+		"m15_rsi":      m15.Rsi,
+		"m15_atr":      m15.Atr,
+	})
 	return s.sendSignal(ctx, signal, k)
 }
 
@@ -1397,6 +1463,116 @@ func (s *TrendFollowingStrategy) writeSignalLog(signal map[string]interface{}, k
 // round2 四舍五入保留2位小数
 func round2(v float64) float64 {
 	return math.Round(v*100) / 100
+}
+
+type decisionLogEntry struct {
+	Timestamp   string                 `json:"timestamp"`
+	Symbol      string                 `json:"symbol"`
+	Interval    string                 `json:"interval"`
+	Stage       string                 `json:"stage"`    // entry / exit
+	Decision    string                 `json:"decision"` // skip / pass / signal
+	Reason      string                 `json:"reason"`
+	HasPosition bool                   `json:"has_position"`
+	IsFinal     bool                   `json:"is_final"`
+	IsTradable  bool                   `json:"is_tradable"`
+	OpenTime    int64                  `json:"open_time"`
+	CloseTime   int64                  `json:"close_time"`
+	Extras      map[string]interface{} `json:"extras,omitempty"`
+}
+
+func (s *TrendFollowingStrategy) writeDecisionLogIfEnabled(stage, decision, reason string, k *marketpb.Kline, extras map[string]interface{}) {
+	if s == nil || k == nil {
+		return
+	}
+	if s.signalLogDir == "" {
+		return
+	}
+	if s.getParam(paramDecisionLogEnabled, 0) <= 0 {
+		return
+	}
+
+	now := time.Now().UTC()
+	dateStr := now.Format("2006-01-02")
+	dir := filepath.Join(s.signalLogDir, "decision", s.symbol)
+
+	s.decisionLogMu.Lock()
+	defer s.decisionLogMu.Unlock()
+
+	key := s.symbol + "/" + dateStr
+	f, ok := s.decisionLogFiles[key]
+	if !ok {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			log.Printf("[decision-log] failed to create dir %s: %v", dir, err)
+			return
+		}
+		path := filepath.Join(dir, dateStr+".jsonl")
+		var err error
+		f, err = os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			log.Printf("[decision-log] failed to open %s: %v", path, err)
+			return
+		}
+		s.decisionLogFiles[key] = f
+	}
+
+	entry := decisionLogEntry{
+		Timestamp:   now.Format("2006-01-02T15:04:05.000Z"),
+		Symbol:      s.symbol,
+		Interval:    k.Interval,
+		Stage:       stage,
+		Decision:    decision,
+		Reason:      reason,
+		HasPosition: s.pos.side != sideNone,
+		IsFinal:     k.IsFinal,
+		IsTradable:  k.IsTradable,
+		OpenTime:    k.OpenTime,
+		CloseTime:   k.CloseTime,
+		Extras:      extras,
+	}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(entry); err != nil {
+		log.Printf("[decision-log] marshal failed: %v", err)
+		return
+	}
+	if _, err := f.Write(buf.Bytes()); err != nil {
+		log.Printf("[decision-log] write failed: %v", err)
+	}
+}
+
+func stringTrend(trend trendDirection) string {
+	switch trend {
+	case trendLong:
+		return "LONG"
+	case trendShort:
+		return "SHORT"
+	default:
+		return "NONE"
+	}
+}
+
+func stringPullback(pullback pullbackResult) string {
+	switch pullback {
+	case pullbackLong:
+		return "LONG"
+	case pullbackShort:
+		return "SHORT"
+	default:
+		return "NONE"
+	}
+}
+
+func stringEntry(entry entrySignal) string {
+	switch entry {
+	case entryLong:
+		return "LONG"
+	case entryShort:
+		return "SHORT"
+	default:
+		return "NONE"
+	}
 }
 
 // ---------------------------------------------------------------------------

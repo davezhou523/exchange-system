@@ -25,7 +25,7 @@ import (
 )
 
 var (
-	configFile  = flag.String("f", "etc/strategy.yaml", "the config file")
+	configFile  = flag.String("f", "etc/strategy.demo.yaml", "the config file")
 	mockKafka   = flag.Bool("mock-kafka", false, "mock kafka consume test")
 	mockCount   = flag.Int("mock-count", 200, "mock kafka consumer receive count (0 means forever)")
 	mockTimeout = flag.Duration("mock-timeout", 20*time.Second, "mock kafka consumer timeout (0 means no-timeout)")
