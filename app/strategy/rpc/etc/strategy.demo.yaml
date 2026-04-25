@@ -13,7 +13,7 @@ Kafka:
   InitialOffset: oldest
   Topics:
     Kline: kline
-    Depth: depth
+    Depth: ""
     Signal: signal
     HarvestPathSignal: harvest_path_signal
 

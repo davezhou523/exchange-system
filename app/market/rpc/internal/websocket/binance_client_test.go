@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"exchange-system/common/pb/market"
@@ -38,7 +39,7 @@ func TestHandleMessageDepth(t *testing.T) {
 			"a":[["3000.20","1.50"],["3000.30","2.75"]]
 		}
 	}`)
-	if err := client.handleMessage(context.Background(), payload); err != nil {
+	if _, err := client.handleMessage(context.Background(), payload); err != nil {
 		t.Fatalf("handleMessage() error = %v", err)
 	}
 
@@ -51,5 +52,23 @@ func TestHandleMessageDepth(t *testing.T) {
 	}
 	if len(depth.Bids) != 2 || len(depth.Asks) != 2 {
 		t.Fatalf("depth levels = bids:%d asks:%d, want 2/2", len(depth.Bids), len(depth.Asks))
+	}
+}
+
+func TestBuildStreamURLSkipsDepthWhenProducerIsTypedNil(t *testing.T) {
+	var depthProducer *mockProducer
+	client := NewBinanceWebSocketClient(
+		"wss://fstream.binance.com",
+		"",
+		[]string{"ETHUSDT"},
+		[]string{"1m"},
+		nil,
+		depthProducer,
+		nil,
+	)
+
+	got := client.buildStreamURL()
+	if strings.Contains(got, "@depth20@100ms") {
+		t.Fatalf("buildStreamURL() = %s, should not contain depth stream for typed nil producer", got)
 	}
 }

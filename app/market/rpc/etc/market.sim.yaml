@@ -11,7 +11,7 @@ Kafka:
     - 127.0.0.1:39092
   Topics:
     Kline: kline
-    Depth: depth
+    Depth: ""
 
 KlineLogDir: data/kline
 WatermarkDelay: 1s
@@ -44,4 +44,4 @@ Binance:
     - ETHUSDT
   Intervals:
     - 1m
-  Proxy: socks5://192.168.10.13:1080
+  Proxy: socks5://192.168.10.14:1080

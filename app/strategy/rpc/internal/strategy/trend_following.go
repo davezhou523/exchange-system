@@ -599,7 +599,7 @@ func appendSnapshotExtras(extras map[string]interface{}, prefix string, snap kli
 	if extras == nil || prefix == "" {
 		return
 	}
-	extras[prefix+"_open_time"] = snap.OpenTime
+	extras[prefix+"_open_time"] = formatDecisionLogTime(time.UnixMilli(snap.OpenTime).UTC())
 	extras[prefix+"_close"] = snap.Close
 	extras[prefix+"_ema21"] = snap.Ema21
 	extras[prefix+"_ema55"] = snap.Ema55
@@ -1342,21 +1342,84 @@ func (s *TrendFollowingStrategy) sendSignal(ctx context.Context, signal map[stri
 
 // signalLogEntry 定义结构化的信号日志格式
 type signalLogEntry struct {
-	Timestamp    string                 `json:"timestamp"`
-	StrategyID   string                 `json:"strategyId"`
-	Symbol       string                 `json:"symbol"`
-	Interval     string                 `json:"interval"`
-	Action       string                 `json:"action"`
-	Side         string                 `json:"side"`
-	EntryPrice   float64                `json:"entryPrice"`
-	Quantity     float64                `json:"quantity"`
-	StopLoss     float64                `json:"stopLoss"`
-	TakeProfits  []float64              `json:"takeProfits"`
-	Reason       string                 `json:"reason"`
-	SignalReason interface{}            `json:"signalReason,omitempty"`
-	Indicators   map[string]interface{} `json:"indicators"`
-	IsTradable   bool                   `json:"isTradable"`
-	IsFinal      bool                   `json:"isFinal"`
+	Timestamp    string                   `json:"timestamp"`
+	Symbol       string                   `json:"symbol"`
+	Interval     string                   `json:"interval"`
+	OpenTime     string                   `json:"open_time"`
+	CloseTime    string                   `json:"close_time"`
+	OpenTimeMs   int64                    `json:"open_time_ms"`
+	CloseTimeMs  int64                    `json:"close_time_ms"`
+	StrategyID   string                   `json:"strategyId"`
+	Action       string                   `json:"action"`
+	Side         string                   `json:"side"`
+	EntryPrice   float64                  `json:"entryPrice"`
+	Quantity     float64                  `json:"quantity"`
+	StopLoss     float64                  `json:"stopLoss"`
+	TakeProfits  []float64                `json:"takeProfits"`
+	Reason       string                   `json:"reason"`
+	SignalReason interface{}              `json:"signalReason,omitempty"`
+	IsTradable   bool                     `json:"isTradable"`
+	IsFinal      bool                     `json:"isFinal"`
+	Indicators   *orderedSignalIndicators `json:"indicators,omitempty"`
+}
+
+type orderedSignalIndicators struct {
+	values map[string]interface{}
+}
+
+func newOrderedSignalIndicators(indicators map[string]interface{}) *orderedSignalIndicators {
+	if len(indicators) == 0 {
+		return nil
+	}
+	return &orderedSignalIndicators{values: indicators}
+}
+
+func (o *orderedSignalIndicators) MarshalJSON() ([]byte, error) {
+	if o == nil || len(o.values) == 0 {
+		return []byte("null"), nil
+	}
+	priority := []string{
+		"h4_ema21", "h4_ema55",
+		"h1_ema21", "h1_ema55", "h1_rsi",
+		"m15_ema21", "m15_rsi", "m15_atr",
+	}
+	seen := make(map[string]struct{}, len(o.values))
+	keys := make([]string, 0, len(o.values))
+	for _, key := range priority {
+		if _, ok := o.values[key]; ok {
+			keys = append(keys, key)
+			seen[key] = struct{}{}
+		}
+	}
+	rest := make([]string, 0, len(o.values)-len(keys))
+	for key := range o.values {
+		if _, ok := seen[key]; !ok {
+			rest = append(rest, key)
+		}
+	}
+	sort.Strings(rest)
+	keys = append(keys, rest...)
+
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	for i, key := range keys {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		keyJSON, err := json.Marshal(key)
+		if err != nil {
+			return nil, err
+		}
+		valJSON, err := json.Marshal(o.values[key])
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(keyJSON)
+		buf.WriteByte(':')
+		buf.Write(valJSON)
+	}
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
 }
 
 type signalReasonPayload struct {
@@ -1468,11 +1531,34 @@ func (s *TrendFollowingStrategy) writeSignalLog(signal map[string]interface{}, k
 		takeProfits = tp
 	}
 
+	// 数值保留2位小数
+	quantity = round2(quantity)
+	entryPrice = round2(entryPrice)
+	stopLoss = round2(stopLoss)
+	for i, tp := range takeProfits {
+		takeProfits[i] = round2(tp)
+	}
+	var roundedIndicators map[string]interface{}
+	if indicators != nil {
+		roundedIndicators = make(map[string]interface{}, len(indicators))
+		for k, v := range indicators {
+			if f, ok := v.(float64); ok {
+				roundedIndicators[k] = round2(f)
+			} else {
+				roundedIndicators[k] = v
+			}
+		}
+	}
+
 	entry := signalLogEntry{
-		Timestamp:    now.Format("2006-01-02T15:04:05.000Z"),
-		StrategyID:   strategyID,
+		Timestamp:    formatDecisionLogTime(now),
 		Symbol:       s.symbol,
 		Interval:     interval,
+		OpenTime:     formatDecisionLogTime(time.UnixMilli(k.OpenTime).UTC()),
+		CloseTime:    formatDecisionLogTime(time.UnixMilli(k.CloseTime).UTC()),
+		OpenTimeMs:   k.OpenTime,
+		CloseTimeMs:  k.CloseTime,
+		StrategyID:   strategyID,
 		Action:       action,
 		Side:         side,
 		EntryPrice:   entryPrice,
@@ -1481,28 +1567,9 @@ func (s *TrendFollowingStrategy) writeSignalLog(signal map[string]interface{}, k
 		TakeProfits:  takeProfits,
 		Reason:       reason,
 		SignalReason: signalReason,
-		Indicators:   indicators,
 		IsTradable:   k.IsTradable,
 		IsFinal:      k.IsFinal,
-	}
-
-	// 数值保留2位小数
-	entry.Quantity = round2(entry.Quantity)
-	entry.EntryPrice = round2(entry.EntryPrice)
-	entry.StopLoss = round2(entry.StopLoss)
-	for i, tp := range entry.TakeProfits {
-		entry.TakeProfits[i] = round2(tp)
-	}
-	if entry.Indicators != nil {
-		rounded := make(map[string]interface{}, len(entry.Indicators))
-		for k, v := range entry.Indicators {
-			if f, ok := v.(float64); ok {
-				rounded[k] = round2(f)
-			} else {
-				rounded[k] = v
-			}
-		}
-		entry.Indicators = rounded
+		Indicators:   newOrderedSignalIndicators(roundedIndicators),
 	}
 
 	// 禁用 HTML 转义，避免 < > & 被编码为 \u003c 等
@@ -1720,6 +1787,14 @@ func decisionLogLevel(decision, reason string) string {
 	}
 }
 
+func formatDecisionLogTime(t time.Time) string {
+	t = t.UTC()
+	if t.Nanosecond()/int(time.Millisecond) == 0 {
+		return t.Format("2006-01-02 15:04:05 UTC")
+	}
+	return t.Format("2006-01-02 15:04:05.000 UTC")
+}
+
 func (s *TrendFollowingStrategy) writeDecisionLogIfEnabled(stage, decision, reason string, k *marketpb.Kline, extras map[string]interface{}) {
 	if s == nil || k == nil {
 		return
@@ -1757,7 +1832,7 @@ func (s *TrendFollowingStrategy) writeDecisionLogIfEnabled(stage, decision, reas
 
 	orderedExtras := newOrderedDecisionExtras(extras)
 	entry := decisionLogEntry{
-		Timestamp:   now.Format("2006-01-02T15:04:05.000Z"),
+		Timestamp:   formatDecisionLogTime(now),
 		Symbol:      s.symbol,
 		Interval:    k.Interval,
 		Stage:       stage,
@@ -1767,8 +1842,8 @@ func (s *TrendFollowingStrategy) writeDecisionLogIfEnabled(stage, decision, reas
 		HasPosition: s.pos.side != sideNone,
 		IsFinal:     k.IsFinal,
 		IsTradable:  k.IsTradable,
-		OpenTime:    time.UnixMilli(k.OpenTime).UTC().Format("2006-01-02T15:04:05.000Z"),
-		CloseTime:   time.UnixMilli(k.CloseTime).UTC().Format("2006-01-02T15:04:05.000Z"),
+		OpenTime:    formatDecisionLogTime(time.UnixMilli(k.OpenTime).UTC()),
+		CloseTime:   formatDecisionLogTime(time.UnixMilli(k.CloseTime).UTC()),
 		OpenTimeMs:  k.OpenTime,
 		CloseTimeMs: k.CloseTime,
 		Extras:      orderedExtras,

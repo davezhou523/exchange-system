@@ -1,3 +1,4 @@
 # Order 微服务编译产物
 order.exe
 *.exe
+logs/*

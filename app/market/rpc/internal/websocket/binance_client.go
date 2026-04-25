@@ -7,8 +7,10 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"exchange-system/common/pb/market"
@@ -34,6 +36,11 @@ type KlineAggregator interface {
 
 type KafkaProducer interface {
 	SendMarketData(ctx context.Context, data interface{}) error
+}
+
+type wsMessageStats struct {
+	isKline    bool
+	isClosed1m bool
 }
 
 type KlineData struct {
@@ -151,6 +158,9 @@ func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []st
 			log.Printf("Using proxy: %s", proxyURL)
 		}
 	}
+	if !hasKafkaProducer(depthProducer) {
+		depthProducer = nil
+	}
 
 	return &BinanceWebSocketClient{
 		baseURL:       baseURL,
@@ -161,6 +171,19 @@ func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []st
 		symbols:       symbols,
 		intervals:     intervals,
 		aggregator:    aggregator,
+	}
+}
+
+func hasKafkaProducer(p KafkaProducer) bool {
+	if p == nil {
+		return false
+	}
+	v := reflect.ValueOf(p)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return !v.IsNil()
+	default:
+		return true
 	}
 }
 
@@ -176,7 +199,7 @@ func (c *BinanceWebSocketClient) buildStreamURL() string {
 		for _, interval := range c.intervals {
 			streams = append(streams, fmt.Sprintf("%s@kline_%s", strings.ToLower(symbol), interval))
 		}
-		if c.depthProducer != nil {
+		if hasKafkaProducer(c.depthProducer) {
 			streams = append(streams, fmt.Sprintf("%s@depth20@100ms", strings.ToLower(symbol)))
 		}
 	}
@@ -238,6 +261,27 @@ func (c *BinanceWebSocketClient) StartInBackground(ctx context.Context) {
 
 // readLoop reads messages from the WebSocket connection until an error occurs.
 func (c *BinanceWebSocketClient) readLoop(ctx context.Context) {
+	var totalMessages atomic.Int64
+	var klineMessages atomic.Int64
+	var closed1mMessages atomic.Int64
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				log.Printf("[ws stats] total_messages=%d kline_messages=%d closed_1m_messages=%d",
+					totalMessages.Swap(0), klineMessages.Swap(0), closed1mMessages.Swap(0))
+			}
+		}
+	}()
+	defer close(done)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -252,20 +296,30 @@ func (c *BinanceWebSocketClient) readLoop(ctx context.Context) {
 			_ = c.conn.Close()
 			return
 		}
+		totalMessages.Add(1)
 
-		if err := c.handleMessage(ctx, message); err != nil {
+		stats, err := c.handleMessage(ctx, message)
+		if stats.isKline {
+			klineMessages.Add(1)
+		}
+		if stats.isClosed1m {
+			closed1mMessages.Add(1)
+		}
+		if err != nil {
 			log.Printf("Error handling message: %v", err)
 		}
 	}
 }
 
-func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []byte) error {
+func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []byte) (wsMessageStats, error) {
+	stats := wsMessageStats{}
 	var envelope StreamEnvelope
 	if err := json.Unmarshal(message, &envelope); err != nil {
-		return fmt.Errorf("failed to unmarshal message: %v", err)
+		return stats, fmt.Errorf("failed to unmarshal message: %v", err)
 	}
 
 	if strings.Contains(envelope.Stream, "kline") {
+		stats.isKline = true
 		kd := envelope.Data.Kline
 		k := market.Kline{
 			Symbol:         kd.Symbol,
@@ -291,6 +345,9 @@ func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []by
 		closeTime := time.UnixMilli(k.CloseTime).Format("15:04:05")
 
 		if k.IsClosed {
+			if k.Interval == "1m" {
+				stats.isClosed1m = true
+			}
 			log.Printf("[%s kline] %s | %s-%s | O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f QV=%.4f trades=%d closed=%v",
 				k.Interval, k.Symbol, openTime, closeTime, k.Open, k.High, k.Low, k.Close, k.Volume, k.QuoteVolume, k.NumTrades, k.IsClosed)
 
@@ -298,14 +355,14 @@ func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []by
 			// 1m K线经 aggregator 指标计算后会写入 klineLogDir/SYMBOL/1m/YYYY-MM-DD.jsonl，避免重复
 
 			if err := c.producer.SendMarketData(ctx, &k); err != nil {
-				return fmt.Errorf("failed to send kline to Kafka: %v", err)
+				return stats, fmt.Errorf("failed to send kline to Kafka: %v", err)
 			}
 			if c.aggregator != nil {
 				c.aggregator.OnKline(ctx, &k)
 			}
 		}
 	}
-	if strings.Contains(envelope.Stream, "@depth") && c.depthProducer != nil {
+	if strings.Contains(envelope.Stream, "@depth") && hasKafkaProducer(c.depthProducer) {
 		depth := market.Depth{
 			Symbol:    envelope.Data.Symbol,
 			Timestamp: int64(envelope.Data.EventTime),
@@ -332,12 +389,12 @@ func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []by
 		}
 		if len(depth.Bids) > 0 && len(depth.Asks) > 0 {
 			if err := c.depthProducer.SendMarketData(ctx, &depth); err != nil {
-				return fmt.Errorf("failed to send depth to Kafka: %v", err)
+				return stats, fmt.Errorf("failed to send depth to Kafka: %v", err)
 			}
 		}
 	}
 
-	return nil
+	return stats, nil
 }
 
 func (c *BinanceWebSocketClient) Close() error {
