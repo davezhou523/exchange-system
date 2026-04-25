@@ -8,34 +8,35 @@ option go_package = "exchange-system/common/pb/market";
 
 // K线数据类型
 message Kline {
-  string symbol = 1;
-  string interval = 2;
-  int64 open_time = 3;
-  double open = 4;
-  double high = 5;
-  double low = 6;
-  double close = 7;
-  double volume = 8;
-  int64 close_time = 9;
-  bool is_closed = 10;
-  int64 event_time = 11;        // 事件时间(ms)
-  int64 first_trade_id = 12;    // 第一笔成交ID
-  int64 last_trade_id = 13;     // 末一笔成交ID
-  int32 num_trades = 14;        // 成交笔数
-  double quote_volume = 15;     // 成交额
+  string symbol = 1;            // 交易对，如 ETHUSDT
+  string interval = 2;          // K线周期，如 1m/15m/1h/4h
+  int64 open_time = 3;          // 周期开始时间(ms, UTC)
+  double open = 4;              // 开盘价
+  double high = 5;              // 最高价
+  double low = 6;               // 最低价
+  double close = 7;             // 收盘价
+  double volume = 8;            // 成交量（基础币数量）
+  int64 close_time = 9;         // 周期结束时间(ms, UTC)
+  bool is_closed = 10;          // 周期是否已收盘
+  int64 event_time = 11;        // market 服务生成该消息的事件时间(ms)
+  int64 first_trade_id = 12;    // 聚合区间内第一笔成交 ID
+  int64 last_trade_id = 13;     // 聚合区间内最后一笔成交 ID
+  int32 num_trades = 14;        // 聚合区间内成交笔数
+  double quote_volume = 15;     // 成交额（报价币，如 USDT）
   double taker_buy_volume = 16; // 主动买入成交量
   double taker_buy_quote = 17;  // 主动买入成交额
-  bool is_dirty = 18;           // 数据不完整标记(有缺口/不完整)，数据层可发，策略层应禁止交易
-  bool is_tradable = 19;        // 策略是否可交易(!is_dirty)，数据层设定，策略层直接判断
-  bool is_final = 20;           // 信号确定性标记：数据已通过watermark确认，指标不会再变化，策略层可安全下单
-                               // EmitWatermark模式：始终true（watermark保证数据完整性）
-                               // EmitImmediate模式：!dirty（bucket完成即发，dirty则可能被迟到数据修正）
+  bool is_dirty = 18;           // 数据不完整标记（缺口/迟到数据/聚合不完整），true 表示后续可能被修正
+  bool is_tradable = 19;        // 策略是否可交易；当前通常等价于 !is_dirty
+  bool is_final = 20;           // 是否为最终确认版；true 表示该条已通过 watermark/完整性确认
+                               // EmitWatermark 模式：收盘后等 watermark，再发最终版本
+                               // EmitImmediate 模式：bucket 一完成就先发，dirty 时后续可能被修正
+  string dirty_reason = 21;     // 上游聚合器给出的 dirty 原因，如 incomplete_bucket / continuity_gap
 
   // 技术指标（由Aggregator增量计算，避免策略重复计算）
-  double ema21 = 24;            // EMA21（Binance 标准快线）
-  double ema55 = 25;            // EMA55（Binance 标准慢线）
-  double rsi = 26;              // RSI指标（RSI14）
-  double atr = 27;              // ATR真实波动幅度（ATR14）
+  double ema21 = 24;            // EMA21（快线）
+  double ema55 = 25;            // EMA55（慢线）
+  double rsi = 26;              // RSI14
+  double atr = 27;              // ATR14
 }
 
 // 深度数据

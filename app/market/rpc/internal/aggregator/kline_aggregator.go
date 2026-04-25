@@ -354,13 +354,13 @@ func (a *KlineAggregator) cleanIdleWorkers() {
 
 			for w.watermarkHeap.Len() > 0 {
 				bk := heap.Pop(&w.watermarkHeap).(*emitBucket)
-				bk.bucket.dirty = true
+				bk.bucket.markDirty("worker_gc")
 				a.emitKline(context.Background(), w.symbol, bk.interval, bk.bucket)
 			}
 
 			for _, iv := range a.intervals {
 				if b, ok := w.buckets[iv.Name]; ok && b.initialized {
-					b.dirty = true
+					b.markDirty("worker_gc")
 					a.emitKline(context.Background(), w.symbol, iv.Name, b)
 				}
 			}
@@ -379,7 +379,7 @@ func (a *KlineAggregator) Stop() {
 	for _, w := range a.workers {
 		for w.watermarkHeap.Len() > 0 {
 			bk := heap.Pop(&w.watermarkHeap).(*emitBucket)
-			bk.bucket.dirty = true
+			bk.bucket.markDirty("shutdown_flush")
 			a.emitKline(context.Background(), w.symbol, bk.interval, bk.bucket)
 		}
 
@@ -607,7 +607,7 @@ func (w *symbolWorker) processKline(k *market.Kline) {
 
 		if w.agg.maxWatermarkBufferAge > 0 && now.Sub(bk.enqueued) > w.agg.maxWatermarkBufferAge {
 			heap.Pop(&w.watermarkHeap)
-			bk.bucket.dirty = true
+			bk.bucket.markDirty("watermark_timeout")
 			log.Printf("[aggregator] WATERMARK TIMEOUT: %s %s | enqueued=%s | age=%v | forcing dirty flush",
 				w.symbol, bk.interval, bk.enqueued.Format("15:04:05.000"), now.Sub(bk.enqueued))
 			w.agg.emitKline(context.Background(), w.symbol, bk.interval, bk.bucket)
@@ -634,7 +634,7 @@ func (w *symbolWorker) processKline(k *market.Kline) {
 		// --- Time-driven: flush bucket when kline crosses period boundary ---
 		if exists && b.initialized && latestPeriodOpenTime != b.OpenTime {
 			if b.count < requiredMinutes {
-				b.dirty = true
+				b.markDirty("incomplete_bucket")
 				log.Printf("[aggregator] INCOMPLETE: %s %s | period=%s | collected=%d/%d | missing=%d | dirty=true",
 					w.symbol, iv.Name,
 					time.UnixMilli(b.OpenTime).UTC().Format("2006-01-02T15:04:05"),
@@ -690,7 +690,7 @@ func (w *symbolWorker) processKline(k *market.Kline) {
 						history.push(b.Open, b.High, b.Low, b.Close, b.OpenTime)
 						w.updateIndicatorState(history, b, iv.Name)
 					}
-					b.dirty = true
+					b.markDirty("gap_detected")
 					w.agg.emitKline(context.Background(), w.symbol, iv.Name, b)
 				}
 				delete(w.buckets, iv.Name)
@@ -707,7 +707,7 @@ func (w *symbolWorker) processKline(k *market.Kline) {
 				w.agg.metrics.GapsDetected.Add(1)
 				log.Printf("[aggregator] CONTINUITY GAP: %s %s — expected openTime=%d got=%d gap=%dms | marking dirty",
 					w.symbol, iv.Name, expectedOpenTime, k.OpenTime, gap)
-				b.dirty = true
+				b.markDirty("continuity_gap")
 			} else if gap > 0 && gap <= 60000 {
 				log.Printf("[aggregator] MINOR JITTER: %s %s — expected openTime=%d got=%d gap=%dms | tolerated",
 					w.symbol, iv.Name, expectedOpenTime, k.OpenTime, gap)

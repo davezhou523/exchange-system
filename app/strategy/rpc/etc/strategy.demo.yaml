@@ -1,12 +1,16 @@
 Name: strategy-rpc
 ListenOn: 0.0.0.0:9081
-
+Log:
+  Level: info
+  Mode: file
+  File: strategy-rpc.log
 Kafka:
   Addrs:
     - 127.0.0.1:9092
     - 127.0.0.1:29092
     - 127.0.0.1:39092
   Group: strategy-rpc-kline
+  InitialOffset: oldest
   Topics:
     Kline: kline
     Depth: depth
@@ -68,7 +72,7 @@ HarvestPathLSTM:
   Enabled: false
   PythonBin: python3
   ScriptPath: tools/harvestpath_lstm/predict.py
-  DataDir: app/strategy/rpc/data/kline
+  DataDir: data/kline
   ArtifactsDir: tools/harvestpath_lstm/artifacts
   TimeoutMs: 2500
 

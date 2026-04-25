@@ -12,9 +12,10 @@ type StrategyConfig struct {
 type Config struct {
 	zrpc.RpcServerConf
 	Kafka struct {
-		Addrs  []string
-		Group  string
-		Topics struct {
+		Addrs         []string
+		Group         string
+		InitialOffset string
+		Topics        struct {
 			Kline             string
 			Depth             string
 			Signal            string

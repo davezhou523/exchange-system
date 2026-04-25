@@ -54,8 +54,7 @@
 - `app/market/rpc/etc/market.dev.yaml`
 - `app/market/rpc/etc/market.sim.yaml`
 - `app/market/rpc/etc/market.prod.yaml`
-- `app/strategy/rpc/etc/strategy.dev.yaml`
-- `app/strategy/rpc/etc/strategy.sim.yaml`
+- `app/strategy/rpc/etc/strategy.demo.yaml`
 - `app/strategy/rpc/etc/strategy.prod.yaml`
 - `app/execution/rpc/etc/execution.dev.yaml`
 - `app/execution/rpc/etc/execution.sim.yaml`
@@ -66,7 +65,7 @@
 
 说明：
 
-- 仓库里原有的 `market.yaml`、`strategy.yaml`、`execution.yaml`、`order.yaml` 仍保留，避免打断现有本地实验
+- `strategy` 侧当前仅保留 `strategy.demo.yaml` 和 `strategy.prod.yaml`
 - 推荐后续统一改用 `-f ...*.dev.yaml` / `-f ...*.sim.yaml` / `-f ...*.prod.yaml` 启动
 - `prod` 配置中的 `APIKey`、`SecretKey`、代理等字段默认留空，需要通过你自己的安全方式注入
 
@@ -90,7 +89,7 @@ go run app/market/rpc/market.go -f app/market/rpc/etc/market.sim.yaml
 终端 2：
 
 ```bash
-go run app/strategy/rpc/strategy.go -f app/strategy/rpc/etc/strategy.sim.yaml
+go run app/strategy/rpc/strategy.go -f app/strategy/rpc/etc/strategy.demo.yaml
 ```
 
 终端 3：
@@ -152,7 +151,7 @@ go run app/api/gateway/main.go -f app/api/gateway/etc/gateway.yaml
 ## 环境说明
 ### dev
 - 适合本地调试
-- `strategy.dev.yaml` 仍保留 `debug_skip_*`
+- `strategy` 默认改用 `strategy.demo.yaml`
 - 适合快速验证信号是否能从 Kafka 流转到执行层
 
 ### sim
@@ -213,7 +212,7 @@ go run app/market/rpc/market.go \
 ## 当前实现与架构文档的差异
 - 架构文档偏“目标形态”，代码配置是“当前可运行形态”
 - 当前真实 topic 名称是 `kline/depth/signal/order`
-- 默认 `strategy.yaml` 仍可能带有调试参数，不建议直接当作生产配置
+- `strategy` 当前不再保留 `strategy.yaml/strategy.sim.yaml/strategy.dev.yaml`
 - `Order` 服务当前将本地 JSONL 视为“每日查询快照”，不是永远追加的事件日志
 - `sim` profile 是当前最适合联调和回归验证的入口
 - `demo` profile 适合验证 Binance Demo 真下单与查询链路

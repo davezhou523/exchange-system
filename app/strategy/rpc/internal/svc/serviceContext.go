@@ -59,7 +59,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 			groupID = "strategy-kline"
 		}
 	}
-	marketConsumer, err := kafka.NewConsumer(c.Kafka.Addrs, groupID, c.Kafka.Topics.Kline, c.KlineLogDir)
+	marketConsumer, err := kafka.NewConsumer(c.Kafka.Addrs, groupID, c.Kafka.Topics.Kline, c.KlineLogDir, c.Kafka.InitialOffset)
 	if err != nil {
 		if harvestPathProducer != nil {
 			_ = harvestPathProducer.Close()
@@ -71,7 +71,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	var depthConsumer *kafka.Consumer
 	if c.Kafka.Topics.Depth != "" {
 		depthGroupID := groupID + "-depth"
-		depthConsumer, err = kafka.NewConsumer(c.Kafka.Addrs, depthGroupID, c.Kafka.Topics.Depth, "")
+		depthConsumer, err = kafka.NewConsumer(c.Kafka.Addrs, depthGroupID, c.Kafka.Topics.Depth, "", c.Kafka.InitialOffset)
 		if err != nil {
 			_ = marketConsumer.Close()
 			if harvestPathProducer != nil {

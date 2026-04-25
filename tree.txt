@@ -63,7 +63,8 @@
 │   └── strategy
 │       └── rpc
 │           ├── etc
-│           │   └── strategy.yaml
+│           │   ├── strategy.demo.yaml
+│           │   └── strategy.prod.yaml
 │           ├── internal
 │           │   ├── config
 │           │   │   └── config.go

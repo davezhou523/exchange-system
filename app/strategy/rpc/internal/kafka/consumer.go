@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,16 +29,22 @@ type Consumer struct {
 type MarketDataHandler func(kline *market.Kline) error
 type DepthHandler func(depth *market.Depth) error
 
-func NewConsumer(brokers []string, groupID string, topic string, klineLogDir string) (*Consumer, error) {
+func NewConsumer(brokers []string, groupID string, topic string, klineLogDir string, initialOffset string) (*Consumer, error) {
 	if groupID == "" {
 		groupID = fmt.Sprintf("cg-%s", topic)
 	}
 	config := commonkafka.NewConsumerGroupConfig()
+	offset, err := parseInitialOffset(initialOffset)
+	if err != nil {
+		return nil, err
+	}
+	config.Consumer.Offsets.Initial = offset
 
 	group, err := sarama.NewConsumerGroup(brokers, groupID, config)
 	if err != nil {
 		return nil, err
 	}
+	log.Printf("kafka consumer init group=%s topic=%s initial_offset=%s", groupID, topic, normalizeInitialOffset(initialOffset))
 
 	return &Consumer{
 		group:        group,
@@ -46,6 +53,28 @@ func NewConsumer(brokers []string, groupID string, topic string, klineLogDir str
 		klineLogDir:  klineLogDir,
 		klineLogDate: make(map[string]*os.File),
 	}, nil
+}
+
+func parseInitialOffset(initialOffset string) (int64, error) {
+	switch normalizeInitialOffset(initialOffset) {
+	case "oldest":
+		return sarama.OffsetOldest, nil
+	case "newest":
+		return sarama.OffsetNewest, nil
+	default:
+		return 0, fmt.Errorf("invalid kafka initial offset %q, want oldest|newest", initialOffset)
+	}
+}
+
+func normalizeInitialOffset(initialOffset string) string {
+	switch initialOffset {
+	case "", "newest":
+		return "newest"
+	case "oldest":
+		return "oldest"
+	default:
+		return initialOffset
+	}
 }
 
 func (c *Consumer) StartConsuming(ctx context.Context, handler MarketDataHandler) error {
@@ -190,21 +219,25 @@ func (h *marketKlineGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSessi
 
 		openTime := time.UnixMilli(k.OpenTime).Format("15:04:05")
 		closeTime := time.UnixMilli(k.CloseTime).Format("15:04:05")
+		eventTime := time.UnixMilli(k.EventTime).Format("15:04:05.000")
 
 		// 聚合K线（非1m）打印指标值，便于验证指标是否正确传递
 		indicatorStr := ""
 		if k.Interval != "1m" && (k.Ema21 != 0 || k.Ema55 != 0 || k.Rsi != 0) {
-			indicatorStr = fmt.Sprintf(" EMA21=%.2f EMA55=%.2f RSI=%.2f ATR=%.2f final=%v", k.Ema21, k.Ema55, k.Rsi, k.Atr, k.IsFinal)
+			indicatorStr = fmt.Sprintf(" EMA21=%.2f EMA55=%.2f RSI=%.2f ATR=%.2f", k.Ema21, k.Ema55, k.Rsi, k.Atr)
 		}
-		log.Printf("[kafka consume] %s %s | %s-%s | O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f closed=%v%s | partition=%d offset=%d key=%q",
-			k.Interval, k.Symbol, openTime, closeTime, k.Open, k.High, k.Low, k.Close, k.Volume, k.IsClosed, indicatorStr,
+		stateReason := buildKlineStateReason(&k)
+		log.Printf("[kafka consume] symbol=%s interval=%s openTime=%s closeTime=%s eventTime=%s isClosed=%v | open=%.2f high=%.2f low=%.2f close=%.2f | volume=%.4f quoteVolume=%.4f takerBuyVolume=%.4f takerBuyQuote=%.4f firstTradeId=%d lastTradeId=%d numTrades=%d | isDirty=%v dirtyReason=%s isTradable=%v isFinal=%v%s | partition=%d offset=%d key=%q",
+			k.Symbol, k.Interval, openTime, closeTime, eventTime, k.IsClosed,
+			k.Open, k.High, k.Low, k.Close,
+			k.Volume, k.QuoteVolume, k.TakerBuyVolume, k.TakerBuyQuote, k.FirstTradeId, k.LastTradeId, k.NumTrades,
+			k.IsDirty, stateReason, k.IsTradable, k.IsFinal, indicatorStr,
 			msg.Partition, msg.Offset, key)
 
-		// Only persist the finalized/tradable version of a closed kline.
-		// Some intervals (especially 1m) may emit a raw closed event first and a finalized
-		// indicator-enriched event later. Logging only final avoids duplicate rows for the
-		// same openTime in JSONL.
-		if k.IsClosed && k.IsFinal && (k.Interval == "1m" || k.Interval == "3m" || k.Interval == "5m" || k.Interval == "15m" || k.Interval == "1h" || k.Interval == "4h") {
+		// Short intervals may emit a raw closed event first and a finalized indicator-enriched
+		// event later, so keep final-only logging there to avoid duplicate rows. For 1h/4h we
+		// also persist non-final rows because they are useful for replay/debugging multi-TF flow.
+		if shouldPersistKlineLog(&k) {
 			h.consumer.writeKlineLog(&k)
 		}
 		if err := h.handler(&k); err != nil {
@@ -250,30 +283,35 @@ func (c *Consumer) Close() error {
 // klineLogEntry mirrors the protobuf field order for deterministic JSON output.
 // Must be consistent with market service's klineLogEntry.
 type klineLogEntry struct {
-	Symbol         string  `json:"symbol"`
-	Interval       string  `json:"interval"`
-	OpenTime       string  `json:"openTime"`
-	Open           float64 `json:"open"`
-	High           float64 `json:"high"`
-	Low            float64 `json:"low"`
-	Close          float64 `json:"close"`
+	Symbol    string `json:"symbol"`
+	Interval  string `json:"interval"`
+	OpenTime  string `json:"openTime"`
+	CloseTime string `json:"closeTime"`
+	EventTime string `json:"eventTime"`
+	IsClosed  bool   `json:"isClosed"`
+
+	Open  float64 `json:"open"`
+	High  float64 `json:"high"`
+	Low   float64 `json:"low"`
+	Close float64 `json:"close"`
+
 	Volume         float64 `json:"volume"`
-	CloseTime      string  `json:"closeTime"`
-	IsClosed       bool    `json:"isClosed"`
-	EventTime      string  `json:"eventTime"`
-	FirstTradeId   int64   `json:"firstTradeId"`
-	LastTradeId    int64   `json:"lastTradeId"`
-	NumTrades      int32   `json:"numTrades"`
 	QuoteVolume    float64 `json:"quoteVolume"`
 	TakerBuyVolume float64 `json:"takerBuyVolume"`
 	TakerBuyQuote  float64 `json:"takerBuyQuote"`
-	IsDirty        bool    `json:"isDirty"`
-	IsTradable     bool    `json:"isTradable"`
-	IsFinal        bool    `json:"isFinal"`
-	Ema21          float64 `json:"ema21"`
-	Ema55          float64 `json:"ema55"`
-	Rsi            float64 `json:"rsi"`
-	Atr            float64 `json:"atr"`
+	FirstTradeId   int64   `json:"firstTradeId"`
+	LastTradeId    int64   `json:"lastTradeId"`
+	NumTrades      int32   `json:"numTrades"`
+
+	IsDirty     bool   `json:"isDirty"`
+	DirtyReason string `json:"dirtyReason"`
+	IsTradable  bool   `json:"isTradable"`
+	IsFinal     bool   `json:"isFinal"`
+
+	Ema21 float64 `json:"ema21"`
+	Ema55 float64 `json:"ema55"`
+	Rsi   float64 `json:"rsi"`
+	Atr   float64 `json:"atr"`
 }
 
 // formatFloat formats a float64 to 2 decimal places.
@@ -281,8 +319,52 @@ func formatFloat(f float64) float64 {
 	return float64(int64(f*100+0.5)) / 100
 }
 
-// writeKlineLog appends a closed aggregated kline (15m/1h/4h) as JSON line to a daily log file.
+func shouldPersistKlineLog(k *market.Kline) bool {
+	if k == nil || !k.IsClosed {
+		return false
+	}
+	switch k.Interval {
+	case "1m", "3m", "5m", "15m":
+		return k.IsFinal
+	case "1h", "4h":
+		return true
+	default:
+		return false
+	}
+}
+
+func buildKlineStateReason(k *market.Kline) string {
+	if k == nil {
+		return "unknown"
+	}
+
+	reasons := make([]string, 0, 3)
+	if k.IsDirty {
+		if strings.TrimSpace(k.GetDirtyReason()) != "" {
+			reasons = append(reasons, strings.TrimSpace(k.GetDirtyReason()))
+		} else {
+			reasons = append(reasons, "gap_or_incomplete")
+		}
+	}
+	if k.Interval != "1m" && (k.Ema21 == 0 || k.Ema55 == 0 || k.Rsi == 0 || k.Atr == 0) {
+		reasons = append(reasons, "indicators_not_ready")
+	}
+	if len(reasons) == 0 {
+		if k.IsFinal && k.IsTradable {
+			return "final_tradable"
+		}
+		if !k.IsFinal {
+			return "pending_finalization"
+		}
+		return "closed_only"
+	}
+	return strings.Join(reasons, "+")
+}
+
+// writeKlineLog appends a consumed closed kline as JSON line to a daily log file.
 // Format: data/kline/ETHUSDT/15m/2026-04-11.jsonl
+// Note: 1h/4h may include non-final rows for replay/debugging, so downstream analysis must
+// inspect isFinal/isTradable/isDirty instead of assuming every row is directly tradable.
 func (c *Consumer) writeKlineLog(k *market.Kline) {
 	if c.klineLogDir == "" {
 		return
@@ -329,6 +411,7 @@ func (c *Consumer) writeKlineLog(k *market.Kline) {
 		c.klineLogDate[key] = f
 	}
 
+	stateReason := buildKlineStateReason(k)
 	entry := klineLogEntry{
 		Symbol:         k.Symbol,
 		Interval:       k.Interval,
@@ -348,6 +431,7 @@ func (c *Consumer) writeKlineLog(k *market.Kline) {
 		TakerBuyVolume: k.TakerBuyVolume,
 		TakerBuyQuote:  k.TakerBuyQuote,
 		IsDirty:        k.IsDirty,
+		DirtyReason:    stateReason,
 		IsTradable:     k.IsTradable,
 		IsFinal:        k.IsFinal,
 		Ema21:          k.Ema21,

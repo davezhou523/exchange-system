@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,18 +39,22 @@ import (
 
 // klineSnapshot 保存一根K线的关键数据（用于结构突破分析和EMA趋势判断）
 type klineSnapshot struct {
-	OpenTime int64
-	Open     float64
-	High     float64
-	Low      float64
-	Close    float64
-	Volume   float64
-	QuoteVol float64
-	TakerBuy float64
-	Ema21    float64
-	Ema55    float64
-	Rsi      float64
-	Atr      float64
+	OpenTime    int64
+	Open        float64
+	High        float64
+	Low         float64
+	Close       float64
+	Volume      float64
+	QuoteVol    float64
+	TakerBuy    float64
+	IsDirty     bool
+	IsTradable  bool
+	IsFinal     bool
+	DirtyReason string
+	Ema21       float64
+	Ema55       float64
+	Rsi         float64
+	Atr         float64
 }
 
 // positionSide 持仓方向
@@ -300,18 +305,22 @@ func (s *TrendFollowingStrategy) OnKline(ctx context.Context, k *marketpb.Kline)
 
 	// 保存K线快照到对应周期历史
 	snap := klineSnapshot{
-		OpenTime: k.OpenTime,
-		Open:     k.Open,
-		High:     k.High,
-		Low:      k.Low,
-		Close:    k.Close,
-		Volume:   k.Volume,
-		QuoteVol: k.QuoteVolume,
-		TakerBuy: k.TakerBuyVolume,
-		Ema21:    k.Ema21,
-		Ema55:    k.Ema55,
-		Rsi:      k.Rsi,
-		Atr:      k.Atr,
+		OpenTime:    k.OpenTime,
+		Open:        k.Open,
+		High:        k.High,
+		Low:         k.Low,
+		Close:       k.Close,
+		Volume:      k.Volume,
+		QuoteVol:    k.QuoteVolume,
+		TakerBuy:    k.TakerBuyVolume,
+		IsDirty:     k.IsDirty,
+		IsTradable:  k.IsTradable,
+		IsFinal:     k.IsFinal,
+		DirtyReason: k.GetDirtyReason(),
+		Ema21:       k.Ema21,
+		Ema55:       k.Ema55,
+		Rsi:         k.Rsi,
+		Atr:         k.Atr,
 	}
 
 	switch k.Interval {
@@ -500,9 +509,22 @@ const (
 //   - EMA趋势：EMA21持续下降（避免反转）
 //   - RSI过滤：RSI ∈ [40, 58]（合理空头区间）
 func (s *TrendFollowingStrategy) judge1HPullback(trend trendDirection) pullbackResult {
+	pullback, _ := s.evaluate1HPullback(trend)
+	return pullback
+}
+
+func (s *TrendFollowingStrategy) evaluate1HPullback(trend trendDirection) (pullbackResult, map[string]interface{}) {
 	h1 := s.latest1h
+	extras := map[string]interface{}{
+		"trend": stringTrend(trend),
+	}
+	appendSnapshotExtras(extras, "h1", h1)
 	if h1.Ema21 == 0 || h1.Ema55 == 0 || h1.Rsi == 0 {
-		return pullbackNone
+		extras["price_in_range"] = false
+		extras["rsi_ok"] = false
+		extras["structure_ok"] = false
+		extras["ema_trend_ok"] = false
+		return pullbackNone, extras
 	}
 
 	rsiLongLow := s.getParam(paramH1RsiLongLow, 42)
@@ -512,14 +534,17 @@ func (s *TrendFollowingStrategy) judge1HPullback(trend trendDirection) pullbackR
 
 	// 检查 EMA21 是否持续上升/下降（需要至少2根K线）
 	emaTrendOk := true
+	prevEma21 := 0.0
 	if len(s.klines1h) >= 2 {
-		prevEma21 := s.klines1h[len(s.klines1h)-2].Ema21
+		prevEma21 = s.klines1h[len(s.klines1h)-2].Ema21
 		if trend == trendLong {
 			emaTrendOk = h1.Ema21 > prevEma21 // EMA21 持续上升
 		} else if trend == trendShort {
 			emaTrendOk = h1.Ema21 < prevEma21 // EMA21 持续下降
 		}
 	}
+	extras["ema_trend_ok"] = emaTrendOk
+	extras["prev_h1_ema21"] = prevEma21
 
 	if trend == trendLong {
 		// 多头回调：EMA21 > 价格 > EMA55
@@ -528,13 +553,20 @@ func (s *TrendFollowingStrategy) judge1HPullback(trend trendDirection) pullbackR
 
 		// 结构完整：价格 > 前低点
 		structureOk := true
+		prevLow := 0.0
 		if len(s.klines1h) >= 2 {
-			prevLow := s.klines1h[len(s.klines1h)-2].Low
+			prevLow = s.klines1h[len(s.klines1h)-2].Low
 			structureOk = h1.Close > prevLow
 		}
+		extras["price_in_range"] = priceInRange
+		extras["rsi_ok"] = rsiOk
+		extras["structure_ok"] = structureOk
+		extras["h1_rsi_low"] = rsiLongLow
+		extras["h1_rsi_high"] = rsiLongHigh
+		extras["prev_h1_low"] = prevLow
 
 		if priceInRange && rsiOk && structureOk && emaTrendOk {
-			return pullbackLong
+			return pullbackLong, extras
 		}
 	} else if trend == trendShort {
 		// 空头回调：EMA21 < 价格 < EMA55
@@ -543,17 +575,40 @@ func (s *TrendFollowingStrategy) judge1HPullback(trend trendDirection) pullbackR
 
 		// 结构完整：价格 < 前高点
 		structureOk := true
+		prevHigh := 0.0
 		if len(s.klines1h) >= 2 {
-			prevHigh := s.klines1h[len(s.klines1h)-2].High
+			prevHigh = s.klines1h[len(s.klines1h)-2].High
 			structureOk = h1.Close < prevHigh
 		}
+		extras["price_in_range"] = priceInRange
+		extras["rsi_ok"] = rsiOk
+		extras["structure_ok"] = structureOk
+		extras["h1_rsi_low"] = rsiShortLow
+		extras["h1_rsi_high"] = rsiShortHigh
+		extras["prev_h1_high"] = prevHigh
 
 		if priceInRange && rsiOk && structureOk && emaTrendOk {
-			return pullbackShort
+			return pullbackShort, extras
 		}
 	}
 
-	return pullbackNone
+	return pullbackNone, extras
+}
+
+func appendSnapshotExtras(extras map[string]interface{}, prefix string, snap klineSnapshot) {
+	if extras == nil || prefix == "" {
+		return
+	}
+	extras[prefix+"_open_time"] = snap.OpenTime
+	extras[prefix+"_close"] = snap.Close
+	extras[prefix+"_ema21"] = snap.Ema21
+	extras[prefix+"_ema55"] = snap.Ema55
+	extras[prefix+"_rsi"] = snap.Rsi
+	extras[prefix+"_atr"] = snap.Atr
+	extras[prefix+"_is_dirty"] = snap.IsDirty
+	extras[prefix+"_is_tradable"] = snap.IsTradable
+	extras[prefix+"_is_final"] = snap.IsFinal
+	extras[prefix+"_dirty_reason"] = snap.DirtyReason
 }
 
 // isDeepPullback 判断是否为深回调
@@ -733,11 +788,13 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 			}
 		}
 		if s.shouldBlockForHarvestPathRisk(ctx, k, entry) {
-			s.writeDecisionLogIfEnabled("entry", "skip", "harvest_path_block", k, map[string]interface{}{
+			extras := map[string]interface{}{
 				"trend":    stringTrend(trend),
 				"pullback": stringPullback(pullback),
 				"entry":    stringEntry(entry),
-			})
+			}
+			appendSnapshotExtras(extras, "m15", m15)
+			s.writeDecisionLogIfEnabled("entry", "skip", "harvest_path_block", k, extras)
 			return nil
 		}
 
@@ -751,16 +808,24 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 	if s.latest4h.Ema21 == 0 || s.latest4h.Ema55 == 0 {
 		log.Printf("[策略] %s 4H指标未就绪（等待4H闭K线），跳过入场", s.symbol)
 		s.writeDecisionLogIfEnabled("entry", "skip", "h4_not_ready", k, map[string]interface{}{
-			"h4_ema21": s.latest4h.Ema21,
-			"h4_ema55": s.latest4h.Ema55,
+			"h4_ema21":        s.latest4h.Ema21,
+			"h4_ema55":        s.latest4h.Ema55,
+			"h4_is_dirty":     s.latest4h.IsDirty,
+			"h4_is_tradable":  s.latest4h.IsTradable,
+			"h4_is_final":     s.latest4h.IsFinal,
+			"h4_dirty_reason": s.latest4h.DirtyReason,
 		})
 		return nil
 	}
 	if s.latest1h.Ema21 == 0 || s.latest1h.Ema55 == 0 {
 		log.Printf("[策略] %s 1H指标未就绪（等待1H闭K线），跳过入场", s.symbol)
 		s.writeDecisionLogIfEnabled("entry", "skip", "h1_not_ready", k, map[string]interface{}{
-			"h1_ema21": s.latest1h.Ema21,
-			"h1_ema55": s.latest1h.Ema55,
+			"h1_ema21":        s.latest1h.Ema21,
+			"h1_ema55":        s.latest1h.Ema55,
+			"h1_is_dirty":     s.latest1h.IsDirty,
+			"h1_is_tradable":  s.latest1h.IsTradable,
+			"h1_is_final":     s.latest1h.IsFinal,
+			"h1_dirty_reason": s.latest1h.DirtyReason,
 		})
 		return nil
 	}
@@ -769,26 +834,18 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 	if trend == trendNone {
 		log.Printf("[策略] %s 4H震荡/无趋势 | EMA21=%.2f EMA55=%.2f 价格=%.2f",
 			s.symbol, s.latest4h.Ema21, s.latest4h.Ema55, s.latest4h.Close)
-		s.writeDecisionLogIfEnabled("entry", "skip", "h4_no_trend", k, map[string]interface{}{
-			"h4_ema21": s.latest4h.Ema21,
-			"h4_ema55": s.latest4h.Ema55,
-			"h4_close": s.latest4h.Close,
-		})
+		extras := map[string]interface{}{}
+		appendSnapshotExtras(extras, "h4", s.latest4h)
+		s.writeDecisionLogIfEnabled("entry", "skip", "h4_no_trend", k, extras)
 		return nil
 	}
 
 	// 第2层：1H回调确认
-	pullback := s.judge1HPullback(trend)
+	pullback, pullbackExtras := s.evaluate1HPullback(trend)
 	if pullback == pullbackNone {
 		log.Printf("[策略] %s 1H无回调 | trend=%v EMA21=%.2f EMA55=%.2f 价格=%.2f RSI=%.2f",
 			s.symbol, trend, s.latest1h.Ema21, s.latest1h.Ema55, s.latest1h.Close, s.latest1h.Rsi)
-		s.writeDecisionLogIfEnabled("entry", "skip", "h1_no_pullback", k, map[string]interface{}{
-			"trend":    stringTrend(trend),
-			"h1_ema21": s.latest1h.Ema21,
-			"h1_ema55": s.latest1h.Ema55,
-			"h1_close": s.latest1h.Close,
-			"h1_rsi":   s.latest1h.Rsi,
-		})
+		s.writeDecisionLogIfEnabled("entry", "skip", "h1_no_pullback", k, pullbackExtras)
 		return nil
 	}
 
@@ -797,20 +854,24 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 	if entry == entryNone {
 		log.Printf("[策略] %s 15M无入场 | pullback=%v RSI=%.2f ATR=%.2f",
 			s.symbol, pullback, s.latest15m.Rsi, s.latest15m.Atr)
-		s.writeDecisionLogIfEnabled("entry", "skip", "m15_no_entry", k, map[string]interface{}{
+		extras := map[string]interface{}{
 			"trend":    stringTrend(trend),
 			"pullback": stringPullback(pullback),
-			"m15_rsi":  s.latest15m.Rsi,
-			"m15_atr":  s.latest15m.Atr,
-		})
+		}
+		appendSnapshotExtras(extras, "m15", s.latest15m)
+		s.writeDecisionLogIfEnabled("entry", "skip", "m15_no_entry", k, extras)
 		return nil
 	}
 	if s.shouldBlockForHarvestPathRisk(ctx, k, entry) {
-		s.writeDecisionLogIfEnabled("entry", "skip", "harvest_path_block", k, map[string]interface{}{
+		extras := map[string]interface{}{
 			"trend":    stringTrend(trend),
 			"pullback": stringPullback(pullback),
 			"entry":    stringEntry(entry),
-		})
+		}
+		appendSnapshotExtras(extras, "h4", s.latest4h)
+		appendSnapshotExtras(extras, "h1", s.latest1h)
+		appendSnapshotExtras(extras, "m15", s.latest15m)
+		s.writeDecisionLogIfEnabled("entry", "skip", "harvest_path_block", k, extras)
 		return nil
 	}
 
@@ -913,20 +974,17 @@ func (s *TrendFollowingStrategy) openPosition(ctx context.Context, k *marketpb.K
 	log.Printf("[策略入场] %s %s | 价格=%.2f | 止损=%.2f | TP1=%.2f | TP2=%.2f | %s",
 		s.symbol, action, m15.Close, stopLoss, tp1, tp2, reason)
 
-	s.writeDecisionLogIfEnabled("entry", "signal", "open_signal_sent", k, map[string]interface{}{
+	extras := map[string]interface{}{
 		"action":       action,
 		"side":         side,
 		"entry_price":  m15.Close,
 		"stop_loss":    stopLoss,
 		"take_profits": []float64{tp1, tp2},
-		"h4_ema21":     s.latest4h.Ema21,
-		"h4_ema55":     s.latest4h.Ema55,
-		"h1_ema21":     s.latest1h.Ema21,
-		"h1_ema55":     s.latest1h.Ema55,
-		"h1_rsi":       s.latest1h.Rsi,
-		"m15_rsi":      m15.Rsi,
-		"m15_atr":      m15.Atr,
-	})
+	}
+	appendSnapshotExtras(extras, "h4", s.latest4h)
+	appendSnapshotExtras(extras, "h1", s.latest1h)
+	appendSnapshotExtras(extras, "m15", m15)
+	s.writeDecisionLogIfEnabled("entry", "signal", "open_signal_sent", k, extras)
 	return s.sendSignal(ctx, signal, k)
 }
 
@@ -1472,12 +1530,194 @@ type decisionLogEntry struct {
 	Stage       string                 `json:"stage"`    // entry / exit
 	Decision    string                 `json:"decision"` // skip / pass / signal
 	Reason      string                 `json:"reason"`
+	ReasonCode  string                 `json:"reason_code"`
 	HasPosition bool                   `json:"has_position"`
 	IsFinal     bool                   `json:"is_final"`
 	IsTradable  bool                   `json:"is_tradable"`
-	OpenTime    int64                  `json:"open_time"`
-	CloseTime   int64                  `json:"close_time"`
-	Extras      map[string]interface{} `json:"extras,omitempty"`
+	OpenTime    string                 `json:"open_time"`
+	CloseTime   string                 `json:"close_time"`
+	OpenTimeMs  int64                  `json:"open_time_ms"`
+	CloseTimeMs int64                  `json:"close_time_ms"`
+	Extras      *orderedDecisionExtras `json:"extras,omitempty"`
+}
+
+type orderedDecisionExtras struct {
+	values map[string]interface{}
+}
+
+func newOrderedDecisionExtras(extras map[string]interface{}) *orderedDecisionExtras {
+	if len(extras) == 0 {
+		return nil
+	}
+	cloned := make(map[string]interface{}, len(extras)+1)
+	for k, v := range extras {
+		cloned[k] = v
+	}
+	if summary := buildDecisionExtrasSummary(cloned); summary != "" {
+		cloned["summary"] = summary
+	}
+	return &orderedDecisionExtras{values: cloned}
+}
+
+func (o *orderedDecisionExtras) MarshalJSON() ([]byte, error) {
+	if o == nil || len(o.values) == 0 {
+		return []byte("null"), nil
+	}
+
+	orderedKeys := orderedDecisionExtraKeys(o.values)
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	for i, key := range orderedKeys {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		keyJSON, err := json.Marshal(key)
+		if err != nil {
+			return nil, err
+		}
+		valJSON, err := json.Marshal(o.values[key])
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(keyJSON)
+		buf.WriteByte(':')
+		buf.Write(valJSON)
+	}
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
+}
+
+func (o *orderedDecisionExtras) Summary() string {
+	if o == nil || len(o.values) == 0 {
+		return ""
+	}
+	return stringFromExtras(o.values["summary"])
+}
+
+func orderedDecisionExtraKeys(values map[string]interface{}) []string {
+	priority := []string{
+		"summary",
+		"action", "side", "entry_price", "stop_loss", "take_profits",
+		"trend", "pullback", "entry",
+		"price_in_range", "rsi_ok", "structure_ok", "ema_trend_ok",
+		"h1_rsi_low", "h1_rsi_high", "prev_h1_ema21", "prev_h1_low", "prev_h1_high",
+	}
+	for _, prefix := range []string{"h4", "h1", "m15"} {
+		priority = append(priority,
+			prefix+"_open_time",
+			prefix+"_close",
+			prefix+"_ema21",
+			prefix+"_ema55",
+			prefix+"_rsi",
+			prefix+"_atr",
+			prefix+"_is_dirty",
+			prefix+"_dirty_reason",
+			prefix+"_is_tradable",
+			prefix+"_is_final",
+		)
+	}
+
+	seen := make(map[string]struct{}, len(values))
+	keys := make([]string, 0, len(values))
+	for _, key := range priority {
+		if _, ok := values[key]; ok {
+			keys = append(keys, key)
+			seen[key] = struct{}{}
+		}
+	}
+
+	rest := make([]string, 0, len(values)-len(keys))
+	for key := range values {
+		if _, ok := seen[key]; !ok {
+			rest = append(rest, key)
+		}
+	}
+	sort.Strings(rest)
+	return append(keys, rest...)
+}
+
+func buildDecisionExtrasSummary(values map[string]interface{}) string {
+	if len(values) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	for _, prefix := range []string{"h4", "h1", "m15"} {
+		if part := buildTimeframeSummary(prefix, values); part != "" {
+			parts = append(parts, part)
+		}
+	}
+	return strings.Join(parts, " -> ")
+}
+
+func buildTimeframeSummary(prefix string, values map[string]interface{}) string {
+	openTimeKey := prefix + "_open_time"
+	isDirtyKey := prefix + "_is_dirty"
+	isTradableKey := prefix + "_is_tradable"
+	isFinalKey := prefix + "_is_final"
+	dirtyReasonKey := prefix + "_dirty_reason"
+
+	_, hasOpenTime := values[openTimeKey]
+	_, hasDirty := values[isDirtyKey]
+	_, hasTradable := values[isTradableKey]
+	_, hasFinal := values[isFinalKey]
+	_, hasReason := values[dirtyReasonKey]
+	if !hasOpenTime && !hasDirty && !hasTradable && !hasFinal && !hasReason {
+		return ""
+	}
+
+	isDirty := boolFromExtras(values[isDirtyKey])
+	isTradable := boolFromExtras(values[isTradableKey])
+	isFinal := boolFromExtras(values[isFinalKey])
+	dirtyReason := strings.TrimSpace(stringFromExtras(values[dirtyReasonKey]))
+
+	status := "unknown"
+	switch {
+	case isDirty:
+		status = "dirty"
+	case isFinal && isTradable:
+		status = "final"
+	case isFinal && !isTradable:
+		status = "final_not_tradable"
+	case !isFinal && isTradable:
+		status = "pending_finalization"
+	case !isFinal && !isTradable:
+		status = "blocked"
+	}
+
+	if dirtyReason != "" && dirtyReason != "clean" {
+		return fmt.Sprintf("%s=%s(%s)", prefix, status, dirtyReason)
+	}
+	return fmt.Sprintf("%s=%s", prefix, status)
+}
+
+func boolFromExtras(v interface{}) bool {
+	b, ok := v.(bool)
+	return ok && b
+}
+
+func stringFromExtras(v interface{}) string {
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return s
+}
+
+func decisionLogLevel(decision, reason string) string {
+	switch reason {
+	case "risk_limits_block", "harvest_path_block":
+		return "BLOCK"
+	}
+	switch decision {
+	case "signal":
+		return "SIGNAL"
+	case "pass":
+		return "PASS"
+	case "skip":
+		return "SKIP"
+	default:
+		return "INFO"
+	}
 }
 
 func (s *TrendFollowingStrategy) writeDecisionLogIfEnabled(stage, decision, reason string, k *marketpb.Kline, extras map[string]interface{}) {
@@ -1515,19 +1755,34 @@ func (s *TrendFollowingStrategy) writeDecisionLogIfEnabled(stage, decision, reas
 		s.decisionLogFiles[key] = f
 	}
 
+	orderedExtras := newOrderedDecisionExtras(extras)
 	entry := decisionLogEntry{
 		Timestamp:   now.Format("2006-01-02T15:04:05.000Z"),
 		Symbol:      s.symbol,
 		Interval:    k.Interval,
 		Stage:       stage,
 		Decision:    decision,
-		Reason:      reason,
+		Reason:      translateDecisionReason(reason),
+		ReasonCode:  reason,
 		HasPosition: s.pos.side != sideNone,
 		IsFinal:     k.IsFinal,
 		IsTradable:  k.IsTradable,
-		OpenTime:    k.OpenTime,
-		CloseTime:   k.CloseTime,
-		Extras:      extras,
+		OpenTime:    time.UnixMilli(k.OpenTime).UTC().Format("2006-01-02T15:04:05.000Z"),
+		CloseTime:   time.UnixMilli(k.CloseTime).UTC().Format("2006-01-02T15:04:05.000Z"),
+		OpenTimeMs:  k.OpenTime,
+		CloseTimeMs: k.CloseTime,
+		Extras:      orderedExtras,
+	}
+	summary := orderedExtras.Summary()
+	openTimeStr := time.UnixMilli(k.OpenTime).UTC().Format("15:04:05")
+	closeTimeStr := time.UnixMilli(k.CloseTime).UTC().Format("15:04:05")
+	level := decisionLogLevel(decision, reason)
+	if summary != "" {
+		log.Printf("[decision][%s] symbol=%s interval=%s openTime=%s closeTime=%s stage=%s decision=%s reason=%s summary=%s",
+			level, s.symbol, k.Interval, openTimeStr, closeTimeStr, stage, decision, reason, summary)
+	} else {
+		log.Printf("[decision][%s] symbol=%s interval=%s openTime=%s closeTime=%s stage=%s decision=%s reason=%s",
+			level, s.symbol, k.Interval, openTimeStr, closeTimeStr, stage, decision, reason)
 	}
 
 	var buf bytes.Buffer
@@ -1539,6 +1794,31 @@ func (s *TrendFollowingStrategy) writeDecisionLogIfEnabled(stage, decision, reas
 	}
 	if _, err := f.Write(buf.Bytes()); err != nil {
 		log.Printf("[decision-log] write failed: %v", err)
+	}
+}
+
+func translateDecisionReason(reason string) string {
+	switch reason {
+	case "risk_limits_block":
+		return "风控限制阻止开仓"
+	case "m15_not_ready_atr_0":
+		return "15分钟指标未就绪，ATR为0"
+	case "harvest_path_block":
+		return "Harvest Path 风险过滤阻止开仓"
+	case "h4_not_ready":
+		return "4小时指标未就绪"
+	case "h1_not_ready":
+		return "1小时指标未就绪"
+	case "h4_no_trend":
+		return "4小时没有明确趋势"
+	case "h1_no_pullback":
+		return "1小时没有满足回调条件"
+	case "m15_no_entry":
+		return "15分钟没有满足入场条件"
+	case "open_signal_sent":
+		return "已发送开仓信号"
+	default:
+		return reason
 	}
 }
 

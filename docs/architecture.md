@@ -37,7 +37,8 @@
 │                                                                                                  │
 │  ┌────────────────────┐  ┌────────────────────┐  ┌────────────────────┐  ┌────────────────────┐ │
 │  │  Market Service    │  │  Strategy Service  │  │  Execution Service │  │   Order Service    │ │
-│  │  (market.yaml)     │  │  (strategy.yaml)   │  │  (execution.yaml)  │  │  (order.yaml)      │ │
+│  │  (market.yaml)     │  │ (strategy.demo/    │  │  (execution.yaml)  │  │  (order.yaml)      │ │
+│  │                    │  │  strategy.prod)    │  │                    │  │                    │ │
 │  │                    │  │                    │  │                    │  │                    │ │
 │  │ • WebSocket Client │  │ • Trend Following  │  │ • Exchange Router  │  │ • Order Query      │ │
 │  │ • Kline Aggregator │  │ • HarvestPath LSTM │  │ • Risk Manager     │  │ • Position Query   │ │
@@ -351,7 +352,7 @@
 |---------|---------|---------|---------|
 | **API Gateway** | gateway.yaml | HTTP REST | 路由分发、请求聚合、认证鉴权 |
 | **Market Service** | market.yaml | gRPC | 行情数据聚合、技术指标计算、WebSocket客户端 |
-| **Strategy Service** | strategy.yaml | gRPC | 策略引擎、信号生成、风控管理 |
+| **Strategy Service** | strategy.demo.yaml / strategy.prod.yaml | gRPC | 策略引擎、信号生成、风控管理 |
 | **Execution Service** | execution.yaml | gRPC | 订单执行、交易所路由、仓位管理 |
 | **Order Service** | order.yaml | gRPC | 订单查询、历史记录、收益统计 |
 
@@ -646,7 +647,7 @@ IndicatorParams:
 ### 7.2 Strategy Service 配置
 
 ```yaml
-# strategy.yaml
+# strategy.demo.yaml / strategy.prod.yaml
 Name: strategy.rpc
 ListenOn: 0.0.0.0:8082
 Etcd:

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,11 +26,13 @@ import (
 )
 
 var (
-	configFile  = flag.String("f", "etc/strategy.demo.yaml", "the config file")
-	mockKafka   = flag.Bool("mock-kafka", false, "mock kafka consume test")
-	mockCount   = flag.Int("mock-count", 200, "mock kafka consumer receive count (0 means forever)")
-	mockTimeout = flag.Duration("mock-timeout", 20*time.Second, "mock kafka consumer timeout (0 means no-timeout)")
-	mockOffset  = flag.String("mock-offset", "oldest", "mock kafka consume offset: oldest|newest")
+	configFile        = flag.String("f", "etc/strategy.demo.yaml", "the config file")
+	mockKafka         = flag.Bool("mock-kafka", false, "mock kafka consume test")
+	mockCount         = flag.Int("mock-count", 200, "mock kafka consumer receive count (0 means forever)")
+	mockTimeout       = flag.Duration("mock-timeout", 20*time.Second, "mock kafka consumer timeout (0 means no-timeout)")
+	mockOffset        = flag.String("mock-offset", "oldest", "mock kafka consume offset: oldest|newest")
+	replayOnce        = flag.Bool("replay-once", false, "append a timestamp suffix to Kafka.Group for one-time replay from oldest")
+	replayGroupSuffix = flag.String("replay-group-suffix", "", "append a custom suffix to Kafka.Group, e.g. replay-20260425-0625")
 )
 
 func main() {
@@ -37,6 +40,16 @@ func main() {
 
 	var c config.Config
 	conf.MustLoad(*configFile, &c)
+	if *replayGroupSuffix != "" {
+		c.Kafka.Group = appendKafkaGroupSuffix(resolveKafkaGroupBase(c), *replayGroupSuffix)
+	}
+	if *replayOnce {
+		ts := time.Now().UTC().Format("20060102-150405")
+		c.Kafka.Group = appendKafkaGroupSuffix(resolveKafkaGroupBase(c), "replay-"+ts)
+	}
+	if *replayGroupSuffix != "" || *replayOnce {
+		log.Printf("strategy kafka group override: group=%s initial_offset=%s", c.Kafka.Group, c.Kafka.InitialOffset)
+	}
 
 	if *mockKafka {
 		if err := runMockKafkaTest(c, *mockCount, *mockTimeout, *mockOffset); err != nil {
@@ -65,6 +78,28 @@ func main() {
 
 	fmt.Printf("Starting rpc server at %s...\n", c.ListenOn)
 	s.Start()
+}
+
+func resolveKafkaGroupBase(c config.Config) string {
+	if strings.TrimSpace(c.Kafka.Group) != "" {
+		return strings.TrimSpace(c.Kafka.Group)
+	}
+	if strings.TrimSpace(c.Name) != "" {
+		return strings.TrimSpace(c.Name) + "-kline"
+	}
+	return "strategy-kline"
+}
+
+func appendKafkaGroupSuffix(base, suffix string) string {
+	base = strings.TrimSpace(base)
+	suffix = strings.TrimSpace(suffix)
+	if base == "" {
+		base = "strategy-kline"
+	}
+	if suffix == "" {
+		return base
+	}
+	return base + "-" + suffix
 }
 
 func runMockKafkaTest(c config.Config, want int, timeout time.Duration, offsetMode string) error {

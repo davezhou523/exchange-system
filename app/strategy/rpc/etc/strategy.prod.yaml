@@ -5,6 +5,7 @@ Kafka:
   Addrs:
     - kafka1:9092
   Group: strategy-rpc-kline
+  InitialOffset: newest
   Topics:
     Kline: kline
     Depth: depth
@@ -81,5 +82,5 @@ HarvestPathLSTM:
   ArtifactsDir: tools/harvestpath_lstm/artifacts
   TimeoutMs: 2500
 
-KlineLogDir: data/kline
+KlineLogDir: app/strategy/rpc/data/kline
 SignalLogDir: data/signal
