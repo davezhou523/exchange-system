@@ -25,7 +25,7 @@ Exchange:
     Testnet: true
     APIKey: ""
     SecretKey: ""
-    Proxy: socks5://192.168.10.14:1080
+    Proxy: socks5://192.168.10.13:1080
   Simulated:
     Enabled: false
     InitialBalance: 10000

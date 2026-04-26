@@ -3,6 +3,8 @@ package config
 import (
 	"time"
 
+	"exchange-system/app/market/rpc/internal/universepool"
+
 	"github.com/zeromicro/go-zero/zrpc"
 )
 
@@ -76,6 +78,27 @@ type Config struct {
 	//   - 3m:  4500 × 3min  ≈ 9.4 天
 	//   - 1h:  4500 × 1h    ≈ 187.5 天
 	WarmupPages int `json:",default=3"`
+
+	// UniversePool 为 Phase 3 动态币池预留配置。
+	// 第一版先支持 inactive -> warming -> active，不启用删除逻辑。
+	UniversePool struct {
+		Enabled                  bool          `json:",default=false"`
+		LogDir                   string        `json:",default=data/universepool"`
+		CandidateSymbols         []string      `json:",optional"`
+		AllowList                []string      `json:",optional"`
+		BlockList                []string      `json:",optional"`
+		ValidationMode           string        `json:",optional"`
+		TrendPreferredSymbols    []string      `json:",optional"`
+		RangePreferredSymbols    []string      `json:",optional"`
+		BreakoutPreferredSymbols []string      `json:",optional"`
+		EvaluateInterval         time.Duration `json:",default=30s"`
+		MinActiveDuration        time.Duration `json:",default=1h"`
+		MinInactiveDuration      time.Duration `json:",default=1h"`
+		CooldownDuration         time.Duration `json:",default=1h"`
+		AddScoreThreshold        float64       `json:",default=0.75"`
+		RemoveScoreThreshold     float64       `json:",default=0.55"`
+		Warmup                   universepool.WarmupConfig
+	}
 }
 
 // IndicatorConfig 每个周期的指标配置

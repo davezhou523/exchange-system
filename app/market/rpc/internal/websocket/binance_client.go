@@ -5,20 +5,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"exchange-system/common/pb/market"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/net/proxy"
 )
 
 type BinanceWebSocketClient struct {
+	mu            sync.RWMutex
 	baseURL       string
 	proxyURL      string
 	dialer        *websocket.Dialer
@@ -150,12 +154,11 @@ func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []st
 	}
 
 	if proxyURL != "" {
-		proxy, err := url.Parse(proxyURL)
+		proxyCfg, err := url.Parse(proxyURL)
 		if err != nil {
 			log.Printf("Invalid proxy URL %s: %v, connecting without proxy", proxyURL, err)
 		} else {
-			dialer.Proxy = httpProxyFunc(proxy)
-			log.Printf("Using proxy: %s", proxyURL)
+			configureDialerProxy(dialer, proxyCfg)
 		}
 	}
 	if !hasKafkaProducer(depthProducer) {
@@ -193,19 +196,56 @@ func httpProxyFunc(proxy *url.URL) func(*http.Request) (*url.URL, error) {
 	}
 }
 
+func configureDialerProxy(dialer *websocket.Dialer, proxyCfg *url.URL) {
+	if dialer == nil || proxyCfg == nil {
+		return
+	}
+	switch strings.ToLower(proxyCfg.Scheme) {
+	case "socks5", "socks5h":
+		base := &net.Dialer{
+			Timeout:   15 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+		socksDialer, err := proxy.FromURL(proxyCfg, base)
+		if err != nil {
+			log.Printf("Invalid SOCKS5 proxy %s: %v, connecting without proxy", proxyCfg.String(), err)
+			return
+		}
+		dialer.Proxy = nil
+		dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if contextDialer, ok := socksDialer.(proxy.ContextDialer); ok {
+				return contextDialer.DialContext(ctx, network, addr)
+			}
+			return socksDialer.Dial(network, addr)
+		}
+		log.Printf("Using SOCKS5 proxy dialer: %s", proxyCfg.String())
+	default:
+		dialer.Proxy = httpProxyFunc(proxyCfg)
+		log.Printf("Using HTTP proxy: %s", proxyCfg.String())
+	}
+}
+
+// buildStreamURL 根据当前 symbol 和 interval 快照构建 Binance 多路复用流地址。
 func (c *BinanceWebSocketClient) buildStreamURL() string {
+	c.mu.RLock()
+	symbols := append([]string(nil), c.symbols...)
+	intervals := append([]string(nil), c.intervals...)
+	depthProducer := c.depthProducer
+	c.mu.RUnlock()
+
 	streams := make([]string, 0)
-	for _, symbol := range c.symbols {
-		for _, interval := range c.intervals {
+	for _, symbol := range symbols {
+		for _, interval := range intervals {
 			streams = append(streams, fmt.Sprintf("%s@kline_%s", strings.ToLower(symbol), interval))
 		}
-		if hasKafkaProducer(c.depthProducer) {
+		if hasKafkaProducer(depthProducer) {
 			streams = append(streams, fmt.Sprintf("%s@depth20@100ms", strings.ToLower(symbol)))
 		}
 	}
 	return fmt.Sprintf("%s/stream?streams=%s", strings.TrimRight(c.baseURL, "/"), strings.Join(streams, "/"))
 }
 
+// Connect 建立到 Binance 多路复用 WebSocket 的连接。
 func (c *BinanceWebSocketClient) Connect(ctx context.Context) error {
 	target := c.buildStreamURL()
 	log.Printf("Connecting to Binance WebSocket: %s", target)
@@ -215,7 +255,9 @@ func (c *BinanceWebSocketClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("failed to connect to WebSocket: %v", err)
 	}
 
+	c.mu.Lock()
 	c.conn = conn
+	c.mu.Unlock()
 
 	conn.SetPingHandler(func(appData string) error {
 		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
@@ -225,9 +267,7 @@ func (c *BinanceWebSocketClient) Connect(ctx context.Context) error {
 	return nil
 }
 
-// StartInBackground launches the WebSocket connection and streaming loop in a
-// background goroutine. If the initial connection fails it retries
-// automatically, so the calling service can start without blocking.
+// StartInBackground 在后台维持 WebSocket 连接，并在断开后自动重连。
 func (c *BinanceWebSocketClient) StartInBackground(ctx context.Context) {
 	go func() {
 		for {
@@ -259,7 +299,7 @@ func (c *BinanceWebSocketClient) StartInBackground(ctx context.Context) {
 	}()
 }
 
-// readLoop reads messages from the WebSocket connection until an error occurs.
+// readLoop 持续读取 WebSocket 消息，直到连接断开或上下文取消。
 func (c *BinanceWebSocketClient) readLoop(ctx context.Context) {
 	var totalMessages atomic.Int64
 	var klineMessages atomic.Int64
@@ -283,20 +323,26 @@ func (c *BinanceWebSocketClient) readLoop(ctx context.Context) {
 	defer close(done)
 
 	for {
+		conn := c.currentConn()
+		if conn == nil {
+			return
+		}
 		select {
 		case <-ctx.Done():
-			_ = c.conn.Close()
+			_ = conn.Close()
 			return
 		default:
 		}
 
-		_, message, err := c.conn.ReadMessage()
+		_, message, err := conn.ReadMessage()
 		if err != nil {
 			log.Printf("WebSocket read error: %v", err)
-			_ = c.conn.Close()
+			_ = conn.Close()
 			return
 		}
-		totalMessages.Add(1)
+		if totalMessages.Add(1) == 1 {
+			log.Printf("[ws] first message received")
+		}
 
 		stats, err := c.handleMessage(ctx, message)
 		if stats.isKline {
@@ -397,9 +443,49 @@ func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []by
 	return stats, nil
 }
 
+// CurrentSymbols 返回当前正在使用的订阅 symbol 集合快照。
+func (c *BinanceWebSocketClient) CurrentSymbols() []string {
+	if c == nil {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]string(nil), c.symbols...)
+}
+
+// UpdateSymbols 更新订阅 symbol 集合，并通过关闭当前连接触发后台 loop 按新集合重连。
+func (c *BinanceWebSocketClient) UpdateSymbols(symbols []string) error {
+	if c == nil {
+		return nil
+	}
+	next := append([]string(nil), symbols...)
+	c.mu.Lock()
+	c.symbols = next
+	conn := c.conn
+	c.mu.Unlock()
+
+	log.Printf("Binance symbols updated: %v", next)
+	if conn != nil {
+		return conn.Close()
+	}
+	return nil
+}
+
+// currentConn 返回当前连接快照，避免读循环与更新逻辑直接竞争字段。
+func (c *BinanceWebSocketClient) currentConn() *websocket.Conn {
+	if c == nil {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.conn
+}
+
+// Close 主动关闭当前 WebSocket 连接。
 func (c *BinanceWebSocketClient) Close() error {
-	if c.conn != nil {
-		return c.conn.Close()
+	conn := c.currentConn()
+	if conn != nil {
+		return conn.Close()
 	}
 	return nil
 }

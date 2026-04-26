@@ -1,12 +1,18 @@
 package config
 
-import "github.com/zeromicro/go-zero/zrpc"
+import (
+	"time"
+
+	"github.com/zeromicro/go-zero/zrpc"
+)
 
 type StrategyConfig struct {
 	Name       string
 	Symbol     string
 	Enabled    bool
+	Template   string
 	Parameters map[string]float64
+	Overrides  map[string]float64
 }
 
 type Config struct {
@@ -29,6 +35,26 @@ type Config struct {
 	SignalLogDir string
 
 	Strategies []StrategyConfig
+	Templates  map[string]map[string]float64
+	Universe   struct {
+		Enabled               bool
+		BootstrapDuration     time.Duration
+		EvaluateInterval      time.Duration
+		FreshnessWindow       time.Duration
+		MinEnabledDuration    time.Duration
+		CooldownDuration      time.Duration
+		RequireFinal          bool
+		RequireTradable       bool
+		RequireClean          bool
+		CandidateSymbols      []string
+		StaticTemplateMap     map[string]string
+		BTCTrendTemplate      string
+		BTCTrendAtrPctMax     float64
+		HighBetaSafeTemplate  string
+		HighBetaSafeSymbols   []string
+		HighBetaSafeAtrPct    float64
+		HighBetaDisableAtrPct float64
+	}
 
 	Strategy struct {
 		Symbol      string

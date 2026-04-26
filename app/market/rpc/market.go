@@ -66,6 +66,10 @@ func main() {
 		return
 	}
 
+	if err := cleanupMarketDataDirs(c); err != nil {
+		log.Fatalf("cleanup market data dirs failed: %v", err)
+	}
+
 	svcCtx, err := svc.NewServiceContext(c)
 	if err != nil {
 		log.Fatalf("failed to init service context: %v", err)
@@ -85,6 +89,40 @@ func main() {
 
 	fmt.Printf("Starting rpc server at %s...\n", c.ListenOn)
 	s.Start()
+}
+
+func cleanupMarketDataDirs(c config.Config) error {
+	dirs := []string{c.KlineLogDir}
+	if c.UniversePool.LogDir != "" {
+		dirs = append(dirs, c.UniversePool.LogDir)
+	}
+	for _, dir := range dirs {
+		if dir == "" {
+			continue
+		}
+		if err := clearDirContents(dir); err != nil {
+			return fmt.Errorf("clear %s: %w", dir, err)
+		}
+	}
+	return nil
+}
+
+// clearDirContents 清空目录内容，但保留目录本身，便于服务启动后自动重建子目录。
+func clearDirContents(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return os.MkdirAll(dir, 0o755)
+		}
+		return err
+	}
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func runMockKafkaProducer(c config.Config, count int, interval time.Duration, symbol string, tf string) error {

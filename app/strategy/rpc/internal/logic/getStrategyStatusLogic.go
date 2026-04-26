@@ -2,6 +2,7 @@ package logic
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"exchange-system/app/strategy/rpc/internal/svc"
@@ -32,6 +33,21 @@ func (l *GetStrategyStatusLogic) GetStrategyStatus(in *strategy.StrategyRequest)
 	if l.svcCtx.HasStrategy(strategyId) {
 		status = "RUNNING"
 		msg = "ok"
+	}
+	if rec, ok := l.svcCtx.LatestWeightRecommendation(strategyId); ok {
+		msg = fmt.Sprintf(
+			"%s | weight template=%s budget=%.4f risk=%.4f strategy=%.4f symbol=%.4f paused=%v",
+			msg,
+			rec.Template,
+			rec.PositionBudget,
+			rec.RiskScale,
+			rec.StrategyWeight,
+			rec.SymbolWeight,
+			rec.TradingPaused,
+		)
+		if rec.PauseReason != "" {
+			msg += " pause_reason=" + rec.PauseReason
+		}
 	}
 	return &strategy.StrategyStatus{
 		StrategyId: strategyId,

@@ -17,7 +17,7 @@ Binance:
   BaseURL: https://demo-fapi.binance.com
   APIKey: ""
   SecretKey: ""
-  Proxy: socks5://192.168.10.14:1080
+  Proxy: socks5://192.168.10.13:1080
 
 DataDir: data/futures
 ExecutionOrderLogDir: ../../execution/rpc/data/order

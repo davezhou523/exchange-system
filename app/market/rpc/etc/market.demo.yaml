@@ -42,6 +42,49 @@ Binance:
   WebSocketURL: wss://fstream.binance.com
   Symbols:
     - ETHUSDT
+    - BTCUSDT
+    - BNBUSDT
+    - SOLUSDT
+    - XRPUSDT
   Intervals:
     - 1m
-  Proxy: socks5://192.168.10.14:1080
+  Proxy: socks5://192.168.10.13:1080
+
+UniversePool:
+  Enabled: true
+  LogDir: data/universepool
+  CandidateSymbols:
+    - ETHUSDT
+    - BTCUSDT
+    - BNBUSDT
+    - SOLUSDT
+    - XRPUSDT
+  AllowList:
+    - BTCUSDT
+    - ETHUSDT
+  BlockList: []
+  ValidationMode: 5m
+  TrendPreferredSymbols:
+    - ETHUSDT
+    - SOLUSDT
+    - BNBUSDT
+  RangePreferredSymbols:
+    - BTCUSDT
+    - ETHUSDT
+  BreakoutPreferredSymbols:
+    - BTCUSDT
+    - SOLUSDT
+    - XRPUSDT
+  EvaluateInterval: 30s
+  MinActiveDuration: 1h
+  MinInactiveDuration: 1h
+  CooldownDuration: 1h
+  AddScoreThreshold: 0.75
+  RemoveScoreThreshold: 0.55
+  Warmup:
+    Enabled: true
+    Min1mBars: 120
+    Require15mReady: true
+    Require1hReady: true
+    Require4hReady: true
+    RequireIndicatorsReady: true

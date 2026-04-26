@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"exchange-system/app/market/rpc/internal/universepool"
 	"exchange-system/common/pb/market"
 )
 
@@ -142,6 +143,9 @@ type KlineAggregator struct {
 	// asyncSenderWg 异步发送协程的 WaitGroup
 	asyncSenderWg sync.WaitGroup
 
+	// emitObserver 在聚合后 K 线真正发射时收到回调，可用于同步更新轻量观察缓存。
+	emitObserver func(*market.Kline)
+
 	mu      sync.Mutex
 	workers map[string]*symbolWorker // symbol -> worker
 	wg      sync.WaitGroup
@@ -166,6 +170,14 @@ type TimeSource interface {
 type SystemTimeSource struct{}
 
 func (s *SystemTimeSource) Now() time.Time { return time.Now().UTC() }
+
+// SetEmitObserver 设置聚合后 K 线发射回调。
+func (a *KlineAggregator) SetEmitObserver(fn func(*market.Kline)) {
+	if a == nil {
+		return
+	}
+	a.emitObserver = fn
+}
 
 // NewKlineAggregator creates a new aggregator for the given target intervals.
 func NewKlineAggregator(intervals []IntervalDef, producer KafkaProducer, klineLogDir string, watermarkDelay time.Duration, indicatorParams IndicatorParams) *KlineAggregator {
@@ -418,6 +430,52 @@ func (a *KlineAggregator) GetMetrics() Metrics {
 	return m
 }
 
+// GetWarmupStatus 返回指定交易对当前的 warmup 状态快照，供动态币池状态机判断是否可进入 active。
+func (a *KlineAggregator) GetWarmupStatus(symbol string) universepool.WarmupStatus {
+	status := universepool.WarmupStatus{
+		Symbol: symbol,
+	}
+	if a == nil || symbol == "" {
+		status.LastIncompleteReason = "invalid_symbol"
+		return status
+	}
+
+	a.mu.Lock()
+	w, ok := a.workers[symbol]
+	a.mu.Unlock()
+	if !ok || w == nil {
+		status.LastIncompleteReason = "no_worker"
+		return status
+	}
+
+	status.LastUpdatedAt = w.lastActiveTime
+	status.HasEnough1mBars = w.hasHistoryReady("1m")
+	status.Has15mReady = w.hasHistoryReady("15m")
+	status.Has1hReady = w.hasHistoryReady("1h")
+	status.Has4hReady = w.hasHistoryReady("4h")
+	status.IndicatorsReady = w.hasIndicatorsReady("1m")
+
+	warmupReady := w.warmupReady.Load()
+	switch {
+	case !warmupReady:
+		status.LastIncompleteReason = "warmup_pending"
+	case !status.HasEnough1mBars:
+		status.LastIncompleteReason = "missing_1m_history"
+	case !status.Has15mReady:
+		status.LastIncompleteReason = "missing_15m_history"
+	case !status.Has1hReady:
+		status.LastIncompleteReason = "missing_1h_history"
+	case !status.Has4hReady:
+		status.LastIncompleteReason = "missing_4h_history"
+	case !status.IndicatorsReady:
+		status.LastIncompleteReason = "indicators_not_ready"
+	default:
+		status.Ready = true
+	}
+
+	return status
+}
+
 // --- per-symbol worker ---
 
 type symbolWorker struct {
@@ -439,6 +497,30 @@ type symbolWorker struct {
 	warmupReady   atomic.Bool
 	pendingMu     sync.Mutex      // 保护 pendingKlines 的并发访问
 	pendingKlines []*market.Kline // 预热期间缓存的K线（预热完成后清空）
+}
+
+// hasHistoryReady 判断某个周期是否已经至少积累到可观测的历史数据。
+func (w *symbolWorker) hasHistoryReady(interval string) bool {
+	if w == nil {
+		return false
+	}
+	history := w.intervalHistories[interval]
+	return history != nil && history.count > 0
+}
+
+// hasIndicatorsReady 判断某个周期的递推指标状态是否已经初始化完成。
+func (w *symbolWorker) hasIndicatorsReady(interval string) bool {
+	if w == nil {
+		return false
+	}
+	history := w.intervalHistories[interval]
+	if history == nil {
+		return false
+	}
+	return history.state.ema21Init &&
+		history.state.ema55Init &&
+		history.state.rsiInit &&
+		history.state.atrInit
 }
 
 // emitBucket wraps a completed bucket ready for watermark-delayed emit.

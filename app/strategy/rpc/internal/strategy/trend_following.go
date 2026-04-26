@@ -16,6 +16,7 @@ import (
 
 	"exchange-system/app/strategy/rpc/internal/kafka"
 	harvestpathmodel "exchange-system/app/strategy/rpc/internal/strategy/harvestpath"
+	"exchange-system/app/strategy/rpc/internal/weights"
 	marketpb "exchange-system/common/pb/market"
 )
 
@@ -87,6 +88,7 @@ type TrendFollowingStrategy struct {
 	producer                 *kafka.Producer
 	harvestPathProducer      *kafka.Producer
 	harvestPathLSTMPredictor *harvestpathmodel.LSTMPredictor
+	weightProvider           func(string) (weights.Recommendation, bool)
 
 	// mu 保护以下字段的并发访问
 	mu sync.Mutex
@@ -129,6 +131,7 @@ type TrendFollowingStrategy struct {
 
 type RuntimeOptions struct {
 	HarvestPathLSTMPredictor *harvestpathmodel.LSTMPredictor
+	WeightProvider           func(string) (weights.Recommendation, bool)
 }
 
 const positionSyncEpsilon = 1e-8
@@ -148,6 +151,7 @@ func NewTrendFollowingStrategy(symbol string, params map[string]float64, produce
 		producer:                 producer,
 		harvestPathProducer:      harvestPathProducer,
 		harvestPathLSTMPredictor: runtimeHarvestPathLSTMPredictor(opts),
+		weightProvider:           runtimeWeightProvider(opts),
 		signalLogDir:             signalLogDir,
 		signalLogFiles:           make(map[string]*os.File),
 		decisionLogFiles:         make(map[string]*os.File),
@@ -159,6 +163,13 @@ func runtimeHarvestPathLSTMPredictor(opts *RuntimeOptions) *harvestpathmodel.LST
 		return nil
 	}
 	return opts.HarvestPathLSTMPredictor
+}
+
+func runtimeWeightProvider(opts *RuntimeOptions) func(string) (weights.Recommendation, bool) {
+	if opts == nil {
+		return nil
+	}
+	return opts.WeightProvider
 }
 
 func (s *TrendFollowingStrategy) HasOpenPosition() bool {
@@ -908,6 +919,20 @@ func (s *TrendFollowingStrategy) openPosition(ctx context.Context, k *marketpb.K
 		scale := s.getParam(paramDeepPullbackScale, 0.9)
 		quantity *= scale
 	}
+	adjustedQuantity, blocked, blockReason := s.applyWeightRecommendation(quantity)
+	if blocked {
+		extras := map[string]interface{}{
+			"base_quantity": quantity,
+			"reason":        blockReason,
+		}
+		appendSnapshotExtras(extras, "h4", s.latest4h)
+		appendSnapshotExtras(extras, "h1", s.latest1h)
+		appendSnapshotExtras(extras, "m15", m15)
+		s.writeDecisionLogIfEnabled("entry", "skip", blockReason, k, extras)
+		log.Printf("[策略入场跳过] %s %s | base_qty=%.4f | %s", s.symbol, action, quantity, blockReason)
+		return nil
+	}
+	quantity = adjustedQuantity
 
 	// 构建信号原因
 	reason := s.buildEntryReason(trend, pullback, entry, m15, stopLoss, tp1, tp2)
@@ -1223,6 +1248,46 @@ func (s *TrendFollowingStrategy) calculatePositionSize(price float64, stopLoss f
 	return finalPosition
 }
 
+// applyWeightRecommendation 把 Phase 5 的权重建议真正应用到开仓数量上。
+func (s *TrendFollowingStrategy) applyWeightRecommendation(quantity float64) (float64, bool, string) {
+	if quantity <= 0 {
+		return 0, true, "base_quantity_invalid"
+	}
+	if s == nil || s.weightProvider == nil {
+		return quantity, false, ""
+	}
+	rec, ok := s.weightProvider(s.symbol)
+	if !ok {
+		return quantity, false, ""
+	}
+	return applyWeightScale(quantity, rec)
+}
+
+// applyWeightScale 根据最新一轮权重建议缩放开仓数量。
+func applyWeightScale(quantity float64, rec weights.Recommendation) (float64, bool, string) {
+	if quantity <= 0 {
+		return 0, true, "base_quantity_invalid"
+	}
+	if rec.TradingPaused {
+		if rec.PauseReason != "" {
+			return 0, true, rec.PauseReason
+		}
+		return 0, true, "weight_trading_paused"
+	}
+	scale := rec.PositionBudget
+	if scale <= 0 {
+		return 0, true, "weight_budget_zero"
+	}
+	if scale > 1 {
+		scale = 1
+	}
+	adjusted := quantity * scale
+	if adjusted < 0.001 {
+		return 0, true, "weight_budget_too_small"
+	}
+	return adjusted, false, ""
+}
+
 // ---------------------------------------------------------------------------
 // 风险管理
 // ---------------------------------------------------------------------------
@@ -1331,9 +1396,27 @@ func (s *TrendFollowingStrategy) sendSignal(ctx context.Context, signal map[stri
 			fmtFloatOrNA(indicators["h1_ema21"]), fmtFloatOrNA(indicators["h1_rsi"]),
 			fmtFloatOrNA(indicators["m15_rsi"]), fmtFloatOrNA(indicators["m15_atr"]))
 	}
+	weightsStr := ""
+	if s.weightProvider != nil {
+		if rec, ok := s.weightProvider(s.symbol); ok {
+			weightsStr = fmt.Sprintf(
+				" | weights(template=%s budget=%.4f risk=%.4f strategy=%.4f symbol=%.4f paused=%v",
+				rec.Template,
+				rec.PositionBudget,
+				rec.RiskScale,
+				rec.StrategyWeight,
+				rec.SymbolWeight,
+				rec.TradingPaused,
+			)
+			if rec.PauseReason != "" {
+				weightsStr += fmt.Sprintf(" reason=%s", rec.PauseReason)
+			}
+			weightsStr += ")"
+		}
+	}
 
-	log.Printf("[策略信号] %s %s %s | 方向=%s | 价格=%.2f | 数量=%.4f | 止损=%.2f | 止盈=%s | %s | %s",
-		s.symbol, "15m", action, side, entryPrice, quantity, stopLoss, tpStr, indicatorsStr, reason)
+	log.Printf("[策略信号] %s %s %s | 方向=%s | 价格=%.2f | 数量=%.4f | 止损=%.2f | 止盈=%s | %s | %s%s",
+		s.symbol, "15m", action, side, entryPrice, quantity, stopLoss, tpStr, indicatorsStr, reason, weightsStr)
 
 	s.writeSignalLog(signal, k)
 
@@ -1361,6 +1444,17 @@ type signalLogEntry struct {
 	IsTradable   bool                     `json:"isTradable"`
 	IsFinal      bool                     `json:"isFinal"`
 	Indicators   *orderedSignalIndicators `json:"indicators,omitempty"`
+	Weights      *signalWeightSnapshot    `json:"weights,omitempty"`
+}
+
+type signalWeightSnapshot struct {
+	Template       string  `json:"template,omitempty"`
+	StrategyWeight float64 `json:"strategy_weight"`
+	SymbolWeight   float64 `json:"symbol_weight"`
+	RiskScale      float64 `json:"risk_scale"`
+	PositionBudget float64 `json:"position_budget"`
+	TradingPaused  bool    `json:"trading_paused"`
+	PauseReason    string  `json:"pause_reason,omitempty"`
 }
 
 type orderedSignalIndicators struct {
@@ -1549,6 +1643,20 @@ func (s *TrendFollowingStrategy) writeSignalLog(signal map[string]interface{}, k
 			}
 		}
 	}
+	var weightSnapshot *signalWeightSnapshot
+	if s.weightProvider != nil {
+		if rec, ok := s.weightProvider(s.symbol); ok {
+			weightSnapshot = &signalWeightSnapshot{
+				Template:       rec.Template,
+				StrategyWeight: round2(rec.StrategyWeight),
+				SymbolWeight:   round2(rec.SymbolWeight),
+				RiskScale:      round2(rec.RiskScale),
+				PositionBudget: round2(rec.PositionBudget),
+				TradingPaused:  rec.TradingPaused,
+				PauseReason:    rec.PauseReason,
+			}
+		}
+	}
 
 	entry := signalLogEntry{
 		Timestamp:    formatDecisionLogTime(now),
@@ -1570,6 +1678,7 @@ func (s *TrendFollowingStrategy) writeSignalLog(signal map[string]interface{}, k
 		IsTradable:   k.IsTradable,
 		IsFinal:      k.IsFinal,
 		Indicators:   newOrderedSignalIndicators(roundedIndicators),
+		Weights:      weightSnapshot,
 	}
 
 	// 禁用 HTML 转义，避免 < > & 被编码为 \u003c 等
@@ -2443,6 +2552,21 @@ func (s *TrendFollowingStrategy) openPosition1m(ctx context.Context, k *marketpb
 		scale := s.getParam(paramDeepPullbackScale, 0.9)
 		quantity *= scale
 	}
+	adjustedQuantity, blocked, blockReason := s.applyWeightRecommendation(quantity)
+	if blocked {
+		extras := map[string]interface{}{
+			"base_quantity": quantity,
+			"reason":        blockReason,
+		}
+		appendSnapshotExtras(extras, "h4", s.latest4h)
+		appendSnapshotExtras(extras, "h1", s.latest1h)
+		appendSnapshotExtras(extras, "m15", s.latest15m)
+		appendSnapshotExtras(extras, "m1", m1)
+		s.writeDecisionLogIfEnabled("entry", "skip", blockReason, k, extras)
+		log.Printf("[策略1m入场跳过] %s %s | base_qty=%.4f | %s", s.symbol, action, quantity, blockReason)
+		return nil
+	}
+	quantity = adjustedQuantity
 
 	// 构建入场原因
 	reason := s.buildEntryReason1m(trend, pullback, entry, m1, stopLoss, tp1, tp2)

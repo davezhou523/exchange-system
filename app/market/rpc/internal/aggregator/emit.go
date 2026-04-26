@@ -226,6 +226,10 @@ func (a *KlineAggregator) emitKline(ctx context.Context, symbol, interval string
 	// Persist to jsonl file for verification
 	a.writeKlineLog(k, b.dirtyReasonText())
 
+	if a.emitObserver != nil {
+		a.emitObserver(k)
+	}
+
 	// 异步发送到 Kafka（通过缓冲队列解耦，避免 Kafka 阻塞 worker goroutine）
 	// 队列满时丢弃数据并记日志（背压保护），保证数据处理不中断
 	select {

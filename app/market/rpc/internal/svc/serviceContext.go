@@ -6,7 +6,9 @@ import (
 	"exchange-system/app/market/rpc/internal/aggregator"
 	"exchange-system/app/market/rpc/internal/config"
 	"exchange-system/app/market/rpc/internal/kafka"
+	"exchange-system/app/market/rpc/internal/universepool"
 	"exchange-system/app/market/rpc/internal/websocket"
+	"exchange-system/common/pb/market"
 )
 
 // binanceAPIURL Binance Futures REST API 地址
@@ -19,7 +21,24 @@ type ServiceContext struct {
 	depthProducer  *kafka.Producer
 	wsClient       *websocket.BinanceWebSocketClient
 	agg            *aggregator.KlineAggregator
+	universeMgr    *universepool.Manager
 	cancel         context.CancelFunc
+}
+
+// klineDispatcher 把 websocket 收到的 1m 闭合 K 线同时分发给 UniversePool 和聚合器。
+type klineDispatcher struct {
+	agg         *aggregator.KlineAggregator
+	universeMgr *universepool.Manager
+}
+
+// OnKline 在不破坏现有聚合链路的前提下，同步更新动态币池快照缓存。
+func (d *klineDispatcher) OnKline(ctx context.Context, k *market.Kline) {
+	if d == nil || k == nil {
+		return
+	}
+	if d.agg != nil {
+		d.agg.OnKline(ctx, k)
+	}
 }
 
 func NewServiceContext(c config.Config) (*ServiceContext, error) {
@@ -99,6 +118,10 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	// 必须在 SetEmitMode + SetIndicatorMode 之后调用
 	agg.ValidateConfig()
 
+	dispatcher := &klineDispatcher{
+		agg: agg,
+	}
+
 	wsClient := websocket.NewBinanceWebSocketClient(
 		c.Binance.WebSocketURL,
 		c.Binance.Proxy,
@@ -106,10 +129,42 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		c.Binance.Intervals,
 		producer,
 		depthProducer,
-		agg,
+		dispatcher,
 	)
 
+	var universeMgr *universepool.Manager
+	if c.UniversePool.Enabled {
+		universeCfg := universepool.Config{
+			Enabled:                  c.UniversePool.Enabled,
+			CandidateSymbols:         append([]string(nil), c.UniversePool.CandidateSymbols...),
+			AllowList:                append([]string(nil), c.UniversePool.AllowList...),
+			BlockList:                append([]string(nil), c.UniversePool.BlockList...),
+			ValidationMode:           c.UniversePool.ValidationMode,
+			TrendPreferredSymbols:    append([]string(nil), c.UniversePool.TrendPreferredSymbols...),
+			RangePreferredSymbols:    append([]string(nil), c.UniversePool.RangePreferredSymbols...),
+			BreakoutPreferredSymbols: append([]string(nil), c.UniversePool.BreakoutPreferredSymbols...),
+			EvaluateInterval:         c.UniversePool.EvaluateInterval,
+			MinActiveDuration:        c.UniversePool.MinActiveDuration,
+			MinInactiveDuration:      c.UniversePool.MinInactiveDuration,
+			CooldownDuration:         c.UniversePool.CooldownDuration,
+			AddScoreThreshold:        c.UniversePool.AddScoreThreshold,
+			RemoveScoreThreshold:     c.UniversePool.RemoveScoreThreshold,
+			Warmup:                   c.UniversePool.Warmup,
+		}
+		universeLogger := universepool.NewJSONLLogger(c.UniversePool.LogDir)
+		universeMgr = universepool.NewManager(universeCfg, nil, agg, wsClient, universeLogger)
+		agg.SetEmitObserver(func(k *market.Kline) {
+			if universeMgr != nil {
+				universeMgr.UpdateSnapshotFromKline(k)
+			}
+		})
+		dispatcher.universeMgr = universeMgr
+	}
+
 	wsClient.StartInBackground(ctx)
+	if universeMgr != nil {
+		go universeMgr.Start(ctx)
+	}
 
 	return &ServiceContext{
 		Config:         c,
@@ -117,6 +172,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		depthProducer:  depthProducer,
 		wsClient:       wsClient,
 		agg:            agg,
+		universeMgr:    universeMgr,
 		cancel:         cancel,
 	}, nil
 }
