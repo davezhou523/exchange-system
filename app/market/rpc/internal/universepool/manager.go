@@ -411,15 +411,26 @@ func isSnapshotFresh(cfg Config, now time.Time, snap Snapshot) bool {
 		return false
 	}
 	window := cfg.EvaluateInterval * 3
+
+	if iv := validationSnapshotIntervalDuration(cfg); iv > 0 {
+		candidate := iv*2 + cfg.EvaluateInterval
+		if candidate > window {
+			window = candidate
+		}
+	}
 	if window <= 0 {
 		window = 90 * time.Second
 	}
 	return now.Sub(snap.UpdatedAt) <= window
 }
 
-// UpdateSnapshotFromKline 使用最新 1m 闭合 K 线更新动态币池评估快照。
+// UpdateSnapshotFromKline 使用验证模式对应周期的闭合 K 线更新动态币池评估快照。
 func (m *Manager) UpdateSnapshotFromKline(k *market.Kline) {
-	if m == nil || k == nil || k.Symbol == "" || k.Interval != "1m" || !k.IsClosed {
+	if m == nil || k == nil || k.Symbol == "" || !k.IsClosed {
+		return
+	}
+	expectedInterval := validationSnapshotIntervalName(m.cfg)
+	if k.Interval != expectedInterval {
 		return
 	}
 	updatedAt := time.Now().UTC()
@@ -440,7 +451,7 @@ func (m *Manager) UpdateSnapshotFromKline(k *market.Kline) {
 		prev.AtrPct = k.Atr / k.Close
 	}
 	prev.Healthy = true
-	prev.LastReason = "fresh_1m"
+	prev.LastReason = "fresh_" + expectedInterval
 	m.snapshots[k.Symbol] = prev
 }
 
@@ -451,4 +462,22 @@ func normalizeConfig(cfg Config) Config {
 		cfg.EvaluateInterval = 30 * time.Second
 	}
 	return cfg
+}
+
+func validationSnapshotIntervalName(cfg Config) string {
+	switch cfg.ValidationMode {
+	case "5m", "5M":
+		return "5m"
+	default:
+		return "1m"
+	}
+}
+
+func validationSnapshotIntervalDuration(cfg Config) time.Duration {
+	switch validationSnapshotIntervalName(cfg) {
+	case "5m":
+		return 5 * time.Minute
+	default:
+		return time.Minute
+	}
 }

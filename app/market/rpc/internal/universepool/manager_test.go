@@ -3,6 +3,8 @@ package universepool
 import (
 	"testing"
 	"time"
+
+	"exchange-system/common/pb/market"
 )
 
 type stubSubscriptionController struct {
@@ -81,5 +83,44 @@ func TestNewManagerValidationMode5mAppliesWarmupDefaults(t *testing.T) {
 	}
 	if mgr.cfg.Warmup.Require15mReady || mgr.cfg.Warmup.Require1hReady || mgr.cfg.Warmup.Require4hReady {
 		t.Fatalf("higher timeframe requirements = %+v, want all false", mgr.cfg.Warmup)
+	}
+}
+
+func TestManagerUpdateSnapshotFromKlineUses5mInValidationMode5m(t *testing.T) {
+	mgr := NewManager(Config{
+		Enabled:        true,
+		ValidationMode: "5m",
+	}, nil, nil, nil, nil)
+
+	mgr.UpdateSnapshotFromKline(&market.Kline{
+		Symbol:    "XRPUSDT",
+		Interval:  "1m",
+		Close:     1.2,
+		Ema21:     1.1,
+		Ema55:     1.0,
+		Atr:       0.01,
+		IsClosed:  true,
+		EventTime: time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC).UnixMilli(),
+	})
+	if len(mgr.snapshots) != 0 {
+		t.Fatalf("snapshots len = %d, want 0", len(mgr.snapshots))
+	}
+
+	mgr.UpdateSnapshotFromKline(&market.Kline{
+		Symbol:    "XRPUSDT",
+		Interval:  "5m",
+		Close:     1.2,
+		Ema21:     1.1,
+		Ema55:     1.0,
+		Atr:       0.01,
+		IsClosed:  true,
+		EventTime: time.Date(2026, 4, 26, 12, 5, 0, 0, time.UTC).UnixMilli(),
+	})
+	got, ok := mgr.snapshots["XRPUSDT"]
+	if !ok {
+		t.Fatal("snapshot missing for XRPUSDT")
+	}
+	if got.LastReason != "fresh_5m" {
+		t.Fatalf("LastReason = %s, want fresh_5m", got.LastReason)
 	}
 }
