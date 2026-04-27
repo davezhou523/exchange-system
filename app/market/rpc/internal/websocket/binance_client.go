@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -259,11 +260,24 @@ func (c *BinanceWebSocketClient) Connect(ctx context.Context) error {
 	c.conn = conn
 	c.mu.Unlock()
 
+	const readWait = 75 * time.Second
 	conn.SetPingHandler(func(appData string) error {
 		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
 	})
+	if err := conn.SetReadDeadline(time.Now().Add(readWait)); err != nil {
+		log.Printf("[ws debug] set initial read deadline failed: %v", err)
+	}
+	conn.SetPongHandler(func(appData string) error {
+		if err := conn.SetReadDeadline(time.Now().Add(readWait)); err != nil {
+			log.Printf("[ws debug] extend read deadline on pong failed: %v", err)
+			return err
+		}
+		log.Printf("[ws debug] pong received payload=%q", appData)
+		return nil
+	})
 
 	log.Printf("WebSocket connected successfully")
+	log.Printf("[ws debug] read loop armed read_wait=%s", readWait)
 	return nil
 }
 
@@ -301,9 +315,11 @@ func (c *BinanceWebSocketClient) StartInBackground(ctx context.Context) {
 
 // readLoop 持续读取 WebSocket 消息，直到连接断开或上下文取消。
 func (c *BinanceWebSocketClient) readLoop(ctx context.Context) {
+	const pingInterval = 20 * time.Second
 	var totalMessages atomic.Int64
 	var klineMessages atomic.Int64
 	var closed1mMessages atomic.Int64
+	connectedAt := time.Now().UTC()
 	done := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
@@ -322,6 +338,46 @@ func (c *BinanceWebSocketClient) readLoop(ctx context.Context) {
 	}()
 	defer close(done)
 
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				if totalMessages.Load() == 0 {
+					log.Printf("[ws debug] no messages yet elapsed=%s", time.Since(connectedAt).Round(time.Second))
+				}
+			}
+		}
+	}()
+
+	go func() {
+		ticker := time.NewTicker(pingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				conn := c.currentConn()
+				if conn == nil {
+					return
+				}
+				if err := conn.WriteControl(websocket.PingMessage, []byte("ws-health"), time.Now().Add(3*time.Second)); err != nil {
+					log.Printf("[ws debug] ping failed: %v", err)
+					return
+				}
+				log.Printf("[ws debug] ping sent")
+			}
+		}
+	}()
+
 	for {
 		conn := c.currentConn()
 		if conn == nil {
@@ -336,7 +392,15 @@ func (c *BinanceWebSocketClient) readLoop(ctx context.Context) {
 
 		_, message, err := conn.ReadMessage()
 		if err != nil {
-			log.Printf("WebSocket read error: %v", err)
+			var closeErr *websocket.CloseError
+			switch {
+			case errors.As(err, &closeErr):
+				log.Printf("WebSocket read error: close_code=%d text=%s", closeErr.Code, closeErr.Text)
+			case isNetTimeout(err):
+				log.Printf("WebSocket read error: timeout waiting for message elapsed=%s", time.Since(connectedAt).Round(time.Second))
+			default:
+				log.Printf("WebSocket read error: %v", err)
+			}
 			_ = conn.Close()
 			return
 		}
@@ -355,6 +419,11 @@ func (c *BinanceWebSocketClient) readLoop(ctx context.Context) {
 			log.Printf("Error handling message: %v", err)
 		}
 	}
+}
+
+func isNetTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []byte) (wsMessageStats, error) {

@@ -222,6 +222,10 @@ func (a *KlineAggregator) emitKline(ctx context.Context, symbol, interval string
 		k.Open, k.High, k.Low, k.Close,
 		k.Volume, k.QuoteVolume, k.TakerBuyVolume, k.TakerBuyQuote, k.FirstTradeId, k.LastTradeId, k.NumTrades,
 		k.IsDirty, b.dirtyReasonText(), k.IsTradable, k.IsFinal, indicatorStr)
+	if k.Interval == "5m" {
+		log.Printf("[aggregated 5m emit] symbol=%s closeTime=%s eventTime=%s isDirty=%v isFinal=%v ema21=%.2f ema55=%.2f rsi=%.2f atr=%.4f",
+			k.Symbol, closeStr, eventStr, k.IsDirty, k.IsFinal, k.Ema21, k.Ema55, k.Rsi, k.Atr)
+	}
 
 	// Persist to jsonl file for verification
 	a.writeKlineLog(k, b.dirtyReasonText())
