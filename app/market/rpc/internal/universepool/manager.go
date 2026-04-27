@@ -23,20 +23,22 @@ type Manager struct {
 }
 
 type stateSummary struct {
-	GlobalState   string
-	TrendCount    int
-	RangeCount    int
-	BreakoutCount int
-	Candidates    int
-	Snapshots     int
-	Fresh         int
-	Stale         int
-	Inactive      int
-	PendingAdd    int
-	Warming       int
-	Active        int
-	PendingRemove int
-	Cooldown      int
+	GlobalState      string
+	SnapshotInterval string
+	LastSnapshotAt   time.Time
+	TrendCount       int
+	RangeCount       int
+	BreakoutCount    int
+	Candidates       int
+	Snapshots        int
+	Fresh            int
+	Stale            int
+	Inactive         int
+	PendingAdd       int
+	Warming          int
+	Active           int
+	PendingRemove    int
+	Cooldown         int
 }
 
 // NewManager 创建一个动态币池管理器骨架。
@@ -370,14 +372,18 @@ func (m *Manager) logStateTransition(_ time.Time, symbol string, from, to Symbol
 // summarizeStates 汇总当前状态表和快照新鲜度，生成控制台和 _meta 可复用的观测摘要。
 func summarizeStates(cfg Config, now time.Time, desired DesiredUniverse, snapshots map[string]Snapshot, states map[string]SymbolRuntimeState) stateSummary {
 	summary := stateSummary{
-		GlobalState:   desired.GlobalState,
-		TrendCount:    desired.TrendCount,
-		RangeCount:    desired.RangeCount,
-		BreakoutCount: desired.BreakoutCount,
-		Candidates:    len(cfg.CandidateSymbols),
-		Snapshots:     len(snapshots),
+		GlobalState:      desired.GlobalState,
+		SnapshotInterval: validationSnapshotIntervalName(cfg),
+		TrendCount:       desired.TrendCount,
+		RangeCount:       desired.RangeCount,
+		BreakoutCount:    desired.BreakoutCount,
+		Candidates:       len(cfg.CandidateSymbols),
+		Snapshots:        len(snapshots),
 	}
 	for _, snap := range snapshots {
+		if summary.LastSnapshotAt.IsZero() || snap.UpdatedAt.After(summary.LastSnapshotAt) {
+			summary.LastSnapshotAt = snap.UpdatedAt
+		}
 		if isSnapshotFresh(cfg, now, snap) {
 			summary.Fresh++
 		} else {

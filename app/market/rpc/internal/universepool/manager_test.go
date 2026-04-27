@@ -124,3 +124,18 @@ func TestManagerUpdateSnapshotFromKlineUses5mInValidationMode5m(t *testing.T) {
 		t.Fatalf("LastReason = %s, want fresh_5m", got.LastReason)
 	}
 }
+
+func TestSummarizeStatesIncludesSnapshotMetadata(t *testing.T) {
+	now := time.Date(2026, 4, 27, 0, 10, 0, 0, time.UTC)
+	summary := summarizeStates(Config{ValidationMode: "5m"}, now, DesiredUniverse{}, map[string]Snapshot{
+		"BTCUSDT": {Symbol: "BTCUSDT", UpdatedAt: now.Add(-2 * time.Minute), Healthy: true},
+		"ETHUSDT": {Symbol: "ETHUSDT", UpdatedAt: now.Add(-30 * time.Second), Healthy: true},
+	}, map[string]SymbolRuntimeState{})
+
+	if summary.SnapshotInterval != "5m" {
+		t.Fatalf("SnapshotInterval = %s, want 5m", summary.SnapshotInterval)
+	}
+	if !summary.LastSnapshotAt.Equal(now.Add(-30 * time.Second)) {
+		t.Fatalf("LastSnapshotAt = %s, want %s", summary.LastSnapshotAt, now.Add(-30*time.Second))
+	}
+}

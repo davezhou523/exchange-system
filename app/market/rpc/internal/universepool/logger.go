@@ -36,22 +36,24 @@ type symbolLogEntry struct {
 }
 
 type metaLogEntry struct {
-	Timestamp      string         `json:"timestamp"`
-	GlobalState    string         `json:"global_state,omitempty"`
-	TrendCount     int            `json:"trend_count"`
-	RangeCount     int            `json:"range_count"`
-	BreakoutCount  int            `json:"breakout_count"`
-	CandidateCount int            `json:"candidate_count"`
-	SnapshotCount  int            `json:"snapshot_count"`
-	FreshCount     int            `json:"fresh_count"`
-	StaleCount     int            `json:"stale_count"`
-	Inactive       int            `json:"inactive_count"`
-	PendingAdd     int            `json:"pending_add_count,omitempty"`
-	Warming        int            `json:"warming_count,omitempty"`
-	Active         int            `json:"active_count,omitempty"`
-	PendingRemove  int            `json:"pending_remove_count,omitempty"`
-	Cooldown       int            `json:"cooldown_count,omitempty"`
-	StateCounts    map[string]int `json:"state_counts,omitempty"`
+	Timestamp        string         `json:"timestamp"`
+	GlobalState      string         `json:"global_state,omitempty"`
+	SnapshotInterval string         `json:"snapshot_interval,omitempty"`
+	LastSnapshotAt   string         `json:"last_snapshot_at,omitempty"`
+	TrendCount       int            `json:"trend_count"`
+	RangeCount       int            `json:"range_count"`
+	BreakoutCount    int            `json:"breakout_count"`
+	CandidateCount   int            `json:"candidate_count"`
+	SnapshotCount    int            `json:"snapshot_count"`
+	FreshCount       int            `json:"fresh_count"`
+	StaleCount       int            `json:"stale_count"`
+	Inactive         int            `json:"inactive_count"`
+	PendingAdd       int            `json:"pending_add_count,omitempty"`
+	Warming          int            `json:"warming_count,omitempty"`
+	Active           int            `json:"active_count,omitempty"`
+	PendingRemove    int            `json:"pending_remove_count,omitempty"`
+	Cooldown         int            `json:"cooldown_count,omitempty"`
+	StateCounts      map[string]int `json:"state_counts,omitempty"`
 }
 
 // NewJSONLLogger 创建动态币池的 jsonl 日志器。
@@ -120,21 +122,22 @@ func (l *jsonlLogger) WriteMeta(now time.Time, summary stateSummary) {
 		return
 	}
 	entry := metaLogEntry{
-		Timestamp:      formatLogTime(now),
-		GlobalState:    summary.GlobalState,
-		TrendCount:     summary.TrendCount,
-		RangeCount:     summary.RangeCount,
-		BreakoutCount:  summary.BreakoutCount,
-		CandidateCount: summary.Candidates,
-		SnapshotCount:  summary.Snapshots,
-		FreshCount:     summary.Fresh,
-		StaleCount:     summary.Stale,
-		Inactive:       summary.Inactive,
-		PendingAdd:     summary.PendingAdd,
-		Warming:        summary.Warming,
-		Active:         summary.Active,
-		PendingRemove:  summary.PendingRemove,
-		Cooldown:       summary.Cooldown,
+		Timestamp:        formatLogTime(now),
+		GlobalState:      summary.GlobalState,
+		SnapshotInterval: summary.SnapshotInterval,
+		TrendCount:       summary.TrendCount,
+		RangeCount:       summary.RangeCount,
+		BreakoutCount:    summary.BreakoutCount,
+		CandidateCount:   summary.Candidates,
+		SnapshotCount:    summary.Snapshots,
+		FreshCount:       summary.Fresh,
+		StaleCount:       summary.Stale,
+		Inactive:         summary.Inactive,
+		PendingAdd:       summary.PendingAdd,
+		Warming:          summary.Warming,
+		Active:           summary.Active,
+		PendingRemove:    summary.PendingRemove,
+		Cooldown:         summary.Cooldown,
 		StateCounts: map[string]int{
 			string(SymbolInactive):      summary.Inactive,
 			string(SymbolPendingAdd):    summary.PendingAdd,
@@ -143,6 +146,9 @@ func (l *jsonlLogger) WriteMeta(now time.Time, summary stateSummary) {
 			string(SymbolPendingRemove): summary.PendingRemove,
 			string(SymbolCooldown):      summary.Cooldown,
 		},
+	}
+	if !summary.LastSnapshotAt.IsZero() {
+		entry.LastSnapshotAt = formatLogTime(summary.LastSnapshotAt)
 	}
 	l.writeJSONL(filepath.Join(l.baseDir, "_meta"), now, entry)
 }
