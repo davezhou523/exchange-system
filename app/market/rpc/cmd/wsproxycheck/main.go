@@ -22,8 +22,8 @@ func main() {
 	readTimeout := flag.Duration("read-timeout", 20*time.Second, "timeout waiting for first message")
 	maxMessages := flag.Int("max-messages", 5, "exit after receiving this many messages")
 	flag.Parse()
-
-	target := fmt.Sprintf("%s/stream?streams=%s", strings.TrimRight(*baseURL, "/"), strings.TrimLeft(*streams, "/"))
+	log.Printf("[wsproxycheck] base_url=%s proxy_url=%s streams=%s read_timeout=%s max_messages=%d", *baseURL, *proxyURL, *streams, *readTimeout, *maxMessages)
+	target := fmt.Sprintf("%s/market/stream?streams=%s", strings.TrimRight(*baseURL, "/"), strings.TrimLeft(*streams, "/"))
 	dialer := &websocket.Dialer{HandshakeTimeout: 15 * time.Second}
 	if err := configureProxy(dialer, *proxyURL); err != nil {
 		log.Fatalf("configure proxy failed: %v", err)

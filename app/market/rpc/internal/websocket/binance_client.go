@@ -243,7 +243,7 @@ func (c *BinanceWebSocketClient) buildStreamURL() string {
 			streams = append(streams, fmt.Sprintf("%s@depth20@100ms", strings.ToLower(symbol)))
 		}
 	}
-	return fmt.Sprintf("%s/stream?streams=%s", strings.TrimRight(c.baseURL, "/"), strings.Join(streams, "/"))
+	return fmt.Sprintf("%s/market/stream?streams=%s", strings.TrimRight(c.baseURL, "/"), strings.Join(streams, "/"))
 }
 
 // Connect 建立到 Binance 多路复用 WebSocket 的连接。
