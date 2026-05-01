@@ -17,6 +17,7 @@ type Snapshot struct {
 	LastInterval string
 	Close        float64
 	Atr          float64
+	Volume       float64
 	Ema21        float64
 	Ema55        float64
 	MarketState  marketstate.MarketState
@@ -40,6 +41,8 @@ type Config struct {
 	RequireFinal          bool
 	RequireTradable       bool
 	RequireClean          bool
+	RangeTemplate         string
+	BreakoutTemplate      string
 	BTCTrendTemplate      string
 	BTCTrendAtrPctMax     float64
 	HighBetaSafeTemplate  string
@@ -128,13 +131,6 @@ func (s *Selector) dynamicTemplateDecision(symbol, baseTemplate string, snap Sna
 		return baseTemplate, true, "healthy_data"
 	}
 	switch symbol {
-	case "BTCUSDT":
-		if s.cfg.BTCTrendTemplate != "" && s.shouldUseBTCTrend(snap) {
-			if snap.MarketState == marketstate.MarketStateTrendUp || snap.MarketState == marketstate.MarketStateTrendDown {
-				return s.cfg.BTCTrendTemplate, true, "market_state_trend"
-			}
-			return s.cfg.BTCTrendTemplate, true, "trend_strong"
-		}
 	case "SOLUSDT":
 		if s.isHighBetaSafeSymbol(symbol) && s.cfg.HighBetaSafeTemplate != "" {
 			atrPct := s.atrPct(snap)
@@ -145,6 +141,18 @@ func (s *Selector) dynamicTemplateDecision(symbol, baseTemplate string, snap Sna
 				return s.cfg.HighBetaSafeTemplate, true, "volatility_high"
 			}
 		}
+	}
+	if s.cfg.RangeTemplate != "" && snap.MarketState == marketstate.MarketStateRange {
+		return s.cfg.RangeTemplate, true, "market_state_range"
+	}
+	if s.cfg.BreakoutTemplate != "" && snap.MarketState == marketstate.MarketStateBreakout {
+		return s.cfg.BreakoutTemplate, true, "market_state_breakout"
+	}
+	if symbol == "BTCUSDT" && s.cfg.BTCTrendTemplate != "" && s.shouldUseBTCTrend(snap) {
+		if snap.MarketState == marketstate.MarketStateTrendUp || snap.MarketState == marketstate.MarketStateTrendDown {
+			return s.cfg.BTCTrendTemplate, true, "market_state_trend"
+		}
+		return s.cfg.BTCTrendTemplate, true, "trend_strong"
 	}
 	return baseTemplate, true, "healthy_data"
 }

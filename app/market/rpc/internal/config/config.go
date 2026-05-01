@@ -91,6 +91,8 @@ type Config struct {
 		TrendPreferredSymbols    []string      `json:",optional"`
 		RangePreferredSymbols    []string      `json:",optional"`
 		BreakoutPreferredSymbols []string      `json:",optional"`
+		BreakoutAtrPctMin        float64       `json:",optional"`
+		BreakoutAtrPctExitMin    float64       `json:",optional"`
 		EvaluateInterval         time.Duration `json:",default=30s"`
 		MinActiveDuration        time.Duration `json:",default=1h"`
 		MinInactiveDuration      time.Duration `json:",default=1h"`

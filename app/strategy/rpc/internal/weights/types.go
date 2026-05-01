@@ -15,18 +15,31 @@ type Config struct {
 	LossStreakThreshold   int
 	DailyLossSoftLimit    float64
 	DrawdownSoftLimit     float64
+	CoolingPauseDuration  time.Duration
+	AtrSpikeRatioMin      float64
+	VolumeSpikeRatioMin   float64
+	CoolingMinSamples     int
+	TrendStrategyMix      map[string]float64
+	BreakoutStrategyMix   map[string]float64
+	RangeStrategyMix      map[string]float64
+	TrendSymbolWeights    map[string]float64
+	BreakoutSymbolWeights map[string]float64
+	RangeSymbolWeights    map[string]float64
 }
 
 // Inputs 表示一次权重评估所需的最小输入。
 type Inputs struct {
-	MarketState  marketstate.AggregateResult
-	Symbols      []string
-	Templates    map[string]string
-	SymbolScores map[string]float64
-	LossStreak   int
-	DailyLossPct float64
-	DrawdownPct  float64
-	UpdatedAt    time.Time
+	MarketState        marketstate.AggregateResult
+	Symbols            []string
+	Templates          map[string]string
+	SymbolScores       map[string]float64
+	LossStreak         int
+	DailyLossPct       float64
+	DrawdownPct        float64
+	AvgAtrPct          float64
+	AvgVolume          float64
+	HealthySymbolCount int
+	UpdatedAt          time.Time
 }
 
 // Recommendation 表示某个 symbol 当前的权重与风险预算建议。
@@ -46,6 +59,9 @@ type Output struct {
 	Recommendations   []Recommendation `json:"recommendations"`
 	MarketPaused      bool             `json:"market_paused"`
 	MarketPauseReason string           `json:"market_pause_reason,omitempty"`
+	CoolingUntil      time.Time        `json:"cooling_until,omitempty"`
+	AtrSpikeRatio     float64          `json:"atr_spike_ratio,omitempty"`
+	VolumeSpikeRatio  float64          `json:"volume_spike_ratio,omitempty"`
 	UpdatedAt         time.Time        `json:"updated_at"`
 }
 

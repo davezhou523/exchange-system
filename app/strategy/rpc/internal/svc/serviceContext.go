@@ -15,6 +15,7 @@ import (
 	harvestpathmodel "exchange-system/app/strategy/rpc/internal/strategy/harvestpath"
 	"exchange-system/app/strategy/rpc/internal/universe"
 	"exchange-system/app/strategy/rpc/internal/weights"
+	"exchange-system/common/featureengine"
 	commonkafka "exchange-system/common/kafka"
 	"exchange-system/common/pb/market"
 	strategypb "exchange-system/common/pb/strategy"
@@ -128,6 +129,8 @@ func normalizeUniverseConfig(cfg config.Config) universe.Config {
 		RequireFinal:          uc.RequireFinal,
 		RequireTradable:       uc.RequireTradable,
 		RequireClean:          uc.RequireClean,
+		RangeTemplate:         uc.RangeTemplate,
+		BreakoutTemplate:      uc.BreakoutTemplate,
 		BTCTrendTemplate:      uc.BTCTrendTemplate,
 		BTCTrendAtrPctMax:     uc.BTCTrendAtrPctMax,
 		HighBetaSafeTemplate:  uc.HighBetaSafeTemplate,
@@ -222,20 +225,22 @@ func (s *ServiceContext) updateUniverseSnapshot(kline *market.Kline) {
 	if s == nil || s.universeSelector == nil || kline == nil || kline.Symbol == "" || kline.Interval != "1m" {
 		return
 	}
+	features := featureengine.BuildFromKline(kline)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.universeSnapshots[kline.Symbol] = universe.Snapshot{
-		Symbol:       kline.Symbol,
-		UpdatedAt:    time.Now().UTC(),
+		Symbol:       features.Symbol,
+		UpdatedAt:    features.UpdatedAt,
 		LastEventMs:  kline.EventTime,
 		IsDirty:      kline.IsDirty,
 		IsTradable:   kline.IsTradable,
 		IsFinal:      kline.IsFinal,
-		LastInterval: kline.Interval,
-		Close:        kline.Close,
-		Atr:          kline.Atr,
-		Ema21:        kline.Ema21,
-		Ema55:        kline.Ema55,
+		LastInterval: features.Timeframe,
+		Close:        features.Close,
+		Atr:          features.Atr,
+		Volume:       features.Volume,
+		Ema21:        features.Ema21,
+		Ema55:        features.Ema55,
 	}
 }
 
@@ -300,7 +305,7 @@ func (s *ServiceContext) evaluateUniverse(now time.Time) {
 
 	desired := s.universeSelector.Evaluate(now, snapshots)
 	if s.weightEngine != nil && s.weightLogs != nil {
-		weightInput := s.buildWeightInputs(now, desired, stateResults)
+		weightInput := s.buildWeightInputs(now, desired, snapshots, stateResults)
 		weightOutput := s.weightEngine.Evaluate(now, weightInput)
 		s.storeLatestWeightRecommendations(weightOutput)
 		for _, rec := range weightOutput.Recommendations {
@@ -312,10 +317,11 @@ func (s *ServiceContext) evaluateUniverse(now time.Time) {
 			now,
 		)
 		log.Printf(
-			"[weights] evaluate symbols=%d recommendations=%d paused=%v market_state=%s source=%s",
+			"[weights] evaluate symbols=%d recommendations=%d paused=%v pause_reason=%s market_state=%s source=%s",
 			len(weightInput.Symbols),
 			len(weightOutput.Recommendations),
 			weightOutput.MarketPaused,
+			weightOutput.MarketPauseReason,
 			weightInput.MarketState.State,
 			"marketstate.aggregate",
 		)
@@ -346,14 +352,16 @@ func (s *ServiceContext) evaluateUniverse(now time.Time) {
 	)
 }
 
-// buildWeightInputs 把当前轮 Universe 和 MarketState 结果整理成 Phase 5 权重引擎输入。
-func (s *ServiceContext) buildWeightInputs(now time.Time, desired []universe.DesiredStrategy, stateResults map[string]marketstate.Result) weights.Inputs {
+// buildWeightInputs 把当前轮 Universe、快照和 MarketState 结果整理成权重引擎输入。
+func (s *ServiceContext) buildWeightInputs(now time.Time, desired []universe.DesiredStrategy, snapshots map[string]universe.Snapshot, stateResults map[string]marketstate.Result) weights.Inputs {
 	in := weights.Inputs{
 		MarketState:  marketstate.Aggregate(now, stateResults),
 		Templates:    make(map[string]string),
 		SymbolScores: make(map[string]float64),
 		UpdatedAt:    now.UTC(),
 	}
+	atrPctTotal := 0.0
+	volumeTotal := 0.0
 	for _, d := range desired {
 		if !d.Enabled {
 			continue
@@ -361,6 +369,17 @@ func (s *ServiceContext) buildWeightInputs(now time.Time, desired []universe.Des
 		in.Symbols = append(in.Symbols, d.Symbol)
 		in.Templates[d.Symbol] = d.Template
 		in.SymbolScores[d.Symbol] = scoreDesiredStrategy(d)
+		snap, ok := snapshots[d.Symbol]
+		if !ok || snap.Close <= 0 || snap.Atr <= 0 || snap.Volume <= 0 {
+			continue
+		}
+		atrPctTotal += snap.Atr / snap.Close
+		volumeTotal += snap.Volume
+		in.HealthySymbolCount++
+	}
+	if in.HealthySymbolCount > 0 {
+		in.AvgAtrPct = atrPctTotal / float64(in.HealthySymbolCount)
+		in.AvgVolume = volumeTotal / float64(in.HealthySymbolCount)
 	}
 	return in
 }
@@ -375,6 +394,41 @@ func scoreDesiredStrategy(d universe.DesiredStrategy) float64 {
 	default:
 		return 1
 	}
+}
+
+// buildWeightConfig 把 YAML 配置转换成权重引擎配置，便于后续继续扩展状态化资金模型。
+func buildWeightConfig(c config.Config) weights.Config {
+	return weights.Config{
+		DefaultTrendWeight:    c.Weights.DefaultTrendWeight,
+		DefaultRangeWeight:    c.Weights.DefaultRangeWeight,
+		DefaultBreakoutWeight: c.Weights.DefaultBreakoutWeight,
+		DefaultRiskScale:      c.Weights.DefaultRiskScale,
+		LossStreakThreshold:   c.Weights.LossStreakThreshold,
+		DailyLossSoftLimit:    c.Weights.DailyLossSoftLimit,
+		DrawdownSoftLimit:     c.Weights.DrawdownSoftLimit,
+		CoolingPauseDuration:  c.Weights.CoolingPauseDuration,
+		AtrSpikeRatioMin:      c.Weights.AtrSpikeRatioMin,
+		VolumeSpikeRatioMin:   c.Weights.VolumeSpikeRatioMin,
+		CoolingMinSamples:     c.Weights.CoolingMinSamples,
+		TrendStrategyMix:      cloneWeightMap(c.Weights.TrendStrategyMix),
+		BreakoutStrategyMix:   cloneWeightMap(c.Weights.BreakoutStrategyMix),
+		RangeStrategyMix:      cloneWeightMap(c.Weights.RangeStrategyMix),
+		TrendSymbolWeights:    cloneWeightMap(c.Weights.TrendSymbolWeights),
+		BreakoutSymbolWeights: cloneWeightMap(c.Weights.BreakoutSymbolWeights),
+		RangeSymbolWeights:    cloneWeightMap(c.Weights.RangeSymbolWeights),
+	}
+}
+
+// cloneWeightMap 复制 YAML 中的权重映射，避免运行时修改影响原始配置对象。
+func cloneWeightMap(in map[string]float64) map[string]float64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(in))
+	for symbol, weight := range in {
+		out[symbol] = weight
+	}
+	return out
 }
 
 // storeLatestWeightRecommendations 缓存最新一轮权重建议，供状态接口等轻量读路径使用。
@@ -573,16 +627,20 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		executionCli:             executionCli,
 		strategies:               make(map[string]*strategyengine.TrendFollowingStrategy),
 		strategyConfigs:          make(map[string]config.StrategyConfig),
-		marketStateDetector:      marketstate.NewDetector(marketstate.Config{}),
-		marketStateLogs:          marketstate.NewLogState(),
-		weightEngine:             weights.NewEngine(weights.Config{}),
-		weightLogs:               weights.NewLogState(),
-		latestWeights:            make(map[string]weights.Recommendation),
-		universeSnapshots:        make(map[string]universe.Snapshot),
-		universeStates:           make(map[string]universeRuntimeState),
-		universeLogs:             newUniverseLogState(),
-		universeStartedAt:        time.Now().UTC(),
-		cancel:                   cancel,
+		marketStateDetector: marketstate.NewDetector(marketstate.Config{
+			FreshnessWindow:   c.MarketState.FreshnessWindow,
+			RangeAtrPctMax:    c.MarketState.RangeAtrPctMax,
+			BreakoutAtrPctMin: c.MarketState.BreakoutAtrPctMin,
+		}),
+		marketStateLogs:   marketstate.NewLogState(),
+		weightEngine:      weights.NewEngine(buildWeightConfig(c)),
+		weightLogs:        weights.NewLogState(),
+		latestWeights:     make(map[string]weights.Recommendation),
+		universeSnapshots: make(map[string]universe.Snapshot),
+		universeStates:    make(map[string]universeRuntimeState),
+		universeLogs:      newUniverseLogState(),
+		universeStartedAt: time.Now().UTC(),
+		cancel:            cancel,
 	}
 	if c.Universe.Enabled {
 		svcCtx.universeSelector = universe.NewSelector(normalizeUniverseConfig(c))

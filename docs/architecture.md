@@ -4,6 +4,21 @@
 > **技术栈**: go-zero + gRPC + Kafka + etcd + Redis  
 > **核心功能**: 加密货币合约交易自动化策略系统  
 
+## 核心目标
+
+```text
+这个引擎优先解决 3 件事：
+1. 自动选币（今天该做谁）
+2. 自动选策略（这个币用什么打法）
+3. 自动分仓（资金怎么分配）
+```
+
+```text
+本质不是“人选币 + 固定策略”。
+而是系统基于市场状态和风险约束做动态决策，
+自动完成标的选择、策略匹配和资金分配。
+```
+
 ---
 
 ## 一、系统总览图
@@ -56,10 +71,10 @@
 │  │                              Apache Kafka 3.8.1                                          │    │
 │  │                                                                                          │    │
 │  │  Topics:                                                                                 │    │
-│  │  • market_data          → Market Service 发布聚合K线数据                                  │    │
-│  │  • strategy_signals     → Strategy Service 发布交易信号                                   │    │
-│  │  • order_events         → Execution Service 发布订单状态事件                              │    │
-│  │  • execution_commands   → Strategy Service 向 Execution Service 发送执行命令               │    │
+│  │  • kline                → Market Service 发布聚合K线数据                                  │    │
+│  │  • signal               → Strategy Service 发布交易信号                                   │    │
+│  │  • order                → Execution Service 发布订单状态事件                              │    │
+│  │  • harvest_path_signal  → Strategy Service 发布收割路径风险信号                           │    │
 │  └──────────────────────────────────────────────────────────────────────────────────────────┘    │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -138,7 +153,7 @@
                                    ▼
                     ┌──────────────────────────────┐
                     │        Kafka Topic           │
-                    │    market_data               │
+                    │    kline                     │
                     └────────┬─────────────────────┘
                              │
                              ▼
@@ -204,7 +219,7 @@
 │                                 ▼                                            │
 │                    ┌────────────────────────┐                                │
 │                    │  发送交易信号到 Kafka   │                                │
-│                    │  Topic: strategy_signals│                                │
+│                    │  Topic: signal         │                                │
 │                    └────────────────────────┘                                │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
@@ -234,8 +249,8 @@
 │  │                                                                        │  │
 │  │  1. 接收信号                                                            │  │
 │  │     ┌──────────────────────────────────────────────────────────────┐   │  │
-│  │     │  • Kafka: strategy_signals topic                              │   │  │
-│  │     │  • gRPC: CreateOrder RPC                                      │   │  │
+│  │     │  • Kafka: signal topic（当前策略主链路）                        │   │  │
+│  │     │  • gRPC: CreateOrder RPC（人工/调试直调入口）                   │   │  │
 │  │     └──────────────────────────────────────────────────────────────┘   │  │
 │  │                              │                                         │  │
 │  │                              ▼                                         │  │
@@ -283,7 +298,7 @@
 │  │                              ▼                                         │  │
 │  │  7. 发布订单事件                                                        │  │
 │  │     ┌──────────────────────────────────────────────────────────────┐   │  │
-│  │     │  • Kafka: order_events topic                                  │   │  │
+│  │     │  • Kafka: order topic                                         │   │  │
 │  │     │  • Order Service 消费用于查询                                  │   │  │
 │  │     └──────────────────────────────────────────────────────────────┘   │  │
 │  │                                                                        │  │
@@ -309,7 +324,7 @@
     │            │             │ 推送K线数据 │             │             │
     │            │             │────────────>│             │             │
     │            │             │             │             │             │
-    │            │             │    Kafka: market_data    │             │
+    │            │             │      Kafka: kline        │             │
     │            │             │─────────────────────────>│             │
     │            │             │             │             │             │
     │            │             │  策略判断   │             │             │
@@ -318,7 +333,7 @@
     │            │             │             │             │             │
     │            │             │  生成交易信号│             │             │
     │            │             │             │             │             │
-    │            │             │  Kafka: strategy_signals │             │
+    │            │             │     Kafka: signal        │             │
     │            │             │─────────────────────────>│             │
     │            │             │             │             │             │
     │            │             │             │   风控校验  │             │
@@ -331,7 +346,7 @@
     │            │             │             │  订单回报   │             │
     │            │             │             │<────────────│             │
     │            │             │             │             │             │
-    │            │             │  Kafka: order_events     │             │
+    │            │             │      Kafka: order        │             │
     │            │             │<─────────────────────────│             │
     │            │             │             │             │             │
     │  查询订单状态│             │             │             │             │
@@ -342,9 +357,763 @@
     │            │             │             │             │             │
 ```
 
+### 2.5 当前代码链路 Mermaid 时序图
+
+说明:
+
+- 以下时序图按当前仓库代码整理，优先反映真实函数跳转和实际 topic 名
+- 当前真实 topic 以 `kline`、`signal`、`order` 为准，不再使用旧文档中的 `market_data`、`strategy_signals`、`order_events`
+- `market` 和 `strategy` 都有各自的 universe 逻辑，前者偏市场侧动态币池，后者偏策略实例启停
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant EX as Binance Exchange
+    participant WS as Market WS Client
+    participant AGG as Market Aggregator
+    participant MUP as Market UniversePool
+    participant KK as Kafka kline
+    participant STR as Strategy Service
+    participant SUP as Strategy Universe
+    participant SIG as Kafka signal
+    participant EXEC as Execution Service
+    participant ORD as Kafka order
+    participant ODS as Order Service
+
+    EX->>WS: WebSocket 推送 1m K线
+    WS->>AGG: BinanceWebSocketClient.StartInBackground()<br/>klineDispatcher.OnKline()<br/>KlineAggregator.OnKline()
+    AGG->>KK: Producer.SendMarketData()<br/>topic=kline
+    AGG->>MUP: SetEmitObserver()<br/>Manager.UpdateSnapshotFromKline()
+    MUP->>MUP: Manager.Start()<br/>selector.Evaluate()<br/>写 _meta / selector_decision
+
+    KK->>STR: strategy/internal/kafka.Consumer.ConsumeClaim()
+    STR->>SUP: updateUniverseSnapshot()
+    STR->>SUP: runUniverseLoop()<br/>evaluateUniverse()<br/>universe.Selector.Evaluate()
+    SUP->>STR: applyUniverseDecision()<br/>applyStrategyConfig()<br/>UpsertStrategy()
+    STR->>STR: TrendFollowingStrategy.OnKline()
+    STR->>SIG: signalProducer.SendMarketData()<br/>topic=signal
+
+    SIG->>EXEC: execution/internal/kafka.Consumer.ConsumeClaim()
+    EXEC->>EXEC: HandleSignal()<br/>幂等 -> 风控 -> Router.CreateOrder()
+    EXEC->>EXEC: orderManager.AddOrder()/UpdateOrder()<br/>posManager.UpdateFromOrder()
+    EXEC->>ORD: orderProducer.SendMarketData()<br/>topic=order
+
+    ORD->>ODS: order/internal/kafka.Consumer.ConsumeClaim()
+    ODS->>ODS: handleOrderEvent()<br/>refreshPositions()<br/>GetAllOrders()<br/>GetUserTrades()
+```
+
+建议阅读顺序:
+
+```text
+如果你现在的目标是理解 “market 的 UniversePool、strategy 的 universe，以及最终 signal 各自负责什么”，
+推荐按下面顺序往下看：
+
+1. 先看 2.5
+   目标：先建立真实代码链路和 topic 流向
+2. 再看 2.6
+   目标：看懂 UniversePool / Strategy Universe / Signal 的三层职责边界
+3. 最后看 3.3.6
+   目标：只展开 market 侧 UniversePool 的日志字段、状态机和排查方法
+```
+
+### 2.6 UniversePool 与 Strategy Universe / Signal 职责分层
+
+说明:
+
+- 这一层图专门回答一个常见问题: `strategy` 已经会做策略判断，为什么上游还需要 `UniversePool`
+- 结论是三层职责并不重复，而是分别解决 `看谁`、`启哪个策略`、`此刻要不要交易`
+
+```mermaid
+flowchart LR
+    subgraph M["Market 层: UniversePool"]
+        A["Binance 闭合 Kline"]
+        B["KlineAggregator"]
+        C["Manager.UpdateSnapshotFromKline"]
+        D["Snapshot\n价格 / EMA / ATR / 健康度"]
+        E["BasicSelector.Evaluate\n全局状态 + 候选币打分"]
+        F["DesiredUniverse\n要不要进动态币池"]
+        G["Manager.applyDesiredUniverse\ninactive / warming / active"]
+        H["动态订阅与预热控制"]
+        I["selector_decision / _meta 日志"]
+
+        A --> B --> C --> D --> E --> F --> G --> H
+        E --> I
+        G --> I
+    end
+
+    subgraph S["Strategy 层: universe / signal"]
+        J["Kafka kline"]
+        K["updateUniverseSnapshot\n记录 strategy 侧轻量快照"]
+        L["runUniverseLoop"]
+        M2["universe.Selector.Evaluate\n启用 / 停用哪个策略实例\n切哪个模板"]
+        N["applyUniverseDecision\nUpsertStrategy / Disable"]
+        O["已启用策略实例"]
+        P["策略指标判断\nRSI / 趋势 / 回调"]
+        Q["生成 signal"]
+        R["Kafka signal -> Execution"]
+
+        J --> K --> L --> M2 --> N --> O --> P --> Q --> R
+    end
+
+    B --> J
+```
+
+三层职责说明:
+
+```text
+1. UniversePool: 先决定“看谁”
+   • 所在位置: market
+   • 核心输入: 聚合后的 1m Kline 快照
+   • 核心输出: 哪些 symbol 进入动态币池，以及 inactive / warming / active 状态迁移
+   • 主要作用:
+     - 先挡掉 no_snapshot / stale_snapshot / unhealthy
+     - 根据 trend / range / breakout 做市场侧粗筛
+     - 控制观察订阅、预热和日志证据
+
+2. Strategy Universe: 再决定“启哪个策略模板”
+   • 所在位置: strategy
+   • 核心输入: strategy 侧最近一根 1m 快照 + marketstate
+   • 核心输出: 某个 symbol 对应的策略实例是否启用，当前使用哪个 template
+   • 主要作用:
+     - 把可运行 symbol 映射成具体策略模板
+     - 在高波动、脏数据、非趋势条件下临时禁用某些策略实例
+     - 让同一个 symbol 在不同环境下切换更合适的模板
+
+3. Signal: 最后决定“此刻要不要交易”
+   • 所在位置: strategy 具体策略实例
+   • 核心输入: 已启用 symbol 的实时指标与持仓上下文
+   • 核心输出: OPEN / CLOSE 等交易信号
+   • 主要作用:
+     - 判断当前这一根 Kline 是否满足入场 / 出场条件
+     - 生成真正发往 execution 的 signal
+     - 这是交易决策细判，不负责 market 侧订阅治理
+```
+
+一句话总结:
+
+```text
+UniversePool 管“入池”，Strategy Universe 管“启哪个策略”，Signal 管“现在下不下单”。
+```
+
+延伸阅读:
+
+```text
+如果你接下来想继续只看 market 侧 UniversePool 的真实输入、selector_decision、_meta 字段和状态机推进，
+可以直接跳到 3.3.6《Market UniversePool 判读标准》。
+```
+
+### 2.7 职责导向目标架构图
+
+说明:
+
+- 这张图不是对当前代码文件结构的逐行翻译，而是对“更清晰的职责分层目标”做抽象
+- 它最适合回答的问题是：如果后面要继续演进 `选币 / 市场状态 / 策略路由 / 多策略 worker`，应该按什么边界拆
+
+```mermaid
+flowchart TD
+    A["Market Data\nKline / Orderbook"] --> B["Market Feature Engine\nATR / ADX / EMA / Volume"]
+
+    B --> C["Symbol Ranker\n选币引擎"]
+    B --> D["Regime Judge\n市场状态"]
+
+    C --> E["Strategy Router\n核心调度"]
+    D --> E
+
+    E --> F["Strategy Workers\nTrend / Breakout / MeanReversion"]
+    F --> G["Risk Manager"]
+    G --> H["Execution Engine"]
+```
+
+当前实现映射:
+
+```text
+1. Market Data
+   • 当前主要对应 market 服务接收 Binance WebSocket，并向 Kafka `kline` 发布聚合 K 线
+
+2. Market Feature Engine
+   • 当前主要分散在 KlineAggregator、指标计算、UniversePool snapshot 构建中
+   • 已经具备 EMA / RSI / ATR 等能力，但还没有被显式抽成统一特征层
+
+3. Symbol Ranker
+   • 当前最接近 market 侧的 UniversePool / BasicSelector
+   • 负责候选币打分、过滤、偏好币放行和动态币池推进
+
+4. Regime Judge
+   • 当前一部分在 market 侧 UniversePool 的 global_state 判断
+   • 另一部分在 strategy 侧 marketstate 检测
+   • 功能已存在，但还没有完全收敛成单一判态层
+
+5. Strategy Router
+   • 当前最接近 strategy 侧 universe.Selector + applyUniverseDecision
+   • 现在主要做策略实例启停和模板切换，还不是完整的策略路由中心
+
+6. Strategy Workers
+   • 当前主力仍是 TrendFollowingStrategy
+   • Breakout / MeanReversion 还没有完全独立成并列 worker
+
+7. Risk Manager / Execution Engine
+   • 当前已经比较清晰
+   • strategy 侧负责部分信号风控，execution 侧负责更硬的执行风控与下单
+```
+
+目标演进方向:
+
+```text
+1. 先把 Market Feature Engine 显式抽出来
+   • 统一 ATR / ADX / EMA / Volume / Orderbook 等特征输入
+   • 避免不同 selector / strategy 重复计算和重复解释
+
+2. 再把 Symbol Ranker 和 Regime Judge 解耦
+   • 让“选什么币”和“当前市场是什么状态”变成两块可独立演进的能力
+   • 避免把过多职责继续堆在 UniversePool 一层
+
+3. 把 strategy universe 升级成真正的 Strategy Router
+   • 不只做启停和模板切换
+   • 还负责把不同 symbol 在不同 regime 下路由给更合适的策略 worker
+
+4. 把 Trend / Breakout / MeanReversion 变成独立 worker
+   • 共享统一特征输入
+   • 保持各自的信号逻辑、风控参数和可观测性
+
+5. 再让 Orderbook 与更多 regime 特征进入主链路
+   • 把目前偏 Kline 驱动的架构，逐步演进成“特征驱动 + 路由驱动”的架构
+```
+
+一句话理解:
+
+```text
+当前系统已经具备这张图里的大部分零件，但它们还分散在 market / strategy 内部；后续演进重点不是“再加更多逻辑”，而是把已有能力按职责边界重新收拢。
+```
+
+### 2.8 核心模块设计（重点）
+
+说明:
+
+- 这一节不是对当前代码目录的逐文件解释，而是对目标引擎中最关键的模块边界做设计说明
+- 当前优先展开两层：`Feature Engine` 和 `Symbol Ranker`
+
+#### 2.8.1 Feature Engine（特征引擎）
+
+定位:
+
+```text
+特征引擎是整个动态决策系统的基础层。
+它负责把原始市场数据转换为可用于选币、选策略、分仓的统一特征。
+
+后续的 Symbol Ranker、Regime Judge、Strategy Router 都不应直接依赖原始 K 线，
+而应尽量依赖这里产出的标准化特征。
+```
+
+核心职责:
+
+```text
+1. 对每个交易对按固定周期持续计算特征
+2. 统一输出趋势、波动、成交活跃度等可比较指标
+3. 为上层模块提供稳定、一致、可复用的输入
+4. 避免不同 selector / strategy 重复计算 EMA、ATR、ADX、Volume 等基础指标
+```
+
+建议结构:
+
+```go
+type Features struct {
+    Symbol string
+
+    Price float64
+
+    EMA21 float64
+    EMA55 float64
+
+    ATR float64
+    ADX float64
+
+    Volume float64
+
+    TrendScore float64 // 趋势强度
+    Volatility float64 // 波动率
+}
+```
+
+字段说明:
+
+```text
+• Symbol
+  当前交易对标识
+
+• Price
+  当前用于决策的最新价格，一般取最新收盘价或最终成交价
+
+• EMA21 / EMA55
+  用于判断中短周期趋势结构
+  支撑趋势方向判断、均线排列判断和策略切换
+
+• ATR
+  用于衡量绝对波动幅度
+  是止损、分仓、状态识别的重要基础输入
+
+• ADX
+  用于衡量趋势强弱
+  可辅助区分“有方向但无趋势”和“趋势明确”的环境
+
+• Volume
+  用于衡量成交活跃度
+  可辅助过滤流动性不足或异常冷清的币
+
+• TrendScore
+  对趋势强度做统一量化
+  可由 EMA 排列、价格偏离、ADX 等因子组合得到
+
+• Volatility
+  对波动率做统一量化
+  可由 ATR、ATRPct、振幅等指标归一化得到
+```
+
+设计原则:
+
+```text
+1. 同一份特征输出要同时服务于选币、判态、策略路由和分仓
+2. 特征层尽量只做“计算与标准化”，不直接做交易决策
+3. 上层模块读取特征后，再各自决定是否启用、如何排序、如何交易
+4. 特征定义尽量保持稳定，避免不同模块各自扩展出不兼容字段
+```
+
+当前实现映射:
+
+```text
+当前这层能力已经部分存在，主要分散在：
+• market 的 KlineAggregator
+• 指标计算过程里的 EMA / RSI / ATR
+• UniversePool 的 Snapshot
+• strategy 侧的 marketstate 特征构建
+
+当前的问题不是没有特征，而是还没有统一收敛成一个显式的 Feature Engine。
+```
+
+一句话理解:
+
+```text
+Feature Engine 解决的是“把原始行情变成可决策输入”，它是整个动态决策系统的地基。
+```
+
+#### 2.8.2 Symbol Ranker（选币引擎）
+
+目标:
+
+```text
+选出“今天值得做的币”。
+它不是直接发交易信号，而是基于统一特征给候选币打分、排序、截断，输出当下最值得关注的 Top N 标的。
+```
+
+核心思路:
+
+```text
+score = w1*TrendScore + w2*Volume + w3*Volatility
+```
+
+其中：
+
+```text
+• TrendScore 代表趋势质量
+• Volume 代表成交活跃度
+• Volatility 代表可交易波动
+
+权重不一定固定，但最小版本可以先从线性加权开始。
+```
+
+示例代码:
+
+```go
+type SymbolScore struct {
+    Symbol string
+    Score  float64
+}
+
+func RankSymbols(list []Features) []SymbolScore {
+    scores := make([]SymbolScore, 0, len(list))
+    for _, f := range list {
+        score := f.TrendScore*0.4 +
+            f.Volatility*0.3 +
+            f.Volume*0.3
+
+        scores = append(scores, SymbolScore{
+            Symbol: f.Symbol,
+            Score:  score,
+        })
+    }
+    return scores
+}
+```
+
+输出示例:
+
+```text
+Top 5 coins:
+1. SOL
+2. ETH
+3. BNB
+4. XRP
+5. DOGE
+```
+
+设计要点:
+
+```text
+1. 选币引擎解决的是“先看谁”，不是“现在买不买”
+2. 排名必须基于统一特征输入，避免每个策略自己维护一套选币标准
+3. Top N 可以作为 UniversePool、Strategy Router、权重分配器的共同上游输入
+4. 后续可以在线性加权之上继续加入：
+   - 流动性过滤
+   - 相关性惩罚
+   - regime-aware 权重
+   - 黑白名单与风险降权
+```
+
+当前实现映射:
+
+```text
+当前最接近这一层的是 market 侧 UniversePool / BasicSelector。
+
+但当前 UniversePool 更偏“状态驱动 + 偏好币放行 + 动态币池状态机”，
+还不是一个完全独立、显式可解释的 Symbol Ranker。
+
+后续比较自然的演进方式是：
+先把 Feature Engine 固化，再把 Rank 逻辑从 UniversePool 中独立出来。
+```
+
+一句话理解:
+
+```text
+Feature Engine 产出“可比特征”，Symbol Ranker 把这些特征变成“今日优先级列表”。
+```
+
+#### 2.8.3 完整执行流程（落地版）
+
+核心流程:
+
+```text
+每 1 分钟：
+
+1. 计算所有币 Features
+2. 判断每个币 Market State
+3. 统计市场整体状态（加权）
+4. 分配策略权重
+5. 选 Top N 币
+6. 分配仓位
+7. 执行策略
+```
+
+为什么这样分层:
+
+```text
+1. 先统一特征，避免每个模块各算各的
+2. 先判断单币状态，再判断全市场状态，避免只看单点行情
+3. 先决定“做哪类策略”，再决定“做哪些币”，最后再决定“给多大仓位”
+4. 策略执行放在最后，避免每个策略实例自己重复做全局选币和分仓
+```
+
+推荐主链路:
+
+```text
+1m Features
+  -> Per-Symbol Market State
+  -> Global Weighted Market State
+  -> Strategy Mix Allocation
+  -> Top N Symbol Ranking
+  -> Position Budget Allocation
+  -> Strategy Execution
+```
+
+小流程图:
+
+```text
+┌──────────────────────┐
+│   1m Kline / Depth   │
+│   最新行情输入        │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│ 1. Feature Engine    │
+│ 计算所有币 Features   │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│ 2. Per-Symbol State  │
+│ 判断每个币 MarketState│
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│ 3. Global Regime     │
+│ 统计全市场整体状态    │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│ 4. Strategy Mix      │
+│ 分配策略桶资金权重    │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│ 5. Symbol Ranker     │
+│ 选出 Top N 币         │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│ 6. Position Allocator│
+│ 分配 symbol 仓位预算  │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│ 7. Strategy Worker   │
+│ 执行策略并发出信号    │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│ Kafka signal / Exec  │
+│ 下游执行与成交回写    │
+└──────────────────────┘
+```
+
+双泳道小图:
+
+```text
+┌────────────────────────────────────┬────────────────────────────────────┐
+│           Market 侧职责            │          Strategy 侧职责           │
+├────────────────────────────────────┼────────────────────────────────────┤
+│ 1. 接收 1m Kline / Depth           │ 5. 接收 market 输出与本地快照      │
+│    • Binance WebSocket             │    • snapshots / state results     │
+│    • 聚合多周期 K 线               │    • desired strategies            │
+├────────────────────────────────────┼────────────────────────────────────┤
+│ 2. 计算基础 Features               │ 6. 聚合全局市场状态                │
+│    • EMA / RSI / ATR / Volume      │    • aggregate market state        │
+│    • 生成可消费行情特征            │    • 作为本轮分仓基线              │
+├────────────────────────────────────┼────────────────────────────────────┤
+│ 3. 输出候选池基础输入              │ 7. 分配策略权重                    │
+│    • candidate symbols             │    • trend / breakout / range mix  │
+│    • 偏好币 / 动态币池             │    • 风险节奏控制                  │
+├────────────────────────────────────┼────────────────────────────────────┤
+│ 4. 提供上游决策素材                │ 8. 选 Top N 并分配仓位             │
+│    • rank 输入                     │    • symbol weights                │
+│    • regime 输入                   │    • position budget               │
+├────────────────────────────────────┼────────────────────────────────────┤
+│                                    │ 9. Strategy Worker 执行策略        │
+│                                    │    • 1m / 15m 入场出场判断         │
+│                                    │    • signal -> Kafka -> execution  │
+└────────────────────────────────────┴────────────────────────────────────┘
+```
+
+一句话理解:
+
+```text
+market 更偏“把原始行情整理成可决策输入”，
+strategy 更偏“把这些输入变成模板切换、资金分配和最终交易动作”。
+```
+
+数据产物对照表:
+
+| 步骤 | 主要输出结构 | 当前日志落点 | 直接下游 | 当前主要模块 |
+|------|--------------|--------------|----------|--------------|
+| 1. 计算所有币 Features | `market.Kline`（含 EMA / RSI / ATR / Volume）、`featureengine.Features`、`universe.Snapshot` | 以 market K 线主链路和内存快照为主，当前没有单独的 Phase 级 JSONL | 单币状态判断、Universe 评估、策略实例指标读取 | `market` Kline Aggregator、指标计算、`strategy` `updateUniverseSnapshot()` |
+| 2. 判断每个币 Market State | `marketstate.Result` | `data/signal/marketstate/{SYMBOL}/{YYYY-MM-DD}.jsonl`、`data/signal/marketstate/_meta/{YYYY-MM-DD}.jsonl` | 全局状态聚合、Universe 模板切换、weights 输入 | `strategy/rpc/internal/marketstate/` |
+| 3. 统计市场整体状态（加权） | `marketstate.AggregateResult` | 当前复用 `marketstate/_meta` 总览，以及后续 `weights/_meta` 中的 `market_state` 字段 | 策略桶配比、风险节奏控制、全局路由基线 | `marketstate.Aggregate()`、`ServiceContext.buildWeightInputs()` |
+| 4. 分配策略权重 | `weights.Output`、`weights.Recommendation` 中的 `strategy_weight` / `risk_scale` / `market_paused` | `data/signal/weights/_meta/{YYYY-MM-DD}.jsonl` | Symbol 权重计算、发单前风险缩放、暂停交易判定 | `strategy/rpc/internal/weights/engine.go` |
+| 5. 选 Top N 币 | 当前仍以 `[]universe.DesiredStrategy` 和候选 symbol 集为主，尚未形成独立 `TopN` 结构 | `data/signal/universe/{SYMBOL}/{YYYY-MM-DD}.jsonl`、`data/signal/universe/_meta/{YYYY-MM-DD}.jsonl` | 仓位分配、策略启停、模板切换 | `strategy/rpc/internal/universe/selector.go` |
+| 6. 分配仓位 | `weights.Recommendation` 中的 `symbol_weight` / `position_budget` / `pause_reason` | `data/signal/weights/{SYMBOL}/{YYYY-MM-DD}.jsonl`、`data/signal/weights/_meta/{YYYY-MM-DD}.jsonl` | 策略实例开仓数量缩放、signal 附带权重快照 | `weights.Engine`、`TrendFollowingStrategy.applyWeightRecommendation()` |
+| 7. 执行策略 | `decision` 结构化日志、`signal` payload、Kafka `signal` 消息 | `data/signal/decision/{SYMBOL}/{YYYY-MM-DD}.jsonl`、`data/signal/{SYMBOL}/{YYYY-MM-DD}.jsonl` | Execution Service、订单执行、成交回写 | `TrendFollowingStrategy.OnKline()`、`sendSignal()` |
+
+如何用这张表排查:
+
+```text
+1. 如果怀疑“输入没到”，先看 Step 1 的 K 线和 snapshot 是否持续更新
+2. 如果怀疑“状态判断不对”，先看 Step 2 的 marketstate symbol 日志
+3. 如果怀疑“全局风格不对”，重点看 Step 3 和 Step 4 的 weights/_meta
+4. 如果怀疑“为什么某个币没被做”，重点看 Step 5 的 universe 日志
+5. 如果怀疑“为什么仓位太小或被暂停”，重点看 Step 6 的 weights symbol 日志
+6. 如果怀疑“为什么没发单”，最后看 Step 7 的 decision / signal
+```
+
+当前实现映射:
+
+```text
+Step 1. 计算所有币 Features
+• 当前状态：已完成基础版
+• 说明：
+  market 已负责 K 线聚合和指标计算，
+  strategy 侧会在 1m K 线进入后构建 snapshot，
+  当前已稳定使用 EMA / RSI / ATR / Volume。
+
+Step 2. 判断每个币 Market State
+• 当前状态：已完成基础版
+• 说明：
+  strategy 侧已能对每个 symbol 输出 trend_up / trend_down / range / breakout / unknown。
+
+Step 3. 统计市场整体状态（加权）
+• 当前状态：半完成
+• 说明：
+  当前已经有 aggregate 结果，
+  但主要还是“状态计数 + confidence 辅助”的 dominant state，
+  还不是严格意义上的加权聚合。
+
+Step 4. 分配策略权重
+• 当前状态：已完成第一版
+• 说明：
+  已支持根据全局状态分配策略桶配比，
+  例如 trend / breakout / range 的状态化 mix。
+
+Step 5. 选 Top N 币
+• 当前状态：半完成
+• 说明：
+  当前更接近“候选池过滤 + 偏好币放行 + 动态模板切换”，
+  但还不是独立、显式、可解释的 Top N 排名引擎。
+
+Step 6. 分配仓位
+• 当前状态：已完成第一版
+• 说明：
+  已支持：
+  position_budget = strategy_weight * symbol_weight * risk_scale
+  并已接入 loss streak、回撤压缩和 market cooling pause。
+
+Step 7. 执行策略
+• 当前状态：已完成基础版
+• 说明：
+  当前由 strategy worker 在 1m 或 15m K 线触发入场/出场判断，
+  并在发 signal 前应用最新 weights 建议。
+```
+
+按目标拆解:
+
+```text
+1. 计算所有币 Features
+   • 回答的是：当前市场有什么客观输入
+
+2. 判断每个币 Market State
+   • 回答的是：每个币现在更像趋势、突破还是震荡
+
+3. 统计市场整体状态（加权）
+   • 回答的是：当前这一轮系统主风格应该偏哪种打法
+
+4. 分配策略权重
+   • 回答的是：趋势 / 突破 / 震荡三类策略各拿多少预算
+
+5. 选 Top N 币
+   • 回答的是：这一轮最值得优先处理的是哪些标的
+
+6. 分配仓位
+   • 回答的是：每个币最终该分到多少风险预算
+
+7. 执行策略
+   • 回答的是：具体什么时候发 OPEN / CLOSE / SKIP
+```
+
+已实现:
+
+```text
+• Feature 输入链路已打通
+• 单币 Market State 已能真实输出
+• 全局 Market State 已能参与 Universe / Weights
+• StrategyMix 已配置化
+• SymbolWeights 已配置化
+• PositionBudget 已进入 signal 日志
+• 连亏保护已进入权重引擎
+• 市场降温已进入权重引擎
+```
+
+待补齐:
+
+```text
+1. 把“全局市场状态”升级为真正的加权聚合
+   • 可引入成交量权重、symbol score 权重或核心币权重
+
+2. 把 Top N 从 UniversePool / Selector 中正式抽成独立模块
+   • 输出显式排名、截断结果和 rank_detail
+
+3. 把 Step 1 ~ Step 6 收敛成更清晰的统一调度主链路
+   • 减少“定时评估 + 各策略自行触发”带来的心智负担
+
+4. 把仓位分配继续推进为统一 Position Allocator
+   • 后续可继续接入相关性、流动性、symbol cap 和 bucket cap
+```
+
+一句话总结:
+
+```text
+当前系统已经能跑通“特征 -> 状态 -> 权重 -> 执行”的最小闭环，
+但要成为完全体的动态决策引擎，还需要补上“真正加权的全局状态”和“显式 Top N 排名”两块。
+```
+
+### 2.9 实现状态总表
+
+说明:
+
+- 这一节专门回答一个现实问题：前面定义的目标架构，现在到底实现了多少
+- 为了避免“文档里有图就等于代码里已经全落地”的误解，这里统一按 `已完成 / 半完成 / 未开始` 标记
+
+| 模块 | 当前状态 | 说明 |
+|------|----------|------|
+| Market Data Pipeline | 已完成 | 已接 Binance WebSocket、聚合多周期 K 线、发布 Kafka `kline`，是当前最稳定的一层 |
+| Execution Engine | 已完成 | 已能消费 `signal`、执行风控、下单、回写 `order`，且已完成真实闭环验证 |
+| Market UniversePool 最小版状态驱动选币 | 已完成 | 已具备 `trend / range / breakout`、动态币池状态机、`_meta / selector_decision` 日志证据 |
+| Strategy Signal Engine 基础版 | 已完成 | 已能基于多周期条件生成 `signal`，并写入 decision / signal 本地日志与 Kafka |
+| Feature Engine | 半完成 | EMA / RSI / ATR / Volume 等能力已存在，但仍分散在 aggregator、snapshot、marketstate 中，尚未统一抽成显式特征层 |
+| Symbol Ranker | 半完成 | 当前最接近的是 `UniversePool / BasicSelector`，但更偏状态驱动与偏好币放行，还不是独立 Top N 排名引擎 |
+| Regime Judge | 半完成 | `market` 侧已有 `trend / range / breakout`，`strategy` 侧还有 `marketstate`，但两处尚未统一收敛 |
+| Strategy Router | 半完成 | `strategy universe` 已能做启停与模板切换，但还不是完整的策略路由中心 |
+| 自动分仓 | 半完成 | 已有 `weights`、仓位参数和部分风控能力，但还不是统一的资金分配器 |
+| 独立 Breakout Worker | 未开始 | 当前更多还是模板/参数差异，未形成独立策略 worker |
+| 独立 MeanReversion Worker | 未开始 | 目标架构中有，但当前主实现中尚未成型 |
+| 统一 Position Allocator | 未开始 | 还没有单独模块负责按胜率、波动、相关性、预算做统一分仓 |
+| Orderbook 驱动主决策 | 未开始 | Orderbook 相关能力还未真正进入主决策主链路 |
+| 统一动态决策引擎 | 半完成 | “自动选币 + 自动选策略 + 自动分仓” 的最终形态尚未完全收拢到统一架构中 |
+
+按目标拆分看:
+
+```text
+1. 自动选币
+   • 当前状态：半完成
+   • 说明：依赖 UniversePool，但还不是独立、可解释、可直接输出 Top N 的 Symbol Ranker
+
+2. 自动选策略
+   • 当前状态：半完成
+   • 说明：依赖 strategy universe + template switch，但还不是完整 Strategy Router
+
+3. 自动分仓
+   • 当前状态：半完成
+   • 说明：已有风控参数和权重能力，但还不是统一 Position Allocator
+```
+
+一句话总结:
+
+```text
+当前系统最强的是“行情链路 + 基础策略 + 执行闭环”，并且已经进入动态选币阶段；
+但距离“自动选币 + 自动选策略 + 自动分仓”的统一动态决策引擎，还差最后一层架构收拢。
+```
+
+建议优先级:
+
+```text
+P1. 先抽出统一 Feature Engine
+P1. 再把 Symbol Ranker 从 UniversePool 中独立
+P2. 统一 Regime Judge
+P2. 把 strategy universe 升级成真正的 Strategy Router
+P3. 最后做统一 Position Allocator
+```
+
 ---
 
 ## 三、技术架构详情
+
+阅读提示:
+
+```text
+2.9《实现状态总表》回答的是“哪些能力已经落地，哪些还在路上”。
+从这里开始的 3.3《核心组件说明》回答的是“当前代码里这些能力具体落在哪些模块、怎么运行”。
+```
 
 ### 3.1 微服务架构
 
@@ -361,10 +1130,10 @@
 | 数据流 | 来源 | 目标 | 协议 | Topic/RPC |
 |-------|------|------|------|-----------|
 | 市场数据 | Binance WebSocket | Market Service | WebSocket | - |
-| 聚合K线 | Market Service | Kafka | Kafka | market_data |
-| 策略信号 | Strategy Service | Kafka | Kafka | strategy_signals |
-| 订单事件 | Execution Service | Kafka | Kafka | order_events |
-| 下单命令 | Strategy Service | Execution Service | gRPC | CreateOrder |
+| 聚合K线 | Market Service | Kafka | Kafka | kline |
+| 策略执行信号 | Strategy Service | Execution Service | Kafka | signal |
+| 订单事件 | Execution Service | Order Service | Kafka | order |
+| 手动/调试下单 | API Gateway / 调试调用 | Execution Service | gRPC | CreateOrder |
 | 账户查询 | API Gateway | Execution Service | gRPC | GetAccountInfo |
 | 订单查询 | API Gateway | Order Service | gRPC | GetOpenOrders |
 
@@ -771,6 +1540,53 @@ grep '"base_template"\|"template"\|"action"\|"reason"' \
 
 #### 3.3.6 Market UniversePool 判读标准
 
+阅读提示:
+
+```text
+如果你是从“为什么 strategy 已经会判断了，上游还需要 UniversePool”这个问题一路看下来，
+建议先回看 2.6《UniversePool 与 Strategy Universe / Signal 职责分层》。
+
+2.6 负责解释三层职责边界；
+3.3.6 负责展开 market 侧 UniversePool 的真实日志、字段和排查方法。
+```
+
+值班速查卡:
+
+```text
+先看什么：
+1. 先看 _meta
+   目标：判断是“没输入”还是“有输入但没命中”
+2. 再看 selector_decision
+   目标：判断是“正常状态过滤”还是“输入异常”
+3. 最后看 ws / aggregator
+   目标：确认真实消息、聚合输出、snapshot 更新是否连通
+
+一眼判断：
+• snapshot_count=0
+  优先怀疑 UniversePool 还没拿到任何 snapshot
+• fresh_count=0
+  优先怀疑上游断流、freshness 不一致或 snapshot 已过期
+• global_state=unknown 且 count 全 0
+  优先怀疑状态规则没命中
+• global_state=range 且 reason=state_filtered
+  通常不是故障，而是非偏好币被正常过滤
+• reason=stale_snapshot
+  先查输入链路，不要先改 selector 阈值
+• reason=state_preferred_score_pass
+  说明偏好币在当前状态下已被放行
+
+三条最常用命令：
+• 看 _meta：
+  tail -n 20 app/market/rpc/data/universepool/_meta/$(date -u +%F).jsonl
+• 看 selector_decision：
+  grep '"action":"selector_decision"' app/market/rpc/data/universepool/{BNBUSDT,SOLUSDT,XRPUSDT}/$(date -u +%F).jsonl | tail -n 30
+• 看 ws / aggregator / universepool：
+  grep '\[ws\]\|\[aggregated\]\|\[aggregated 5m emit\]\|\[universepool\]' app/market/rpc/logs/market.log | tail -n 50
+
+一句话原则：
+• 先查输入有没有进来，再查 selector 有没有命中，最后才考虑要不要调阈值
+```
+
 适用场景:
 
 ```text
@@ -914,6 +1730,210 @@ app/market/rpc/data/universepool/{symbol}/{date}.jsonl
 说明 UniversePool 已经开始按市场结构做最小版状态驱动选币。
 ```
 
+UniversePool 内部主流程:
+
+```text
+这条链最适合回答两个问题：
+1. 一根 Kline 进来后，为什么最后会写出 _meta / selector_decision
+2. 为什么某个 symbol 会进入 warming / active，或者被 state_filtered
+
+边界说明:
+• 这张图只覆盖 market 侧 UniversePool 内部流程
+• 不包含 strategy 侧的 universe 调度和 signal 生成
+• 如果要看三层职责分工，请回到 2.6《UniversePool 与 Strategy Universe / Signal 职责分层》
+```
+
+```mermaid
+flowchart LR
+    A[Binance 闭合 Kline] --> B[KlineAggregator emit observer]
+    B --> C[Manager.UpdateSnapshotFromKline]
+    C --> D[Snapshot\nLastPrice / EMA21 / EMA55 / RSI / ATR / AtrPct / Healthy]
+    D --> E[BasicSelector.Evaluate]
+    E --> F[detectGlobalState\ntrend / range / breakout]
+    E --> G[scoreSnapshot\nstate_preferred_score_pass / score_pass / state_filtered]
+    F --> H[DesiredUniverse\nGlobalState / StateVotes / Symbols]
+    G --> H
+    H --> I[Manager.applyDesiredUniverse]
+    I --> J[StateMachine\ninactive -> warming -> active\npending_remove -> cooldown]
+    I --> K[syncObservationSubscriptions\n更新实际订阅 symbol 集合]
+    H --> L[WriteMeta\n_meta jsonl]
+    I --> M[WriteSelectorDecision / WriteSymbolEvent\nsymbol jsonl]
+```
+
+验证样例:
+
+```text
+建议把验证分成两类证据来看：
+
+1. 负向证据（真实市场）
+   目标：证明当前状态真的会过滤“非偏好币”
+
+   典型现象：
+   • _meta 持续为 global_state=range
+   • range_count 持续大于 0
+   • BNBUSDT / SOLUSDT / XRPUSDT 的 selector_decision 持续出现 reason=state_filtered
+
+   这说明：
+   • UniversePool 已经进入状态驱动筛选
+   • 非当前状态偏好币会被稳定压制
+   • 这类证据最适合用真实市场直接观察
+
+2. 正向证据（回放或定向注入）
+   目标：证明当前状态切到偏好结构后，偏好币确实会被放行
+
+   典型现象：
+   • _meta 出现 global_state=trend 或 breakout
+   • BNBUSDT / SOLUSDT 的 selector_decision 出现 reason=state_preferred_score_pass
+   • 同时 score >= AddScoreThreshold
+
+   这说明：
+   • selector 不只是会过滤，也会在目标状态下主动放行偏好币
+   • 若真实市场短时间内一直停留在 range，使用回放样本补正向证据是合理做法
+```
+
+本轮验证结果示例:
+
+```text
+负向证据（真实市场，1m 验证模式）：
+• _meta 长时间保持 global_state=range
+• fresh_count=5，说明不是旧缓存假象
+• SOLUSDT / BNBUSDT 的 selector_decision 持续为：
+  global_state=range
+  reason=state_filtered
+  score=0.65
+
+可解释为：
+• 当前市场结构被判为 range
+• BTCUSDT / ETHUSDT 属于 range 偏好币
+• SOLUSDT / BNBUSDT 虽然健康，但不是当前偏好币，因此被过滤
+
+正向证据（回放式注入样本）：
+• _meta:
+  global_state=trend
+  trend_count=5
+  fresh_count=5
+• BNBUSDT selector_decision:
+  reason=state_preferred_score_pass
+  score=0.90
+• SOLUSDT selector_decision:
+  reason=state_preferred_score_pass
+  score=0.90
+
+可解释为：
+• 当前样本被 selector 判定为 trend
+• BNBUSDT / SOLUSDT 属于 trend 偏好币
+• 且 score 已过 AddScoreThreshold，因此被放行
+```
+
+实盘闭环样例（SOLUSDT，1m RSI 模式）:
+
+```text
+目标：
+• 证明链路不仅能选币，还能完成 strategy -> execution -> Binance 成交 -> 平仓成交 的闭环
+
+样例时间线：
+1. strategy 生成开仓信号
+   时间: 2026-05-01 08:52:03.583 UTC
+   文件: app/strategy/rpc/data/signal/SOLUSDT/2026-05-01.jsonl
+   关键信息:
+   • action=BUY
+   • side=LONG
+   • reason=[1m] 4H趋势=多头（价格>EMA21>EMA55） | 1H回调=多头回调 | 1M入场 | RSI=56.90 ATR=0.04
+   • stopLoss=84.07
+   • takeProfits=[84.21,84.28]
+
+2. execution 收到同一条开仓信号
+   时间: 2026-05-01T08:52:46.000Z
+   文件: app/execution/rpc/data/signal/SOLUSDT/2026-05-01.jsonl
+   关键信息:
+   • signal_type=OPEN
+   • action=BUY
+   • side=LONG
+   • quantity=11.0926
+   • entry_price=84.14
+
+3. execution 下单并成交
+   时间: 2026-05-01T08:52:50.087Z
+   文件: app/execution/rpc/data/order/SOLUSDT/2026-05-01.jsonl
+   关键信息:
+   • signal_type=OPEN
+   • status=FILLED
+   • avg_price=84.14
+   • executed_qty=11.09
+   • transact_time=2026-05-01 08:52:49
+
+4. strategy 触发平仓信号
+   时间: 2026-05-01 09:03:04.174 UTC
+   文件: app/strategy/rpc/data/signal/SOLUSDT/2026-05-01.jsonl
+   关键信息:
+   • action=SELL
+   • side=LONG
+   • reason=[1m] 多头止损：价格84.06 ≤ 止损84.07
+
+5. execution 收到平仓信号并成交
+   信号时间: 2026-05-01T09:03:04.682Z
+   成交时间: 2026-05-01T09:03:08.903Z
+   文件:
+   • app/execution/rpc/data/signal/SOLUSDT/2026-05-01.jsonl
+   • app/execution/rpc/data/order/SOLUSDT/2026-05-01.jsonl
+   关键信息:
+   • signal_type=CLOSE
+   • status=FILLED
+   • avg_price=84.07
+   • executed_qty=11.09
+   • reason=[1m] 多头止损：价格84.06 ≤ 止损84.07
+
+如何和 Binance 页面核对：
+• 开仓 FILLED 后，应先在 Position 中看到 SOLUSDT LONG 持仓出现
+• 平仓 FILLED 后，应看到该持仓消失
+• MARKET 单更适合对照 Order History / Trade History / Position，而不是只看 Open Orders
+
+可得结论：
+• market 已完成上游选币和 1m 输入供给
+• strategy 已基于 1m RSI 生成真实开平仓信号
+• execution 已成功消费 signal 并在 Binance Demo Futures 成交
+• 整条 market -> strategy -> execution -> Binance 的实盘验证闭环已跑通
+```
+
+推荐验证顺序:
+
+```text
+1. 先用真实市场确认“负向证据”稳定出现
+   目标是确认数据链路、freshness、global_state 与 selector_decision 一致
+
+2. 若短时间内拿不到正向样本，再用 replay / 定向注入补“正向证据”
+   目标是确认 selector 在 trend / breakout 下确实会放行偏好币
+
+3. 最后继续挂真实市场监控，等待自然出现第一条 state_preferred_score_pass
+   目标是补齐“真实市场下的正向样本时间点”
+```
+
+1m 加速验证 vs 5m 稳定验证:
+
+```text
+什么时候优先用 1m:
+• 需要尽快确认动态币池整条链路是否已跑通
+• 需要更快观察 global_state 的切换
+• 需要尽快收集 state_filtered / state_preferred_score_pass 样本
+• 接受更高噪声，且明白它更适合“加速取证”，不适合直接做最终稳定性结论
+
+什么时候优先用 5m:
+• 需要确认 global_state 在真实运行里是否足够稳定
+• 需要验证 freshness、迟滞阈值、持有逻辑是否会减少 range -> unknown 抖动
+• 需要更接近最终线上使用习惯
+• 接受样本出现更慢，但更关注“稳定”而不是“快”
+
+建议用法:
+• 先用 1m 做链路冒烟和快速取证
+• 再用 5m 做稳定性复核
+• 如果 1m 能看到 state_filtered / state_preferred_score_pass，但 5m 长期只有 unknown，
+  优先排查 snapshot freshness、聚合输入周期、迟滞逻辑，而不是先怀疑 selector 完全失效
+
+一句话理解:
+• 1m 更像验证链路“有没有动起来”
+• 5m 更像验证结果“能不能稳下来”
+```
+
 正常 warmup:
 
 ```text
@@ -1000,6 +2020,201 @@ grep '"global_state"\|"trend_count"\|"range_count"\|"breakout_count"\|"candidate
 3. 再看某个 symbol 的 selector_decision reason / score / desired
 4. 再看某个 symbol 的 state 日志和 incomplete 原因
 5. 若 fresh_count 持续为 0，再回头排查 websocket / proxy / 上游消息流
+```
+
+实盘排查 SOP:
+
+```text
+适用场景：
+• 值班时发现动态币池没有切状态
+• 某些 symbol 一直不进入 desired
+• _meta 长时间 unknown
+• selector_decision 和直觉不一致
+
+固定步骤：
+
+Step 1: 先看 _meta，确认问题属于“没输入”还是“有输入但没命中”
+重点看：
+• snapshot_count
+• fresh_count
+• stale_count
+• global_state
+• trend_count / range_count / breakout_count
+• snapshot_interval
+• last_snapshot_at
+
+判断方式：
+• snapshot_count=0:
+  更像 UniversePool 还没拿到任何快照输入
+• snapshot_count>0 但 fresh_count=0:
+  更像上游停流、freshness 不一致或 snapshot 已整体过期
+• fresh_count>0 但 global_state=unknown 且三个 count 都为 0:
+  更像当前规则没有命中
+• fresh_count>0 且某个 count>0:
+  说明 selector 已经开始识别市场结构
+
+Step 2: 再看 selector_decision，确认是“状态过滤”还是“输入异常”
+重点看：
+• action=selector_decision
+• global_state
+• reason / reason_zh
+• score
+• desired
+
+判断方式：
+• reason=state_filtered:
+  说明当前已进入状态驱动筛选，只是该币不是当前偏好币
+• reason=state_preferred_score_pass:
+  说明该币属于当前状态偏好组，并且分数已过放行阈值
+• reason=stale_snapshot / no_snapshot:
+  说明先查输入链路，不要先急着改 selector 阈值
+• reason=score_pass:
+  说明当前更像 fallback 放行，而不是明确状态偏好放行
+
+Step 3: 最后看 ws / aggregator，确认真实数据有没有持续进入
+重点看：
+• websocket 是否持续收到 closed 1m 消息
+• aggregator 是否持续 emit 目标周期 K 线
+• ValidationMode 对应周期的 snapshot 是否在更新
+
+判断方式：
+• ws 无消息:
+  先查 websocket URL、代理、订阅集合、上游消息流
+• ws 有 1m，但没有目标周期 emit:
+  先查 aggregator 周期配置、emit mode、warmup 和聚合日志
+• aggregator 已 emit，但 _meta 的 last_snapshot_at 不更新:
+  先查 emit observer 和 UpdateSnapshotFromKline 的 interval 过滤
+
+落地原则：
+• 先判输入有没有进来，再判 selector 有没有命中
+• 先查 freshness / interval / emit，再决定要不要调阈值
+• 不要在 stale_snapshot / no_snapshot 阶段直接改 state 规则
+```
+
+值班命令模板:
+
+```bash
+cd /Users/bytedance/GolandProjects/exchange-system
+
+# Step 1: 看 _meta，总览当前是否有输入、是否新鲜、当前全局状态是什么
+tail -n 20 app/market/rpc/data/universepool/_meta/$(date -u +%F).jsonl
+
+# Step 1.1: 只抽关键字段，便于快速判断
+grep '"global_state"\|"snapshot_interval"\|"last_snapshot_at"\|"trend_count"\|"range_count"\|"breakout_count"\|"snapshot_count"\|"fresh_count"\|"stale_count"\|"warming_count"\|"active_count"' \
+  app/market/rpc/data/universepool/_meta/$(date -u +%F).jsonl | tail -n 20
+
+# Step 2: 看 selector_decision，确认是 state_filtered、state_preferred_score_pass 还是 stale_snapshot
+grep '"action":"selector_decision"' \
+  app/market/rpc/data/universepool/{BNBUSDT,SOLUSDT,XRPUSDT}/$(date -u +%F).jsonl | tail -n 30
+
+# Step 2.1: 只看某个 symbol 的最新 selector 决策
+grep '"action":"selector_decision"' \
+  app/market/rpc/data/universepool/SOLUSDT/$(date -u +%F).jsonl | tail -n 10
+
+# Step 2.2: 专门找正向样本
+grep '"reason":"state_preferred_score_pass"' \
+  app/market/rpc/data/universepool/{BNBUSDT,SOLUSDT,XRPUSDT}/$(date -u +%F).jsonl
+
+# Step 3: 看 websocket / aggregator / universepool 运行日志
+# 如果当前 market 是前台启动，直接观察终端中的以下关键字：
+# [ws]
+# [aggregated]
+# [aggregated 5m emit]
+# [universepool] evaluate
+# [universepool] state
+
+# Step 3.1: 若日志已重定向到文件，可按关键字过滤
+grep '\[ws\]\|\[aggregated\]\|\[aggregated 5m emit\]\|\[universepool\]' \
+  app/market/rpc/logs/market.log | tail -n 50
+```
+
+值班时怎么用:
+
+```text
+1. 先执行 _meta 命令
+   如果 snapshot_count=0 或 fresh_count=0，优先查输入链路
+
+2. 再执行 selector_decision 命令
+   如果是 state_filtered，说明 selector 已在按状态过滤
+   如果是 stale_snapshot / no_snapshot，说明不要先调阈值
+
+3. 最后执行 ws / aggregator 命令
+   如果 ws 没消息，先查代理、订阅、上游
+   如果 ws 有 1m 但没 emit 目标周期，先查 aggregator 和 ValidationMode
+   如果 emit 了但 _meta 不更新，先查 emit observer 和 UpdateSnapshotFromKline
+```
+
+异常模式对照表:
+
+```text
+1. 现象：fresh_count=0
+   优先怀疑：
+   • websocket 当前没有新消息进入
+   • snapshot freshness 窗口与 ValidationMode 不一致
+   • last_snapshot_at 停在旧时间，当前只是旧缓存未清
+   下一步动作：
+   • 先看 ws 日志是否还有 closed 1m 消息
+   • 再看 _meta.last_snapshot_at 是否持续不变
+   • 再看 selector_decision 是否开始大量出现 stale_snapshot
+
+2. 现象：global_state=unknown
+   优先怀疑：
+   • 当前 fresh snapshot 没有命中任何状态规则
+   • 只有局部命中，但还没形成多数
+   • 输入是有的，但结构判定阈值太严或状态分布过散
+   下一步动作：
+   • 先看 trend_count / range_count / breakout_count 是否全 0
+   • 如果 count 全 0，优先看规则命中问题
+   • 如果某个 count > 0 但仍 unknown，优先看多数判定和迟滞逻辑
+
+3. 现象：reason=stale_snapshot
+   优先怀疑：
+   • 输入链路断流
+   • freshness 判定窗口不一致
+   • ValidationMode 周期已切换，但 snapshot 更新还停在旧周期
+   下一步动作：
+   • 先不要急着改 selector 阈值
+   • 先查 ws / aggregator 是否仍在持续更新目标周期
+   • 再查 _meta.fresh_count、last_snapshot_at 和 snapshot_interval 是否一致
+
+4. 现象：ws total_messages=0
+   优先怀疑：
+   • websocket 虽然连上了，但订阅 URL 或 stream path 错误
+   • 代理可连通但没有收到业务帧
+   • 当前订阅集合为空或没包含目标 symbol
+   下一步动作：
+   • 先查 websocket URL 是否为正确 market 路径
+   • 再查 proxy 配置和订阅 symbols
+   • 再看 read loop / first message / ping pong 调试日志
+
+5. 现象：ws 有 1m，但 _meta 不更新
+   优先怀疑：
+   • aggregator 没有 emit ValidationMode 对应周期
+   • emit observer 没接上
+   • UpdateSnapshotFromKline 被 interval 过滤掉了
+   下一步动作：
+   • 先看 aggregator 是否有 [aggregated] 或 [aggregated 5m emit]
+   • 再看 ValidationMode 是否与 snapshot_interval 一致
+   • 再查 emit observer -> UpdateSnapshotFromKline 这段链路
+
+6. 现象：global_state=range，但 BNBUSDT / SOLUSDT 一直 desired=false
+   优先怀疑：
+   • 这是正常状态过滤，不一定是故障
+   • 当前偏好币组是 rangePreferredSymbols，不包含目标币
+   下一步动作：
+   • 先看 selector_decision.reason 是否为 state_filtered
+   • 若是 state_filtered，说明 selector 正在正常工作
+   • 不要把“当前没放行”误判成“链路没跑通”
+
+7. 现象：state_preferred_score_pass 长时间不出现
+   优先怀疑：
+   • 真实市场一直没有切到目标偏好状态
+   • 当前观察窗口里大部分时间仍是 range
+   • 不是链路故障，而是样本尚未自然出现
+   下一步动作：
+   • 先看 _meta.global_state 是否长期停在 range
+   • 若只是想快速取证，可切到 1m 或用 replay / 定向注入补正向样本
+   • 若要做最终稳定性判断，继续保留 5m 观察
 ```
 
 #### 3.3.7 Dynamic Evolution Roadmap
@@ -1775,9 +2990,9 @@ Phase 5 第一版不要直接改 execution 下单逻辑，
 
 | Topic | 生产者 | 消费者 | 消息类型 | 说明 |
 |-------|--------|--------|---------|------|
-| market_data | Market Service | Strategy Service | Kline JSON | 聚合K线数据 |
-| strategy_signals | Strategy Service | Execution Service | Signal JSON | 交易信号 |
-| order_events | Execution Service | Order Service | Order JSON | 订单状态事件 |
+| kline | Market Service | Strategy Service | Kline JSON | 聚合K线数据 |
+| signal | Strategy Service | Execution Service | Signal JSON | 交易信号 |
+| order | Execution Service | Order Service | Order JSON | 订单状态事件 |
 
 ---
 
@@ -2229,7 +3444,7 @@ go test ./app/execution/rpc/... ./app/order/rpc/...
 典型日志：
 
 ```text
-2026/04/26 06:42:10 WebSocket read error: read tcp 192.168.10.6:54868->192.168.10.13:1080: read: connection reset by peer
+2026/04/26 06:42:10 WebSocket read error: read tcp 192.168.10.6:54868->192.168.10.14:1080: read: connection reset by peer
 2026/04/26 06:42:13 Connecting to Binance WebSocket: wss://fstream.binance.com/stream?streams=ethusdt@kline_1m
 2026/04/26 06:42:15 WebSocket connected successfully
 2026/04/26 06:43:15 [ws stats] total_messages=0 kline_messages=0 closed_1m_messages=0
@@ -2545,7 +3760,7 @@ Etcd:
 Kafka:
   Brokers:
     - kafka1:9092
-  Topic: market_data
+  Topic: kline
 WatermarkDelay: 3000  # 3秒
 IndicatorParams:
   Ema21Period: 21
@@ -2567,7 +3782,7 @@ Etcd:
 Kafka:
   Brokers:
     - kafka1:9092
-  Topic: strategy_signals
+  Topic: signal
 StrategyParams:
   signal_mode: 0
   1m_trading_paused: 0
@@ -2806,7 +4021,7 @@ Etcd:
 Kafka:
   Brokers:
     - kafka1:9092
-  Topic: order_events
+  Topic: order
 Exchange:
   Binance:
     ApiKey: xxx

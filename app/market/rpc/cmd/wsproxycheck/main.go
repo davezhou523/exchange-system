@@ -17,7 +17,7 @@ import (
 
 func main() {
 	baseURL := flag.String("url", "wss://fstream.binance.com", "binance websocket base url")
-	proxyURL := flag.String("proxy", "", "proxy url, e.g. socks5://127.0.0.1:1080")
+	proxyURL := flag.String("proxy", "socks5://192.168.10.14:1080", "proxy url, e.g. socks5://127.0.0.1:1080")
 	streams := flag.String("streams", "btcusdt@kline_1m/ethusdt@kline_1m", "combined streams path")
 	readTimeout := flag.Duration("read-timeout", 20*time.Second, "timeout waiting for first message")
 	maxMessages := flag.Int("max-messages", 5, "exit after receiving this many messages")

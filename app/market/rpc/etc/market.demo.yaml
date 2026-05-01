@@ -45,10 +45,11 @@ Binance:
     - BTCUSDT
     - BNBUSDT
     - SOLUSDT
-    - XRPUSDT
+    - DOGEUSDT
+    - PEPEUSDT
   Intervals:
     - 1m
-  Proxy: socks5://192.168.10.13:1080
+  Proxy: socks5://192.168.10.14:1080
 
 UniversePool:
   Enabled: true
@@ -58,12 +59,10 @@ UniversePool:
     - BTCUSDT
     - BNBUSDT
     - SOLUSDT
-    - XRPUSDT
-  AllowList:
-    - BTCUSDT
-    - ETHUSDT
+    - DOGEUSDT
+    - PEPEUSDT
+  AllowList: []
   BlockList: []
-  ValidationMode: 5m
   TrendPreferredSymbols:
     - ETHUSDT
     - SOLUSDT
@@ -73,8 +72,10 @@ UniversePool:
     - ETHUSDT
   BreakoutPreferredSymbols:
     - BTCUSDT
-    - SOLUSDT
-    - XRPUSDT
+    - DOGEUSDT
+    - PEPEUSDT
+  BreakoutAtrPctMin: 0.0045
+  BreakoutAtrPctExitMin: 0.0040
   EvaluateInterval: 30s
   MinActiveDuration: 1h
   MinInactiveDuration: 1h
@@ -83,8 +84,8 @@ UniversePool:
   RemoveScoreThreshold: 0.55
   Warmup:
     Enabled: true
-    Min1mBars: 120
-    Require15mReady: true
-    Require1hReady: true
-    Require4hReady: true
+    Min1mBars: 5
+    Require15mReady: false
+    Require1hReady: false
+    Require4hReady: false
     RequireIndicatorsReady: true

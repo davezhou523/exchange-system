@@ -48,6 +48,8 @@ type Config struct {
 		RequireClean          bool
 		CandidateSymbols      []string
 		StaticTemplateMap     map[string]string
+		RangeTemplate         string
+		BreakoutTemplate      string
 		BTCTrendTemplate      string
 		BTCTrendAtrPctMax     float64
 		HighBetaSafeTemplate  string
@@ -60,6 +62,32 @@ type Config struct {
 		Symbol      string
 		Name        string
 		RuntimeMode string
+	}
+
+	MarketState struct {
+		FreshnessWindow   time.Duration
+		RangeAtrPctMax    float64
+		BreakoutAtrPctMin float64
+	}
+
+	Weights struct {
+		DefaultTrendWeight    float64
+		DefaultRangeWeight    float64
+		DefaultBreakoutWeight float64
+		DefaultRiskScale      float64
+		LossStreakThreshold   int
+		DailyLossSoftLimit    float64
+		DrawdownSoftLimit     float64
+		CoolingPauseDuration  time.Duration
+		AtrSpikeRatioMin      float64
+		VolumeSpikeRatioMin   float64
+		CoolingMinSamples     int
+		TrendStrategyMix      map[string]float64
+		BreakoutStrategyMix   map[string]float64
+		RangeStrategyMix      map[string]float64
+		TrendSymbolWeights    map[string]float64
+		BreakoutSymbolWeights map[string]float64
+		RangeSymbolWeights    map[string]float64
 	}
 
 	HarvestPathLSTM struct {

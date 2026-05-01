@@ -34,6 +34,9 @@ type metaLogEntry struct {
 	PausedCount         int            `json:"paused_count"`
 	MarketPaused        bool           `json:"market_paused"`
 	MarketPauseReason   string         `json:"market_pause_reason,omitempty"`
+	CoolingUntil        string         `json:"cooling_until,omitempty"`
+	AtrSpikeRatio       float64        `json:"atr_spike_ratio,omitempty"`
+	VolumeSpikeRatio    float64        `json:"volume_spike_ratio,omitempty"`
 	MarketState         string         `json:"market_state,omitempty"`
 	MarketStateSource   string         `json:"market_state_source,omitempty"`
 	TemplateCounts      map[string]int `json:"template_counts,omitempty"`
@@ -161,9 +164,14 @@ func BuildMetaLogEntry(out Output, symbolCount int, marketState string, marketSt
 		RecommendationCount: len(out.Recommendations),
 		MarketPaused:        out.MarketPaused,
 		MarketPauseReason:   out.MarketPauseReason,
+		AtrSpikeRatio:       roundFloat(out.AtrSpikeRatio),
+		VolumeSpikeRatio:    roundFloat(out.VolumeSpikeRatio),
 		MarketState:         marketState,
 		MarketStateSource:   marketStateSource,
 		TemplateCounts:      make(map[string]int),
+	}
+	if !out.CoolingUntil.IsZero() {
+		entry.CoolingUntil = formatLogTime(out.CoolingUntil)
 	}
 	for _, rec := range out.Recommendations {
 		if rec.TradingPaused {

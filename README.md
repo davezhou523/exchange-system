@@ -4,6 +4,30 @@
 
 `Market -> Strategy -> Execution -> Order -> Gateway`
 
+当前真实交易主链路：
+
+`Market -> Kafka(kline) -> Strategy -> Kafka(signal) -> Execution -> Kafka(order) -> Order`
+
+```mermaid
+flowchart LR
+    EX[Binance]
+    M[Market]
+    K[(Kafka kline)]
+    S[Strategy]
+    SG[(Kafka signal)]
+    E[Execution]
+    O[(Kafka order)]
+    OR[Order]
+
+    EX --> M
+    M --> K
+    K --> S
+    S --> SG
+    SG --> E
+    E --> O
+    O --> OR
+```
+
 当前仓库包含：
 
 - 行情采集与多周期 K 线聚合
@@ -12,7 +36,9 @@
 - 订单查询与本地 JSONL 归档
 - HTTP Gateway 与 gRPC 服务编排
 
-详细架构说明见 [architecture.md](file:///Users/bytedance/GolandProjects/exchange-system/architecture.md)。
+详细架构说明见 [architecture.md](file:///Users/bytedance/GolandProjects/exchange-system/docs/architecture.md)。
+
+值班速查入口见 [runbook.md](file:///Users/bytedance/GolandProjects/exchange-system/docs/runbook.md)。
 
 ## 服务说明
 - `app/market/rpc`: 行情服务，负责 Binance WebSocket、K 线聚合、指标计算、Kafka 发布
@@ -208,6 +234,37 @@ go run app/market/rpc/market.go \
   -mock-kafka \
   -mock-count=200
 ```
+
+## UniversePool 值班速查卡
+- 先看 `_meta`：先判断“没输入”还是“有输入但没命中”
+- `snapshot_count=0` 或 `fresh_count=0`：优先怀疑断流、freshness 不一致或 snapshot 已过期
+- `global_state=unknown` 且 count 全 0：优先怀疑状态规则没命中
+- `global_state=range` 且 `reason=state_filtered`：通常不是故障，而是非偏好币被正常过滤
+- `reason=stale_snapshot`：先查输入链路，不要先改 selector 阈值
+- `reason=state_preferred_score_pass`：说明偏好币在当前状态下已被放行
+
+- 看 `_meta`
+
+```bash
+tail -n 20 app/market/rpc/data/universepool/_meta/$(date -u +%F).jsonl
+```
+
+- 看 `selector_decision`
+
+```bash
+grep '"action":"selector_decision"' \
+  app/market/rpc/data/universepool/{BNBUSDT,SOLUSDT,XRPUSDT}/$(date -u +%F).jsonl | tail -n 30
+```
+
+- 看 `ws / aggregator / universepool`
+
+```bash
+grep '\[ws\]\|\[aggregated\]\|\[aggregated 5m emit\]\|\[universepool\]' \
+  app/market/rpc/logs/market.log | tail -n 50
+```
+
+- 一句话原则：先查输入有没有进来，再查 selector 有没有命中，最后才考虑要不要调阈值
+- 详细版值班手册见 [architecture.md](file:///Users/bytedance/GolandProjects/exchange-system/docs/architecture.md) 的 `3.3.6 Market UniversePool 判读标准`
 
 ## 当前实现与架构文档的差异
 - 架构文档偏“目标形态”，代码配置是“当前可运行形态”

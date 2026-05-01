@@ -1,6 +1,10 @@
 package marketstate
 
-import "time"
+import (
+	"time"
+
+	"exchange-system/common/featureengine"
+)
 
 // MarketState 表示当前市场 regime 的最小分类结果。
 type MarketState string
@@ -18,20 +22,8 @@ const (
 	MarketStateUnknown MarketState = "unknown"
 )
 
-// Features 定义状态识别所需的最小输入特征集合。
-type Features struct {
-	Symbol     string
-	Timeframe  string
-	Close      float64
-	Ema21      float64
-	Ema55      float64
-	Atr        float64
-	AtrPct     float64
-	Rsi        float64
-	Healthy    bool
-	LastReason string
-	UpdatedAt  time.Time
-}
+// Features 复用统一 Feature Engine 的标准特征结构，避免 strategy 自己再维护一套字段定义。
+type Features = featureengine.Features
 
 // Result 表示一次市场状态识别的结构化输出。
 type Result struct {

@@ -18,7 +18,7 @@ Binance:
   BaseURL: https://demo-fapi.binance.com
   APIKey: "EyYZXotRJaaXeycqfwLaDYBREyLTyNQK8lCuZKilieOg5gBgKGnpbdXBSMN7eMjJ"
   SecretKey: "69wfjz9tkqUykbwlla6HUYcCKuVtRKvOEYoCUC1BdA0dYChSOccJpI1xnUpId0UP"
-  Proxy: socks5://192.168.10.13:1080
+  Proxy: socks5://192.168.10.14:1080
 
 # 数据保存目录（JSONL 格式）
 DataDir: data/futures

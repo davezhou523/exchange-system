@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"exchange-system/common/featureengine"
 	"exchange-system/common/pb/market"
 )
 
@@ -29,6 +30,7 @@ type stateSummary struct {
 	TrendCount       int
 	RangeCount       int
 	BreakoutCount    int
+	StateVotes       map[string]StateVoteDetail
 	Candidates       int
 	Snapshots        int
 	Fresh            int
@@ -377,6 +379,7 @@ func summarizeStates(cfg Config, now time.Time, desired DesiredUniverse, snapsho
 		TrendCount:       desired.TrendCount,
 		RangeCount:       desired.RangeCount,
 		BreakoutCount:    desired.BreakoutCount,
+		StateVotes:       desired.StateVotes,
 		Candidates:       len(cfg.CandidateSymbols),
 		Snapshots:        len(snapshots),
 	}
@@ -439,23 +442,19 @@ func (m *Manager) UpdateSnapshotFromKline(k *market.Kline) {
 	if k.Interval != expectedInterval {
 		return
 	}
-	updatedAt := time.Now().UTC()
-	if k.EventTime > 0 {
-		updatedAt = time.UnixMilli(k.EventTime).UTC()
-	}
+	features := featureengine.BuildFromKline(k)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	prev := m.snapshots[k.Symbol]
-	prev.Symbol = k.Symbol
-	prev.UpdatedAt = updatedAt
-	prev.LastPrice = k.Close
-	prev.Ema21 = k.Ema21
-	prev.Ema55 = k.Ema55
-	prev.Rsi = k.Rsi
-	prev.Atr = k.Atr
-	if k.Close > 0 && k.Atr > 0 {
-		prev.AtrPct = k.Atr / k.Close
-	}
+	prev.Symbol = features.Symbol
+	prev.UpdatedAt = features.UpdatedAt
+	prev.LastPrice = features.Price
+	prev.Ema21 = features.Ema21
+	prev.Ema55 = features.Ema55
+	prev.Rsi = features.Rsi
+	prev.Atr = features.Atr
+	prev.AtrPct = features.AtrPct
+	prev.Volume24h = features.Volume
 	prev.Healthy = true
 	prev.LastReason = "fresh_" + expectedInterval
 	m.snapshots[k.Symbol] = prev

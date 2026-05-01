@@ -125,6 +125,47 @@ func TestManagerUpdateSnapshotFromKlineUses5mInValidationMode5m(t *testing.T) {
 	}
 }
 
+func TestManagerUpdateSnapshotFromKlineUses1mInValidationMode1m(t *testing.T) {
+	mgr := NewManager(Config{
+		Enabled:        true,
+		ValidationMode: "1m",
+	}, nil, nil, nil, nil)
+
+	updatedAt := time.Date(2026, 5, 1, 14, 15, 0, 0, time.UTC)
+	mgr.UpdateSnapshotFromKline(&market.Kline{
+		Symbol:     "BNBUSDT",
+		Interval:   "1m",
+		Close:      610.5,
+		Ema21:      608.2,
+		Ema55:      603.8,
+		Rsi:        58.4,
+		Atr:        4.2,
+		Volume:     12345,
+		IsClosed:   true,
+		IsDirty:    false,
+		IsTradable: true,
+		IsFinal:    true,
+		EventTime:  updatedAt.UnixMilli(),
+	})
+
+	got, ok := mgr.snapshots["BNBUSDT"]
+	if !ok {
+		t.Fatal("snapshot missing for BNBUSDT")
+	}
+	if got.LastReason != "fresh_1m" {
+		t.Fatalf("LastReason = %s, want fresh_1m", got.LastReason)
+	}
+	if !got.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("UpdatedAt = %s, want %s", got.UpdatedAt, updatedAt)
+	}
+	if got.LastPrice != 610.5 {
+		t.Fatalf("LastPrice = %v, want 610.5", got.LastPrice)
+	}
+	if !got.Healthy {
+		t.Fatal("Healthy = false, want true")
+	}
+}
+
 func TestSummarizeStatesIncludesSnapshotMetadata(t *testing.T) {
 	now := time.Date(2026, 4, 27, 0, 10, 0, 0, time.UTC)
 	summary := summarizeStates(Config{ValidationMode: "5m"}, now, DesiredUniverse{}, map[string]Snapshot{

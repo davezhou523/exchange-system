@@ -7,9 +7,52 @@ import (
 	"exchange-system/app/strategy/rpc/internal/marketstate"
 )
 
+type strategyBucket string
+
+const (
+	strategyBucketTrend    strategyBucket = "trend"
+	strategyBucketBreakout strategyBucket = "breakout"
+	strategyBucketRange    strategyBucket = "range"
+)
+
+var trendPreferredSymbolWeights = map[string]float64{
+	"ETHUSDT": 0.4,
+	"SOLUSDT": 0.3,
+	"BNBUSDT": 0.3,
+}
+
+var breakoutPreferredSymbolWeights = map[string]float64{
+	"BTCUSDT":  0.5,
+	"DOGEUSDT": 0.25,
+	"PEPEUSDT": 0.25,
+}
+
+var defaultTrendStrategyMix = map[string]float64{
+	"trend":    0.7,
+	"breakout": 0.3,
+}
+
+var defaultBreakoutStrategyMix = map[string]float64{
+	"breakout": 0.7,
+	"trend":    0.3,
+}
+
+var defaultRangeStrategyMix = map[string]float64{
+	"range": 0.7,
+	"trend": 0.3,
+}
+
 // DefaultEngine 是 Phase 5 第一版的最小权重引擎实现。
 type DefaultEngine struct {
-	cfg Config
+	cfg          Config
+	lastPulse    marketPulse
+	coolingUntil time.Time
+}
+
+type marketPulse struct {
+	AvgAtrPct          float64
+	AvgVolume          float64
+	HealthySymbolCount int
 }
 
 // NewEngine 创建一个带保守默认值的权重引擎。
@@ -35,6 +78,33 @@ func NewEngine(cfg Config) *DefaultEngine {
 	if cfg.DrawdownSoftLimit <= 0 {
 		cfg.DrawdownSoftLimit = 0.10
 	}
+	if cfg.CoolingPauseDuration <= 0 {
+		cfg.CoolingPauseDuration = 30 * time.Minute
+	}
+	if cfg.AtrSpikeRatioMin <= 0 {
+		cfg.AtrSpikeRatioMin = 1.8
+	}
+	if cfg.VolumeSpikeRatioMin <= 0 {
+		cfg.VolumeSpikeRatioMin = 2.0
+	}
+	if cfg.CoolingMinSamples <= 0 {
+		cfg.CoolingMinSamples = 2
+	}
+	if len(cfg.TrendStrategyMix) == 0 {
+		cfg.TrendStrategyMix = cloneSymbolWeights(defaultTrendStrategyMix)
+	}
+	if len(cfg.BreakoutStrategyMix) == 0 {
+		cfg.BreakoutStrategyMix = cloneSymbolWeights(defaultBreakoutStrategyMix)
+	}
+	if len(cfg.RangeStrategyMix) == 0 {
+		cfg.RangeStrategyMix = cloneSymbolWeights(defaultRangeStrategyMix)
+	}
+	if len(cfg.TrendSymbolWeights) == 0 {
+		cfg.TrendSymbolWeights = cloneSymbolWeights(trendPreferredSymbolWeights)
+	}
+	if len(cfg.BreakoutSymbolWeights) == 0 {
+		cfg.BreakoutSymbolWeights = cloneSymbolWeights(breakoutPreferredSymbolWeights)
+	}
 	return &DefaultEngine{cfg: cfg}
 }
 
@@ -46,18 +116,30 @@ func (e *DefaultEngine) Evaluate(now time.Time, in Inputs) Output {
 	if in.UpdatedAt.IsZero() {
 		in.UpdatedAt = now.UTC()
 	}
-	riskScale, paused, pauseReason := e.computeRiskScale(in)
+	riskScale, paused, pauseReason, coolingUntil, atrSpikeRatio, volumeSpikeRatio := e.computeRiskScale(now, in)
 	recommendations := e.allocateBudgets(in, riskScale, paused, pauseReason)
 	return Output{
 		Recommendations:   recommendations,
 		MarketPaused:      paused,
 		MarketPauseReason: pauseReason,
+		CoolingUntil:      coolingUntil,
+		AtrSpikeRatio:     atrSpikeRatio,
+		VolumeSpikeRatio:  volumeSpikeRatio,
 		UpdatedAt:         in.UpdatedAt.UTC(),
 	}
 }
 
-// computeRiskScale 根据连亏、单日亏损和回撤情况生成当前轮风险缩放建议。
-func (e *DefaultEngine) computeRiskScale(in Inputs) (float64, bool, string) {
+// computeRiskScale 根据连亏、回撤和市场降温状态生成当前轮风险缩放建议。
+func (e *DefaultEngine) computeRiskScale(now time.Time, in Inputs) (float64, bool, string, time.Time, float64, float64) {
+	if e == nil {
+		return 0, false, "", time.Time{}, 0, 0
+	}
+	atrSpikeRatio, volumeSpikeRatio, triggerCooling := e.evaluateCoolingTrigger(in)
+	e.updateCoolingState(now, triggerCooling)
+	if !e.coolingUntil.IsZero() && now.Before(e.coolingUntil) {
+		return 0, true, "market_cooling_pause", e.coolingUntil.UTC(), atrSpikeRatio, volumeSpikeRatio
+	}
+
 	riskScale := e.cfg.DefaultRiskScale
 	if in.LossStreak >= e.cfg.LossStreakThreshold {
 		riskScale *= 0.5
@@ -69,44 +151,52 @@ func (e *DefaultEngine) computeRiskScale(in Inputs) (float64, bool, string) {
 		riskScale *= 0.5
 	}
 	if riskScale <= 0.125 {
-		return 0, true, "risk_limit_triggered"
+		return 0, true, "risk_limit_triggered", time.Time{}, atrSpikeRatio, volumeSpikeRatio
 	}
-	return riskScale, false, ""
+	return riskScale, false, "", time.Time{}, atrSpikeRatio, volumeSpikeRatio
 }
 
-// allocateBudgets 按当前状态和 symbol score 生成每个交易对的最小仓位预算建议。
+// allocateBudgets 按“策略权重 * symbol 权重 * 风险因子”生成每个交易对的仓位预算。
 func (e *DefaultEngine) allocateBudgets(in Inputs, riskScale float64, paused bool, pauseReason string) []Recommendation {
 	symbols := append([]string(nil), in.Symbols...)
 	sort.Strings(symbols)
 
-	baseStrategyWeight := e.strategyWeightForState(in.MarketState.State)
-	totalScore := 0.0
 	scoreBySymbol := make(map[string]float64, len(symbols))
+	symbolsByBucket := make(map[strategyBucket][]string)
 	for _, symbol := range symbols {
 		score := in.SymbolScores[symbol]
 		if score <= 0 {
 			score = 1
 		}
 		scoreBySymbol[symbol] = score
-		totalScore += score
+		bucket := classifyStrategyBucket(in.Templates[symbol])
+		symbolsByBucket[bucket] = append(symbolsByBucket[bucket], symbol)
 	}
-	if totalScore <= 0 {
-		totalScore = float64(len(symbols))
-		if totalScore <= 0 {
-			totalScore = 1
+
+	strategyWeights := e.strategyWeightsForState(in.MarketState.State)
+	symbolWeights := make(map[string]float64, len(symbols))
+	for bucket, items := range symbolsByBucket {
+		weights := e.symbolWeightsForBucket(in.MarketState.State, bucket, items, scoreBySymbol)
+		for symbol, weight := range weights {
+			symbolWeights[symbol] = weight
 		}
 	}
 
 	out := make([]Recommendation, 0, len(symbols))
 	for _, symbol := range symbols {
-		symbolWeight := scoreBySymbol[symbol] / totalScore
+		bucket := classifyStrategyBucket(in.Templates[symbol])
+		strategyWeight := strategyWeights[bucket]
+		symbolWeight := symbolWeights[symbol]
+		if symbolWeight <= 0 {
+			symbolWeight = 1
+		}
 		rec := Recommendation{
 			Symbol:         symbol,
 			Template:       in.Templates[symbol],
-			StrategyWeight: baseStrategyWeight,
+			StrategyWeight: strategyWeight,
 			SymbolWeight:   symbolWeight,
 			RiskScale:      riskScale,
-			PositionBudget: baseStrategyWeight * symbolWeight * riskScale,
+			PositionBudget: strategyWeight * symbolWeight * riskScale,
 			TradingPaused:  paused,
 			PauseReason:    pauseReason,
 		}
@@ -115,16 +205,188 @@ func (e *DefaultEngine) allocateBudgets(in Inputs, riskScale float64, paused boo
 	return out
 }
 
-// strategyWeightForState 根据市场状态返回当前轮的基础策略权重。
-func (e *DefaultEngine) strategyWeightForState(state marketstate.MarketState) float64 {
+// strategyWeightsForState 根据市场状态返回当前轮的策略桶资金配比。
+func (e *DefaultEngine) strategyWeightsForState(state marketstate.MarketState) map[strategyBucket]float64 {
 	switch state {
 	case marketstate.MarketStateTrendUp, marketstate.MarketStateTrendDown:
-		return e.cfg.DefaultTrendWeight
+		return normalizeStrategyMix(e.cfg.TrendStrategyMix)
 	case marketstate.MarketStateBreakout:
-		return e.cfg.DefaultBreakoutWeight
+		return normalizeStrategyMix(e.cfg.BreakoutStrategyMix)
 	case marketstate.MarketStateRange:
-		return e.cfg.DefaultRangeWeight
+		return normalizeStrategyMix(e.cfg.RangeStrategyMix)
 	default:
-		return 0.5
+		return map[strategyBucket]float64{
+			strategyBucketTrend: 0.5,
+		}
+	}
+}
+
+// symbolWeightsForBucket 返回某个策略桶内部各交易对的资金占比。
+func (e *DefaultEngine) symbolWeightsForBucket(state marketstate.MarketState, bucket strategyBucket, symbols []string, scores map[string]float64) map[string]float64 {
+	if len(symbols) == 0 {
+		return nil
+	}
+	if state == marketstate.MarketStateTrendUp || state == marketstate.MarketStateTrendDown {
+		if bucket == strategyBucketTrend {
+			if weights := normalizeFixedSymbolWeights(symbols, e.cfg.TrendSymbolWeights); len(weights) > 0 {
+				return weights
+			}
+		}
+	}
+	if state == marketstate.MarketStateBreakout && bucket == strategyBucketBreakout {
+		if weights := normalizeFixedSymbolWeights(symbols, e.cfg.BreakoutSymbolWeights); len(weights) > 0 {
+			return weights
+		}
+	}
+	if state == marketstate.MarketStateRange && bucket == strategyBucketRange {
+		if weights := normalizeFixedSymbolWeights(symbols, e.cfg.RangeSymbolWeights); len(weights) > 0 {
+			return weights
+		}
+	}
+	return normalizeScoreWeights(symbols, scores)
+}
+
+// classifyStrategyBucket 根据模板名把策略实例归到 trend/breakout/range 桶。
+func classifyStrategyBucket(template string) strategyBucket {
+	switch template {
+	case "breakout-core":
+		return strategyBucketBreakout
+	case "range-core":
+		return strategyBucketRange
+	default:
+		return strategyBucketTrend
+	}
+}
+
+// normalizeFixedSymbolWeights 把固定配比裁剪到当前可交易的 symbol 集合并归一化。
+func normalizeFixedSymbolWeights(symbols []string, fixed map[string]float64) map[string]float64 {
+	total := 0.0
+	out := make(map[string]float64)
+	for _, symbol := range symbols {
+		weight := fixed[symbol]
+		if weight <= 0 {
+			continue
+		}
+		out[symbol] = weight
+		total += weight
+	}
+	if total <= 0 {
+		return nil
+	}
+	for symbol, weight := range out {
+		out[symbol] = weight / total
+	}
+	return out
+}
+
+// normalizeScoreWeights 按 score 在同一个策略桶内归一化资金占比。
+func normalizeScoreWeights(symbols []string, scores map[string]float64) map[string]float64 {
+	total := 0.0
+	out := make(map[string]float64, len(symbols))
+	for _, symbol := range symbols {
+		score := scores[symbol]
+		if score <= 0 {
+			score = 1
+		}
+		out[symbol] = score
+		total += score
+	}
+	if total <= 0 {
+		total = float64(len(symbols))
+		if total <= 0 {
+			total = 1
+		}
+	}
+	for symbol, score := range out {
+		out[symbol] = score / total
+	}
+	return out
+}
+
+// cloneSymbolWeights 复制一份 symbol->weight 映射，避免外部修改影响运行时配置。
+func cloneSymbolWeights(in map[string]float64) map[string]float64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(in))
+	for symbol, weight := range in {
+		out[symbol] = weight
+	}
+	return out
+}
+
+// normalizeStrategyMix 把 YAML 中的策略桶配比转成运行时可直接使用的归一化结果。
+func normalizeStrategyMix(in map[string]float64) map[strategyBucket]float64 {
+	total := 0.0
+	out := make(map[strategyBucket]float64)
+	for name, weight := range in {
+		bucket, ok := parseStrategyBucket(name)
+		if !ok || weight <= 0 {
+			continue
+		}
+		out[bucket] += weight
+		total += weight
+	}
+	if total <= 0 {
+		return map[strategyBucket]float64{
+			strategyBucketTrend: 0.5,
+		}
+	}
+	for bucket, weight := range out {
+		out[bucket] = weight / total
+	}
+	return out
+}
+
+// parseStrategyBucket 把配置键名解析为内部策略桶枚举。
+func parseStrategyBucket(name string) (strategyBucket, bool) {
+	switch name {
+	case string(strategyBucketTrend):
+		return strategyBucketTrend, true
+	case string(strategyBucketBreakout):
+		return strategyBucketBreakout, true
+	case string(strategyBucketRange):
+		return strategyBucketRange, true
+	default:
+		return "", false
+	}
+}
+
+// evaluateCoolingTrigger 根据当前市场脉冲与上一轮基线判断是否需要进入降温暂停。
+func (e *DefaultEngine) evaluateCoolingTrigger(in Inputs) (float64, float64, bool) {
+	if e == nil {
+		return 0, 0, false
+	}
+	current := marketPulse{
+		AvgAtrPct:          in.AvgAtrPct,
+		AvgVolume:          in.AvgVolume,
+		HealthySymbolCount: in.HealthySymbolCount,
+	}
+	defer func() {
+		e.lastPulse = current
+	}()
+	if current.HealthySymbolCount < e.cfg.CoolingMinSamples {
+		return 0, 0, false
+	}
+	if e.lastPulse.HealthySymbolCount < e.cfg.CoolingMinSamples || e.lastPulse.AvgAtrPct <= 0 || e.lastPulse.AvgVolume <= 0 {
+		return 0, 0, false
+	}
+	atrSpikeRatio := current.AvgAtrPct / e.lastPulse.AvgAtrPct
+	volumeSpikeRatio := current.AvgVolume / e.lastPulse.AvgVolume
+	triggerCooling := atrSpikeRatio >= e.cfg.AtrSpikeRatioMin && volumeSpikeRatio >= e.cfg.VolumeSpikeRatioMin
+	return atrSpikeRatio, volumeSpikeRatio, triggerCooling
+}
+
+// updateCoolingState 在触发降温时刷新暂停截止时间，冷却结束后自动清空。
+func (e *DefaultEngine) updateCoolingState(now time.Time, triggerCooling bool) {
+	if e == nil {
+		return
+	}
+	if triggerCooling {
+		e.coolingUntil = now.UTC().Add(e.cfg.CoolingPauseDuration)
+		return
+	}
+	if !e.coolingUntil.IsZero() && !now.Before(e.coolingUntil) {
+		e.coolingUntil = time.Time{}
 	}
 }

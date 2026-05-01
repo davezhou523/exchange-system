@@ -15,6 +15,6 @@ PY
 QUERY="symbol=${SYMBOL}&limit=500&recvWindow=5000&startTime=${START_TIME}&timestamp=${TIMESTAMP}"
 SIGNATURE=$(printf '%s' "$QUERY" | openssl dgst -sha256 -hmac "$SECRET_KEY" | awk '{print $2}')
 
-curl -x socks5://192.168.10.13:1080 \
+curl -x socks5://192.168.10.14:1080 \
   -H "X-MBX-APIKEY: ${API_KEY}" \
   "https://demo-fapi.binance.com/fapi/v1/allOrders?${QUERY}&signature=${SIGNATURE}"

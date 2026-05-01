@@ -25,16 +25,26 @@ type ServiceContext struct {
 	cancel         context.CancelFunc
 }
 
+// snapshotUpdater 定义 UniversePool 快照更新能力，便于 dispatcher 解耦与测试。
+type snapshotUpdater interface {
+	// UpdateSnapshotFromKline 使用闭合 K 线同步刷新 UniversePool 评估快照。
+	UpdateSnapshotFromKline(k *market.Kline)
+}
+
 // klineDispatcher 把 websocket 收到的 1m 闭合 K 线同时分发给 UniversePool 和聚合器。
 type klineDispatcher struct {
 	agg         *aggregator.KlineAggregator
-	universeMgr *universepool.Manager
+	universeMgr snapshotUpdater
 }
 
 // OnKline 在不破坏现有聚合链路的前提下，同步更新动态币池快照缓存。
 func (d *klineDispatcher) OnKline(ctx context.Context, k *market.Kline) {
 	if d == nil || k == nil {
 		return
+	}
+	// UniversePool 快照属于“观察输入”，优先于聚合发射链路同步更新，避免 warmup 期间出现 snapshot 空窗。
+	if d.universeMgr != nil {
+		d.universeMgr.UpdateSnapshotFromKline(k)
 	}
 	if d.agg != nil {
 		d.agg.OnKline(ctx, k)
@@ -143,6 +153,8 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 			TrendPreferredSymbols:    append([]string(nil), c.UniversePool.TrendPreferredSymbols...),
 			RangePreferredSymbols:    append([]string(nil), c.UniversePool.RangePreferredSymbols...),
 			BreakoutPreferredSymbols: append([]string(nil), c.UniversePool.BreakoutPreferredSymbols...),
+			BreakoutAtrPctMin:        c.UniversePool.BreakoutAtrPctMin,
+			BreakoutAtrPctExitMin:    c.UniversePool.BreakoutAtrPctExitMin,
 			EvaluateInterval:         c.UniversePool.EvaluateInterval,
 			MinActiveDuration:        c.UniversePool.MinActiveDuration,
 			MinInactiveDuration:      c.UniversePool.MinInactiveDuration,

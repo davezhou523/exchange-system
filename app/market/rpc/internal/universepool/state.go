@@ -30,6 +30,8 @@ type Config struct {
 	TrendPreferredSymbols    []string
 	RangePreferredSymbols    []string
 	BreakoutPreferredSymbols []string
+	BreakoutAtrPctMin        float64
+	BreakoutAtrPctExitMin    float64
 	EvaluateInterval         time.Duration
 	MinActiveDuration        time.Duration
 	MinInactiveDuration      time.Duration
@@ -65,13 +67,45 @@ type Snapshot struct {
 	LastReason string
 }
 
+// RankDetail 表示 Symbol Ranker 对某个候选币产出的基础分与分量拆解。
+type RankDetail struct {
+	BaseScore       float64 `json:"base_score,omitempty"`
+	TrendScore      float64 `json:"trend_score,omitempty"`
+	VolatilityScore float64 `json:"volatility_score,omitempty"`
+	VolumeScore     float64 `json:"volume_score,omitempty"`
+	RawTrendScore   float64 `json:"raw_trend_score,omitempty"`
+	RawVolatility   float64 `json:"raw_volatility,omitempty"`
+	RawVolume       float64 `json:"raw_volume,omitempty"`
+}
+
+// StateVoteDetail 表示某个候选币在本轮全局状态投票中的分类结果与论证依据。
+type StateVoteDetail struct {
+	ClassifiedState    string      `json:"classified_state,omitempty"`
+	ClassifiedReason   string      `json:"classified_reason,omitempty"`
+	ClassifiedReasonZh string      `json:"classified_reason_zh,omitempty"`
+	Fresh              bool        `json:"fresh"`
+	Healthy            bool        `json:"healthy"`
+	LastPrice          float64     `json:"last_price,omitempty"`
+	Ema21              float64     `json:"ema21,omitempty"`
+	Ema55              float64     `json:"ema55,omitempty"`
+	AtrPct             float64     `json:"atr_pct,omitempty"`
+	RangeAtrPctMax     float64     `json:"range_atr_pct_max,omitempty"`
+	BreakoutAtrPctMin  float64     `json:"breakout_atr_pct_min,omitempty"`
+	TrendAligned       bool        `json:"trend_aligned"`
+	RangeMatch         bool        `json:"range_match"`
+	BreakoutMatch      bool        `json:"breakout_match"`
+	TrendMatch         bool        `json:"trend_match"`
+	RankDetail         *RankDetail `json:"rank_detail,omitempty"`
+}
+
 // DesiredUniverseSymbol 表示某个交易对在当前轮评估中的目标状态。
 type DesiredUniverseSymbol struct {
-	Symbol   string
-	Reason   string
-	Score    float64
-	Desired  bool
-	Template string
+	Symbol    string
+	Reason    string
+	Score     float64
+	Desired   bool
+	Template  string
+	StateVote StateVoteDetail
 }
 
 // DesiredUniverse 表示当前轮评估希望纳入动态币池的交易对集合。
@@ -81,6 +115,7 @@ type DesiredUniverse struct {
 	RangeCount    int
 	BreakoutCount int
 	Symbols       map[string]DesiredUniverseSymbol
+	StateVotes    map[string]StateVoteDetail
 }
 
 // SymbolRuntimeState 表示某个交易对在 market 侧的运行时状态。

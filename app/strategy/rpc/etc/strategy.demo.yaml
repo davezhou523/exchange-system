@@ -10,7 +10,8 @@ Kafka:
     - 127.0.0.1:29092
     - 127.0.0.1:39092
   Group: strategy-rpc-kline
-  InitialOffset: oldest
+  # 快速验证优先消费最新数据，避免新起消费者时回放过多旧 K 线。
+  InitialOffset: newest
   Topics:
     Kline: kline
     Depth: ""
@@ -53,7 +54,19 @@ Templates:
     1m_rsi_bias_short: 44
     1m_min_holding_bars: 6
     1m_ema_exit_buffer_atr: 0.35
-    harvest_path_model_enabled: 0
+    harvest_path_model_enabled: 1
+    harvest_path_publish_threshold: 0.60
+    harvest_path_lookback: 20
+    harvest_path_block_threshold: 0.80
+    harvest_path_log_threshold: 0.60
+    harvest_path_lstm_enabled: 0
+    harvest_path_lstm_weight: 0.35
+    harvest_path_book_enabled: 0
+    harvest_path_book_weight: 0.35
+    harvest_path_book_top_n: 10
+    harvest_path_book_spread_bps_cap: 12
+    harvest_path_regime_aware_threshold_enabled: 1
+    harvest_path_regime_lookback: 120
     max_consecutive_losses: 3
     max_daily_loss_pct: 0.06
     max_drawdown_pct: 0.12
@@ -91,7 +104,19 @@ Templates:
     1m_rsi_bias_short: 43
     1m_min_holding_bars: 6
     1m_ema_exit_buffer_atr: 0.28
-    harvest_path_model_enabled: 0
+    harvest_path_model_enabled: 1
+    harvest_path_publish_threshold: 0.60
+    harvest_path_lookback: 20
+    harvest_path_block_threshold: 0.80
+    harvest_path_log_threshold: 0.60
+    harvest_path_lstm_enabled: 0
+    harvest_path_lstm_weight: 0.35
+    harvest_path_book_enabled: 0
+    harvest_path_book_weight: 0.35
+    harvest_path_book_top_n: 10
+    harvest_path_book_spread_bps_cap: 12
+    harvest_path_regime_aware_threshold_enabled: 1
+    harvest_path_regime_lookback: 120
     max_consecutive_losses: 3
     max_daily_loss_pct: 0.06
     max_drawdown_pct: 0.12
@@ -129,7 +154,19 @@ Templates:
     1m_rsi_bias_short: 45
     1m_min_holding_bars: 5
     1m_ema_exit_buffer_atr: 0.30
-    harvest_path_model_enabled: 0
+    harvest_path_model_enabled: 1
+    harvest_path_publish_threshold: 0.60
+    harvest_path_lookback: 20
+    harvest_path_block_threshold: 0.80
+    harvest_path_log_threshold: 0.60
+    harvest_path_lstm_enabled: 0
+    harvest_path_lstm_weight: 0.35
+    harvest_path_book_enabled: 0
+    harvest_path_book_weight: 0.35
+    harvest_path_book_top_n: 10
+    harvest_path_book_spread_bps_cap: 12
+    harvest_path_regime_aware_threshold_enabled: 1
+    harvest_path_regime_lookback: 120
     max_consecutive_losses: 3
     max_daily_loss_pct: 0.07
     max_drawdown_pct: 0.15
@@ -167,7 +204,19 @@ Templates:
     1m_rsi_bias_short: 43
     1m_min_holding_bars: 7
     1m_ema_exit_buffer_atr: 0.40
-    harvest_path_model_enabled: 0
+    harvest_path_model_enabled: 1
+    harvest_path_publish_threshold: 0.60
+    harvest_path_lookback: 20
+    harvest_path_block_threshold: 0.80
+    harvest_path_log_threshold: 0.60
+    harvest_path_lstm_enabled: 0
+    harvest_path_lstm_weight: 0.35
+    harvest_path_book_enabled: 0
+    harvest_path_book_weight: 0.35
+    harvest_path_book_top_n: 10
+    harvest_path_book_spread_bps_cap: 12
+    harvest_path_regime_aware_threshold_enabled: 1
+    harvest_path_regime_lookback: 120
     max_consecutive_losses: 2
     max_daily_loss_pct: 0.05
     max_drawdown_pct: 0.12
@@ -205,11 +254,130 @@ Templates:
     1m_rsi_bias_short: 42
     1m_min_holding_bars: 8
     1m_ema_exit_buffer_atr: 0.50
-    harvest_path_model_enabled: 0
+    harvest_path_model_enabled: 1
+    harvest_path_publish_threshold: 0.60
+    harvest_path_lookback: 20
+    harvest_path_block_threshold: 0.80
+    harvest_path_log_threshold: 0.60
+    harvest_path_lstm_enabled: 0
+    harvest_path_lstm_weight: 0.35
+    harvest_path_book_enabled: 0
+    harvest_path_book_weight: 0.35
+    harvest_path_book_top_n: 10
+    harvest_path_book_spread_bps_cap: 12
+    harvest_path_regime_aware_threshold_enabled: 1
+    harvest_path_regime_lookback: 120
     max_consecutive_losses: 2
     max_daily_loss_pct: 0.04
     max_drawdown_pct: 0.10
     drawdown_position_scale: 0.3
+    max_positions: 1
+  breakout-core:
+    risk_per_trade: 0.02
+    max_position_size: 0.40
+    leverage: 5.0
+    max_leverage_ratio: 0.85
+    equity: 10000
+    stop_loss_atr_multiplier: 1.6
+    ema_exit_buffer_atr: 0.30
+    min_holding_bars: 4
+    ema_exit_confirm_bars: 2
+    deep_pullback_scale: 1.0
+    pullback_deep_band: 0.003
+    require_both_entry_signals: 0
+    m15_breakout_lookback: 8
+    m15_rsi_bias_long: 55
+    m15_rsi_bias_short: 45
+    debug_skip_4h_trend: 0
+    debug_skip_pullback: 0
+    debug_skip_15m_entry: 0
+    decision_log_enabled: 1
+    signal_mode: 0
+    1m_trading_paused: 0
+    1m_atr_multiplier: 1.6
+    1m_breakout_lookback: 24
+    1m_rsi_bias_long: 56
+    1m_rsi_bias_short: 44
+    1m_min_holding_bars: 5
+    1m_ema_exit_buffer_atr: 0.30
+    strategy_variant: 1
+    breakout_volume_ratio_min: 1.2
+    breakout_entry_buffer_atr: 0.1
+    breakout_rsi_long_min: 55
+    breakout_rsi_short_max: 45
+    breakout_require_ema_trend: 1
+    harvest_path_model_enabled: 1
+    harvest_path_publish_threshold: 0.60
+    harvest_path_lookback: 20
+    harvest_path_block_threshold: 0.80
+    harvest_path_log_threshold: 0.60
+    harvest_path_lstm_enabled: 0
+    harvest_path_lstm_weight: 0.35
+    harvest_path_book_enabled: 0
+    harvest_path_book_weight: 0.35
+    harvest_path_book_top_n: 10
+    harvest_path_book_spread_bps_cap: 12
+    harvest_path_regime_aware_threshold_enabled: 1
+    harvest_path_regime_lookback: 120
+    max_consecutive_losses: 3
+    max_daily_loss_pct: 0.05
+    max_drawdown_pct: 0.10
+    drawdown_position_scale: 0.4
+    max_positions: 1
+  range-core:
+    risk_per_trade: 0.015
+    max_position_size: 0.30
+    leverage: 3.0
+    max_leverage_ratio: 0.70
+    equity: 10000
+    stop_loss_atr_multiplier: 1.2
+    ema_exit_buffer_atr: 0.25
+    min_holding_bars: 3
+    ema_exit_confirm_bars: 2
+    deep_pullback_scale: 1.0
+    pullback_deep_band: 0.002
+    require_both_entry_signals: 0
+    m15_breakout_lookback: 8
+    m15_rsi_bias_long: 52
+    m15_rsi_bias_short: 48
+    debug_skip_4h_trend: 0
+    debug_skip_pullback: 0
+    debug_skip_15m_entry: 0
+    decision_log_enabled: 1
+    signal_mode: 0
+    1m_trading_paused: 0
+    1m_atr_multiplier: 1.2
+    1m_breakout_lookback: 24
+    1m_rsi_bias_long: 52
+    1m_rsi_bias_short: 48
+    1m_min_holding_bars: 4
+    1m_ema_exit_buffer_atr: 0.25
+    strategy_variant: 2
+    range_lookback: 12
+    range_entry_atr_buffer: 0.35
+    range_target_atr_multiplier: 1.2
+    range_rsi_long_max: 42
+    range_rsi_short_min: 58
+    range_require_flat_ema: 1
+    range_mid_no_trade_width_pct: 0.18
+    range_trend_ema_drift_max: 0.35
+    harvest_path_model_enabled: 1
+    harvest_path_publish_threshold: 0.60
+    harvest_path_lookback: 20
+    harvest_path_block_threshold: 0.80
+    harvest_path_log_threshold: 0.60
+    harvest_path_lstm_enabled: 0
+    harvest_path_lstm_weight: 0.35
+    harvest_path_book_enabled: 0
+    harvest_path_book_weight: 0.35
+    harvest_path_book_top_n: 10
+    harvest_path_book_spread_bps_cap: 12
+    harvest_path_regime_aware_threshold_enabled: 1
+    harvest_path_regime_lookback: 120
+    max_consecutive_losses: 3
+    max_daily_loss_pct: 0.04
+    max_drawdown_pct: 0.08
+    drawdown_position_scale: 0.4
     max_positions: 1
 
 Strategies:
@@ -230,7 +398,11 @@ Strategies:
     enabled: true
     template: high-beta
   - name: trend-following
-    symbol: XRPUSDT
+    symbol: DOGEUSDT
+    enabled: true
+    template: high-beta
+  - name: trend-following
+    symbol: PEPEUSDT
     enabled: true
     template: high-beta
 
@@ -249,13 +421,17 @@ Universe:
     - BTCUSDT
     - BNBUSDT
     - SOLUSDT
-    - XRPUSDT
+    - DOGEUSDT
+    - PEPEUSDT
   StaticTemplateMap:
     ETHUSDT: eth-core
     BTCUSDT: btc-core
     BNBUSDT: high-beta
     SOLUSDT: high-beta
-    XRPUSDT: high-beta
+    DOGEUSDT: high-beta
+    PEPEUSDT: high-beta
+  RangeTemplate: range-core
+  BreakoutTemplate: breakout-core
   BTCTrendTemplate: btc-trend
   BTCTrendAtrPctMax: 0.003
   HighBetaSafeTemplate: high-beta-safe
@@ -268,6 +444,41 @@ Strategy:
   Symbol: ETHUSDT
   Name: strategy3-demo
   RuntimeMode: kafka
+
+MarketState:
+  FreshnessWindow: 3m
+  RangeAtrPctMax: 0.0015
+  BreakoutAtrPctMin: 0.006
+
+Weights:
+  DefaultTrendWeight: 0.70
+  DefaultRangeWeight: 0.70
+  DefaultBreakoutWeight: 0.70
+  DefaultRiskScale: 1.0
+  LossStreakThreshold: 3
+  DailyLossSoftLimit: 0.03
+  DrawdownSoftLimit: 0.10
+  CoolingPauseDuration: 30m
+  AtrSpikeRatioMin: 1.8
+  VolumeSpikeRatioMin: 2.0
+  CoolingMinSamples: 2
+  TrendStrategyMix:
+    trend: 0.70
+    breakout: 0.30
+  BreakoutStrategyMix:
+    breakout: 0.70
+    trend: 0.30
+  RangeStrategyMix:
+    range: 0.70
+    trend: 0.30
+  TrendSymbolWeights:
+    ETHUSDT: 0.40
+    SOLUSDT: 0.30
+    BNBUSDT: 0.30
+  BreakoutSymbolWeights:
+    BTCUSDT: 0.50
+    DOGEUSDT: 0.25
+    PEPEUSDT: 0.25
 
 HarvestPathLSTM:
   Enabled: false

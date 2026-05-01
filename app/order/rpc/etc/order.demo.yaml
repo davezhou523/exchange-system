@@ -13,11 +13,12 @@ Kafka:
   Topics:
     Order: order
 
+
 Binance:
   BaseURL: https://demo-fapi.binance.com
-  APIKey: ""
-  SecretKey: ""
-  Proxy: socks5://192.168.10.13:1080
+  APIKey: "EyYZXotRJaaXeycqfwLaDYBREyLTyNQK8lCuZKilieOg5gBgKGnpbdXBSMN7eMjJ"
+  SecretKey: "69wfjz9tkqUykbwlla6HUYcCKuVtRKvOEYoCUC1BdA0dYChSOccJpI1xnUpId0UP"
+  Proxy: socks5://192.168.10.14:1080
 
 DataDir: data/futures
 ExecutionOrderLogDir: ../../execution/rpc/data/order

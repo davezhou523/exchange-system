@@ -160,6 +160,82 @@ func TestSelectorEvaluateBTCTrendTemplateWithMarketState(t *testing.T) {
 	}
 }
 
+func TestSelectorEvaluateBreakoutTemplateWithMarketState(t *testing.T) {
+	now := time.Date(2026, 4, 26, 7, 0, 0, 0, time.UTC)
+	selector := NewSelector(Config{
+		CandidateSymbols: []string{"ETHUSDT"},
+		StaticTemplateMap: map[string]string{
+			"ETHUSDT": "eth-core",
+		},
+		BreakoutTemplate: "breakout-core",
+		FreshnessWindow:  3 * time.Minute,
+		RequireFinal:     true,
+		RequireTradable:  true,
+		RequireClean:     true,
+	})
+
+	got := selector.Evaluate(now, map[string]Snapshot{
+		"ETHUSDT": {
+			Symbol:      "ETHUSDT",
+			UpdatedAt:   now.Add(-time.Minute),
+			IsTradable:  true,
+			IsFinal:     true,
+			IsDirty:     false,
+			LastEventMs: now.UnixMilli(),
+			Close:       100,
+			Atr:         1,
+			Ema21:       99,
+			Ema55:       98,
+			MarketState: marketstate.MarketStateBreakout,
+		},
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("Evaluate() len = %d, want 1", len(got))
+	}
+	if !got[0].Enabled || got[0].BaseTemplate != "eth-core" || got[0].Template != "breakout-core" || got[0].Reason != "market_state_breakout" {
+		t.Fatalf("Evaluate() = %+v, want enabled base=eth-core template=breakout-core market_state_breakout", got[0])
+	}
+}
+
+func TestSelectorEvaluateRangeTemplateWithMarketState(t *testing.T) {
+	now := time.Date(2026, 4, 26, 7, 0, 0, 0, time.UTC)
+	selector := NewSelector(Config{
+		CandidateSymbols: []string{"ETHUSDT"},
+		StaticTemplateMap: map[string]string{
+			"ETHUSDT": "eth-core",
+		},
+		RangeTemplate:   "range-core",
+		FreshnessWindow: 3 * time.Minute,
+		RequireFinal:    true,
+		RequireTradable: true,
+		RequireClean:    true,
+	})
+
+	got := selector.Evaluate(now, map[string]Snapshot{
+		"ETHUSDT": {
+			Symbol:      "ETHUSDT",
+			UpdatedAt:   now.Add(-time.Minute),
+			IsTradable:  true,
+			IsFinal:     true,
+			IsDirty:     false,
+			LastEventMs: now.UnixMilli(),
+			Close:       100,
+			Atr:         0.2,
+			Ema21:       100.1,
+			Ema55:       100.0,
+			MarketState: marketstate.MarketStateRange,
+		},
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("Evaluate() len = %d, want 1", len(got))
+	}
+	if !got[0].Enabled || got[0].BaseTemplate != "eth-core" || got[0].Template != "range-core" || got[0].Reason != "market_state_range" {
+		t.Fatalf("Evaluate() = %+v, want enabled base=eth-core template=range-core market_state_range", got[0])
+	}
+}
+
 func TestSelectorEvaluateSOLHighBetaSafeAndDisable(t *testing.T) {
 	now := time.Date(2026, 4, 26, 7, 0, 0, 0, time.UTC)
 	selector := NewSelector(Config{
