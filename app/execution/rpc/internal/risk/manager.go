@@ -15,11 +15,12 @@ import (
 // ---------------------------------------------------------------------------
 
 // RiskConfig 风控配置
+// 专注执行层风控：仓位大小、杠杆、日亏损、持仓数、敞口、最小下单金额
+// 回撤控制和主动降仓由 PositionMonitor 独立处理
 type RiskConfig struct {
 	MaxPositionSize     float64 // 单笔最大仓位占比（相对余额），默认 0.55（55%）
 	MaxLeverage         float64 // 最大允许杠杆，默认 7.0
 	MaxDailyLossPct     float64 // 最大日亏损占比，默认 0.07（7%）
-	MaxDrawdownPct      float64 // 最大回撤占比，默认 0.15（15%）
 	MaxOpenPositions    int     // 最大同时持仓数，默认 3
 	MaxPositionExposure float64 // 总持仓敞口占比（所有仓位总价值 / 余额），默认 2.0（200%）
 	StopLossPercent     float64 // 默认止损百分比，默认 0.02（2%）
@@ -32,7 +33,6 @@ func DefaultRiskConfig() RiskConfig {
 		MaxPositionSize:     0.55,
 		MaxLeverage:         7.0,
 		MaxDailyLossPct:     0.07,
-		MaxDrawdownPct:      0.15,
 		MaxOpenPositions:    3,
 		MaxPositionExposure: 2.0,
 		StopLossPercent:     0.02,

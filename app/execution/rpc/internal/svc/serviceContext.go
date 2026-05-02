@@ -47,6 +47,7 @@ type ServiceContext struct {
 	// 核心组件
 	router       *exchange.Router               // 下单路由器
 	riskManager  *risk.Manager                  // 风控管理器
+	posMonitor   *risk.PositionMonitor          // 主动降仓监控器
 	orderManager *order.Manager                 // 订单管理器
 	posManager   *position.Manager              // 仓位管理器
 	deduplicator *idempotent.SignalDeduplicator // 幂等去重器
@@ -185,7 +186,6 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		MaxPositionSize:     c.Risk.MaxPositionSize,
 		MaxLeverage:         c.Risk.MaxLeverage,
 		MaxDailyLossPct:     c.Risk.MaxDailyLossPct,
-		MaxDrawdownPct:      c.Risk.MaxDrawdownPct,
 		MaxOpenPositions:    c.Risk.MaxOpenPositions,
 		MaxPositionExposure: c.Risk.MaxPositionExposure,
 		StopLossPercent:     c.Risk.StopLossPercent,
@@ -208,6 +208,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		Config:              c,
 		router:              router,
 		riskManager:         riskManager,
+		posMonitor:          nil,
 		orderManager:        orderManager,
 		posManager:          posManager,
 		deduplicator:        deduplicator,
@@ -220,7 +221,37 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		cancel:              cancel,
 	}
 
-	// 9. 1m K线撮合模式下，启动1m K线消费者
+	// 9. 创建并启动主动降仓监控器
+	if c.PositionMonitor.Enabled {
+		reduceFn := func(ctx context.Context, symbol, positionSide string, reduceQty float64) error {
+			if svcCtx.router == nil {
+				return fmt.Errorf("router not initialized")
+			}
+			_, err := svcCtx.router.CreateOrder(ctx, exchange.CreateOrderParam{
+				Symbol:       symbol,
+				Side:         exchange.SideSell,
+				PositionSide: exchange.PositionSide(positionSide),
+				Type:         exchange.OrderTypeMarket,
+				Quantity:     reduceQty,
+				ReduceOnly:   true,
+				ClientID:     fmt.Sprintf("posmon-%s-%d", symbol, time.Now().UnixMilli()),
+			})
+			return err
+		}
+		posMonitorCfg := risk.PositionMonitorConfig{
+			Enabled:           true,
+			CheckInterval:     c.PositionMonitor.CheckInterval,
+			DrawdownThreshold: c.PositionMonitor.DrawdownThreshold,
+			ReduceRatio:       c.PositionMonitor.ReduceRatio,
+			MinReduceNotional: c.PositionMonitor.MinReduceNotional,
+		}
+		svcCtx.posMonitor = risk.NewPositionMonitor(posMonitorCfg, posManager, reduceFn)
+		svcCtx.posMonitor.Start(ctx)
+		log.Printf("[初始化] 主动降仓监控已启动 | interval=%v threshold=%.0f%% reduce=%.0f%%",
+			c.PositionMonitor.CheckInterval, c.PositionMonitor.DrawdownThreshold*100, c.PositionMonitor.ReduceRatio*100)
+	}
+
+	// 11. 1m K线撮合模式下，启动1m K线消费者
 	var klineConsumer *kafka.KlineConsumer
 	if simExchange != nil && simExchange.GetMatchMode() == exchange.MatchModeKline1m && c.Kafka.Topics.Kline != "" {
 		klineGroupID := groupID + "-1m"
@@ -279,7 +310,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		log.Printf("[初始化] 收割路径风险消费者已启动 | topic=%s group=%s", c.Kafka.Topics.HarvestPathSignal, groupID+"-harvest-path")
 	}
 
-	// 10. 启动信号消费
+	// 12. 启动信号消费
 	if err := signalConsumer.StartConsuming(ctx, func(sig *strategypb.Signal) error {
 		return svcCtx.HandleSignal(ctx, sig)
 	}); err != nil {

@@ -1,6 +1,10 @@
 package config
 
-import "github.com/zeromicro/go-zero/zrpc"
+import (
+	"time"
+
+	"github.com/zeromicro/go-zero/zrpc"
+)
 
 // Config 执行服务配置
 type Config struct {
@@ -21,6 +25,9 @@ type Config struct {
 
 	// 风控配置
 	Risk RiskConfig
+
+	// 主动降仓监控配置
+	PositionMonitor PositionMonitorConfig
 
 	// 幂等配置
 	Idempotent IdempotentConfig
@@ -86,7 +93,6 @@ type RiskConfig struct {
 	MaxPositionSize     float64 // 单笔最大仓位占比（默认 0.55）
 	MaxLeverage         float64 // 最大杠杆（默认 7.0）
 	MaxDailyLossPct     float64 // 最大日亏损占比（默认 0.07）
-	MaxDrawdownPct      float64 // 最大回撤占比（默认 0.15）
 	MaxOpenPositions    int     // 最大同时持仓数（默认 3）
 	MaxPositionExposure float64 // 总持仓敞口占比（默认 2.0）
 	StopLossPercent     float64 // 默认止损百分比（默认 0.02）
@@ -96,4 +102,13 @@ type RiskConfig struct {
 // IdempotentConfig 幂等配置
 type IdempotentConfig struct {
 	TTLSeconds int // 信号去重记录保留时间（秒，默认 600 = 10分钟）
+}
+
+// PositionMonitorConfig 主动降仓监控配置
+type PositionMonitorConfig struct {
+	Enabled           bool          `json:",default=false"`
+	CheckInterval     time.Duration `json:",default=30s"`
+	DrawdownThreshold float64       `json:",default=0.15"` // 回撤触发阈值（默认 15%）
+	ReduceRatio       float64       `json:",default=0.5"`  // 触发后缩减比例（默认 50%）
+	MinReduceNotional float64       `json:",default=10"`   // 最小降仓金额，低于此跳过
 }

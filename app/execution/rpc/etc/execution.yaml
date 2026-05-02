@@ -61,11 +61,18 @@ Risk:
   MaxPositionSize: 0.2          # 单笔最大仓位占比 20%
   MaxLeverage: 7.0              # 最大杠杆 7 倍
   MaxDailyLossPct: 0.07         # 最大日亏损 7%
-  MaxDrawdownPct: 0.15          # 最大回撤 15%
   MaxOpenPositions: 3           # 最大同时持仓数
   MaxPositionExposure: 2.0      # 总敞口 200%
   StopLossPercent: 0.02         # 止损 2%
   MinOrderNotional: 5.0         # 最小下单金额 5 USDT
+
+# 主动降仓监控（回撤保护）
+PositionMonitor:
+  Enabled: false                # 默认关闭，需要时开启
+  CheckInterval: 30s
+  DrawdownThreshold: 0.15       # 回撤 15% 触发
+  ReduceRatio: 0.5             # 触发后减半仓位
+  MinReduceNotional: 10         # 最小降仓金额
 
 # 幂等配置
 Idempotent:

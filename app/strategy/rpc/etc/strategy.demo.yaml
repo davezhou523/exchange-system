@@ -356,11 +356,11 @@ Templates:
     range_lookback: 12
     range_entry_atr_buffer: 0.35
     range_target_atr_multiplier: 1.2
-    range_rsi_long_max: 42
-    range_rsi_short_min: 58
+    range_rsi_long_max: 45
+    range_rsi_short_min: 55
     range_require_flat_ema: 1
     range_mid_no_trade_width_pct: 0.18
-    range_trend_ema_drift_max: 0.35
+    range_trend_ema_drift_max: 0.50
     harvest_path_model_enabled: 1
     harvest_path_publish_threshold: 0.60
     harvest_path_lookback: 20

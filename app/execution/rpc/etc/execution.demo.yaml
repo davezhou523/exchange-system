@@ -40,7 +40,6 @@ Risk:
   MaxPositionSize: 0.2
   MaxLeverage: 7.0
   MaxDailyLossPct: 0.07
-  MaxDrawdownPct: 0.15
   MaxOpenPositions: 3
   MaxPositionExposure: 2.0
   StopLossPercent: 0.02

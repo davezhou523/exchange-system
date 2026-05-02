@@ -1,6 +1,10 @@
 package universepool
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
 
 // SymbolLifecycleState 表示某个交易对在动态币池中的生命周期状态。
 type SymbolLifecycleState string
@@ -78,6 +82,30 @@ type RankDetail struct {
 	RawVolume       float64 `json:"raw_volume,omitempty"`
 }
 
+// MarshalJSON 自定义序列化，统一保留4位小数。
+func (r *RankDetail) MarshalJSON() ([]byte, error) {
+	type alias RankDetail
+	return json.Marshal(&struct {
+		*alias
+		BaseScore       string `json:"base_score"`
+		TrendScore      string `json:"trend_score"`
+		VolatilityScore string `json:"volatility_score"`
+		VolumeScore     string `json:"volume_score"`
+		RawTrendScore   string `json:"raw_trend_score"`
+		RawVolatility   string `json:"raw_volatility"`
+		RawVolume       string `json:"raw_volume"`
+	}{
+		alias:           (*alias)(r),
+		BaseScore:       fmt.Sprintf("%.4f", r.BaseScore),
+		TrendScore:      fmt.Sprintf("%.4f", r.TrendScore),
+		VolatilityScore: fmt.Sprintf("%.4f", r.VolatilityScore),
+		VolumeScore:     fmt.Sprintf("%.4f", r.VolumeScore),
+		RawTrendScore:   fmt.Sprintf("%.4f", r.RawTrendScore),
+		RawVolatility:   fmt.Sprintf("%.4f", r.RawVolatility),
+		RawVolume:       fmt.Sprintf("%.4f", r.RawVolume),
+	})
+}
+
 // StateVoteDetail 表示某个候选币在本轮全局状态投票中的分类结果与论证依据。
 type StateVoteDetail struct {
 	ClassifiedState    string      `json:"classified_state,omitempty"`
@@ -96,6 +124,28 @@ type StateVoteDetail struct {
 	BreakoutMatch      bool        `json:"breakout_match"`
 	TrendMatch         bool        `json:"trend_match"`
 	RankDetail         *RankDetail `json:"rank_detail,omitempty"`
+}
+
+// MarshalJSON 自定义序列化，统一保留4位小数。
+func (s *StateVoteDetail) MarshalJSON() ([]byte, error) {
+	type alias StateVoteDetail
+	return json.Marshal(&struct {
+		*alias
+		LastPrice         string `json:"last_price"`
+		Ema21             string `json:"ema21"`
+		Ema55             string `json:"ema55"`
+		AtrPct            string `json:"atr_pct"`
+		RangeAtrPctMax    string `json:"range_atr_pct_max"`
+		BreakoutAtrPctMin string `json:"breakout_atr_pct_min"`
+	}{
+		alias:             (*alias)(s),
+		LastPrice:         fmt.Sprintf("%.4f", s.LastPrice),
+		Ema21:             fmt.Sprintf("%.4f", s.Ema21),
+		Ema55:             fmt.Sprintf("%.4f", s.Ema55),
+		AtrPct:            fmt.Sprintf("%.4f", s.AtrPct),
+		RangeAtrPctMax:    fmt.Sprintf("%.4f", s.RangeAtrPctMax),
+		BreakoutAtrPctMin: fmt.Sprintf("%.4f", s.BreakoutAtrPctMin),
+	})
 }
 
 // DesiredUniverseSymbol 表示某个交易对在当前轮评估中的目标状态。

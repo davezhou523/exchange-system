@@ -1052,24 +1052,120 @@ Step 7. 执行策略
 说明:
 
 - 这一节专门回答一个现实问题：前面定义的目标架构，现在到底实现了多少
-- 为了避免“文档里有图就等于代码里已经全落地”的误解，这里统一按 `已完成 / 半完成 / 未开始` 标记
+- 为了避免“文档里有图就等于代码里已经全落地”的误解，这里改用更直白的完成度分层来描述
 
-| 模块 | 当前状态 | 说明 |
-|------|----------|------|
-| Market Data Pipeline | 已完成 | 已接 Binance WebSocket、聚合多周期 K 线、发布 Kafka `kline`，是当前最稳定的一层 |
-| Execution Engine | 已完成 | 已能消费 `signal`、执行风控、下单、回写 `order`，且已完成真实闭环验证 |
-| Market UniversePool 最小版状态驱动选币 | 已完成 | 已具备 `trend / range / breakout`、动态币池状态机、`_meta / selector_decision` 日志证据 |
-| Strategy Signal Engine 基础版 | 已完成 | 已能基于多周期条件生成 `signal`，并写入 decision / signal 本地日志与 Kafka |
-| Feature Engine | 半完成 | EMA / RSI / ATR / Volume 等能力已存在，但仍分散在 aggregator、snapshot、marketstate 中，尚未统一抽成显式特征层 |
-| Symbol Ranker | 半完成 | 当前最接近的是 `UniversePool / BasicSelector`，但更偏状态驱动与偏好币放行，还不是独立 Top N 排名引擎 |
-| Regime Judge | 半完成 | `market` 侧已有 `trend / range / breakout`，`strategy` 侧还有 `marketstate`，但两处尚未统一收敛 |
-| Strategy Router | 半完成 | `strategy universe` 已能做启停与模板切换，但还不是完整的策略路由中心 |
-| 自动分仓 | 半完成 | 已有 `weights`、仓位参数和部分风控能力，但还不是统一的资金分配器 |
-| 独立 Breakout Worker | 未开始 | 当前更多还是模板/参数差异，未形成独立策略 worker |
-| 独立 MeanReversion Worker | 未开始 | 目标架构中有，但当前主实现中尚未成型 |
-| 统一 Position Allocator | 未开始 | 还没有单独模块负责按胜率、波动、相关性、预算做统一分仓 |
-| Orderbook 驱动主决策 | 未开始 | Orderbook 相关能力还未真正进入主决策主链路 |
-| 统一动态决策引擎 | 半完成 | “自动选币 + 自动选策略 + 自动分仓” 的最终形态尚未完全收拢到统一架构中 |
+已经能上线跑:
+
+```text
+1. Market Data Pipeline
+   • 行情接入、多周期 K 线、Kafka 发布已经稳定，是当前最成熟的一层
+
+2. Execution Engine
+   • 已能消费 signal、执行风控、下单、回写 order，真实闭环能力已经具备
+
+3. Market UniversePool 最小版状态驱动选币
+   • 已能真实跑出 trend / range / breakout 与动态币池状态机
+
+4. Strategy Signal Engine 基础版
+   • 已能基于多周期条件生成真实 signal，并写入 decision / signal 日志与 Kafka
+```
+
+对应当前代码落点:
+
+| 模块 | 作用 |
+|------|------|
+| [market/internal](file:///Users/bytedance/GolandProjects/exchange-system/app/market/rpc/internal) | 行情接入、K 线聚合、指标计算、Kafka 发布，是 `Market Data Pipeline` 的主实现 |
+| [featureengine](file:///Users/bytedance/GolandProjects/exchange-system/common/featureengine) | 提供可复用的标准特征结构和归一化逻辑，支撑上游行情特征计算 |
+| [market.go](file:///Users/bytedance/GolandProjects/exchange-system/app/market/rpc/market.go) | `market` 服务启动入口，负责把行情链路真正跑起来 |
+| [execution/internal](file:///Users/bytedance/GolandProjects/exchange-system/app/execution/rpc/internal) | 承载信号消费、风控、下单、状态回写等执行主链路 |
+| [execution.go](file:///Users/bytedance/GolandProjects/exchange-system/app/execution/rpc/execution.go) | `execution` 服务启动入口，负责真实执行闭环装配 |
+| [universepool](file:///Users/bytedance/GolandProjects/exchange-system/app/market/rpc/internal/universepool) | 实现最小版状态驱动选币、动态币池状态机与状态投票 |
+| [universepool data](file:///Users/bytedance/GolandProjects/exchange-system/app/market/rpc/data/universepool) | 落地 `UniversePool` 的 `_meta / selector_decision / symbol` 运行证据 |
+| [strategy](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/strategy) | 实现基础策略判断、信号生成与多周期执行逻辑 |
+| [decision logs](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/data/signal/decision) | 落地策略决策日志，回答“为什么这轮开或不开” |
+| [signal logs](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/data/signal) | 落地最终信号日志，回答“这轮到底发了什么 signal” |
+
+已经能用但架构没收拢:
+
+```text
+1. Feature Engine
+   • 特征已经在算，也已被多个模块使用，但仍分散在 aggregator、snapshot、marketstate 中
+
+2. Regime Judge
+   • 市场状态判断已经在工作，但 market 和 strategy 两边还没统一成一套
+
+3. Strategy Router
+   • 已能做部分策略启停和模板切换，但还不是完整独立的策略路由中心
+
+4. 自动分仓
+   • weights 已经真实参与仓位缩放，但离完整的统一分仓器还有距离
+
+5. 统一动态决策引擎
+   • 自动选币 + 自动选策略 + 自动分仓的主链路已经有雏形，但还没完全收拢成一体
+```
+
+对应当前代码落点:
+
+| 模块 | 作用 |
+|------|------|
+| [featureengine](file:///Users/bytedance/GolandProjects/exchange-system/common/featureengine) | 提供统一特征定义与补齐逻辑，是 `Feature Engine` 最接近的公共核心 |
+| [market/internal](file:///Users/bytedance/GolandProjects/exchange-system/app/market/rpc/internal) | 分散承载指标计算、聚合和 snapshot 生成，是当前特征层的主要来源 |
+| [features.go](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/marketstate/features.go) | 把上游价格特征接入 `strategy` 侧市场状态链路 |
+| [serviceContext.go](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/svc/serviceContext.go) | 在 `strategy` 侧把 snapshot、state、weights 串成一条运行链 |
+| [selector.go](file:///Users/bytedance/GolandProjects/exchange-system/app/market/rpc/internal/universepool/selector.go) | 在 `market` 侧做最小版状态识别、优先级路由和候选池判断 |
+| [marketstate](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/marketstate) | 在 `strategy` 侧做单币状态识别和全局状态聚合 |
+| [universe](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/universe) | 负责 `strategy universe` 的启停、模板切换与最小策略路由 |
+| [weights](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/weights) | 负责策略桶权重、币种权重、风险缩放和暂停交易逻辑 |
+| [trend_following.go](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/strategy/trend_following.go) | 在策略实例里真正应用权重结果，把预算折算到开仓数量 |
+| [universepool](file:///Users/bytedance/GolandProjects/exchange-system/app/market/rpc/internal/universepool) + [universe](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/universe) + [marketstate](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/marketstate) + [weights](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/weights) + [serviceContext.go](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/svc/serviceContext.go) | 共同拼出当前“统一动态决策引擎”的最小主链路 |
+
+只有雏形:
+
+```text
+1. Symbol Ranker
+   • 已经有接近它的能力，但还不是独立、清晰、可解释的 Top N 引擎
+
+2. 独立 Breakout Worker
+   • 当前更多还是模板和参数差异，还不是真正独立的 breakout worker
+
+3. 独立 MeanReversion Worker
+   • Range 逻辑已经有了，但还没抽成目标架构里的独立均值回归 worker
+```
+
+对应当前代码落点:
+
+| 模块 | 作用 |
+|------|------|
+| [symbolranker](file:///Users/bytedance/GolandProjects/exchange-system/common/symbolranker) | 提供独立 `Rank / TopN` 能力雏形，但还没有成为主链路唯一入口 |
+| [selector.go](file:///Users/bytedance/GolandProjects/exchange-system/app/market/rpc/internal/universepool/selector.go) | 当前最接近 `Symbol Ranker` 的运行接线点，混合了状态判断和排序偏好 |
+| [state.go](file:///Users/bytedance/GolandProjects/exchange-system/app/market/rpc/internal/universepool/state.go) | 承载 `rank_detail` 等结构化字段，是排序结果日志化的基础 |
+| [breakout.go](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/strategy/breakout.go) | 已有 `Breakout` 逻辑雏形，但仍作为 `trend_following` 变体运行 |
+| [range.go](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/strategy/range.go) | 已有 `Range/MeanReversion` 逻辑雏形，但仍作为 `trend_following` 变体运行 |
+
+还没开始:
+
+```text
+1. 统一 Position Allocator
+   • 还没有一个真正独立模块统一负责资金分配
+
+2. Orderbook 驱动主决策
+   • 订单簿能力还没进入主决策链路核心
+```
+
+对应当前代码落点:
+
+| 模块 | 作用 |
+|------|------|
+| [weights](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/weights) | 当前最接近 `统一 Position Allocator` 的位置，但还不是独立完整模块 |
+| [market/internal](file:///Users/bytedance/GolandProjects/exchange-system/app/market/rpc/internal) 的 `depth` 相关代码 | 已有订单簿数据接入基础，但还没有驱动主决策 |
+| [harvestpath](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/strategy/harvestpath) | 已有订单簿风险过滤与路径判断能力，但还停留在辅助层，不是主决策核心 |
+
+一句话理解:
+
+```text
+底层行情、执行和基础策略闭环已经能跑；
+中间决策层已经有不少真实能力，但还没有完全独立、统一、收拢。
+```
 
 按目标拆分看:
 

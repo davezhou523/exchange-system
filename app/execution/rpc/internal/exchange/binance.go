@@ -449,17 +449,16 @@ type binanceExchangeInfoResponse struct {
 	} `json:"symbols"`
 }
 
+// normalizeOrderQuantity 按交易所数量精度向下取整订单数量，避免因精度不匹配导致下单被拒。
 func (c *BinanceClient) normalizeOrderQuantity(ctx context.Context, param CreateOrderParam) (float64, int, error) {
 	if param.Quantity <= 0 {
 		return 0, 2, fmt.Errorf("quantity must be positive")
 	}
 
-	precision := 2
-	if param.ReduceOnly || param.ClosePosition {
-		exchangePrecision, err := c.getQuantityPrecision(ctx, param.Symbol)
-		if err == nil && exchangePrecision >= 0 {
-			precision = exchangePrecision
-		}
+	precision := fallbackQuantityPrecision
+	exchangePrecision, _ := c.getQuantityPrecision(ctx, param.Symbol)
+	if exchangePrecision >= 0 {
+		precision = exchangePrecision
 	}
 	if precision > 8 {
 		precision = 8
@@ -473,6 +472,7 @@ func (c *BinanceClient) normalizeOrderQuantity(ctx context.Context, param Create
 	return normalized, precision, nil
 }
 
+// getQuantityPrecision 获取交易对的数量精度，并优先复用本地缓存避免重复请求交易所信息。
 func (c *BinanceClient) getQuantityPrecision(ctx context.Context, symbol string) (int, error) {
 	symbol = strings.ToUpper(strings.TrimSpace(symbol))
 	if symbol == "" {
