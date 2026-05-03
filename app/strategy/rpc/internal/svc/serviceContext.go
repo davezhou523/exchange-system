@@ -2,6 +2,8 @@ package svc
 
 import (
 	"context"
+	"exchange-system/app/strategy/rpc/internal/strategyrouter"
+	"exchange-system/common/regimejudge"
 	"fmt"
 	"log"
 	"sync"
@@ -38,11 +40,16 @@ type ServiceContext struct {
 	strategyConfigs     map[string]config.StrategyConfig
 	universeSelector    *universe.Selector
 	marketStateDetector marketstate.Detector
+	marketStateConfig   marketstate.Config
 	marketStateLogs     *marketstate.LogState
 	weightEngine        weights.Engine
 	weightLogs          *weights.LogState
 	latestWeights       map[string]weights.Recommendation
+	latestUniverseView  map[string]universe.DesiredStrategy
+	latestUniverseApply map[string]universeApplyResult
+	latestUniverseSnap  map[string]universe.Snapshot
 	universeSnapshots   map[string]universe.Snapshot
+	strategyWarmup      map[string]strategyWarmupState
 	universeStates      map[string]universeRuntimeState
 	universeLogs        *universeLogState
 	universeStartedAt   time.Time
@@ -62,6 +69,25 @@ type universeApplyResult struct {
 	HasStrategy     bool
 	HasOpenPosition bool
 	CurrentTemplate string
+	RuntimeTemplate string
+}
+
+type strategyWarmupState struct {
+	Klines4h  []market.Kline
+	Klines1h  []market.Kline
+	Klines15m []market.Kline
+	Klines1m  []market.Kline
+}
+
+// StrategyWarmupStatusView 汇总状态查询需要的多周期 warmup 长度，并标记数据来源。
+type StrategyWarmupStatusView struct {
+	HistoryLen4h      int32
+	HistoryLen1h      int32
+	HistoryLen15m     int32
+	HistoryLen1m      int32
+	Source            string
+	Status            string
+	IncompleteReasons []string
 }
 
 // resolveStrategyParameters 合并模板参数、显式参数和 overrides，生成最终策略参数。
@@ -110,34 +136,54 @@ func normalizeUniverseConfig(cfg config.Config) universe.Config {
 			}
 		}
 	}
-	templateMap := make(map[string]string)
-	for k, v := range uc.StaticTemplateMap {
-		templateMap[k] = v
+	return universe.Config{
+		CandidateSymbols: candidates,
+		FreshnessWindow:  uc.FreshnessWindow,
+		RequireFinal:     uc.RequireFinal,
+		RequireTradable:  uc.RequireTradable,
+		RequireClean:     uc.RequireClean,
+		RouterConfig:     buildUniverseRouterConfig(cfg),
+	}
+}
+
+// buildUniverseRouterConfig 统一从 Universe.RouterConfig 构造路由配置。
+func buildUniverseRouterConfig(cfg config.Config) strategyrouter.Config {
+	uc := cfg.Universe
+	routerCfg := strategyrouter.Config{
+		StaticTemplateMap:     cloneRouterStaticTemplateMap(uc.RouterConfig.StaticTemplateMap),
+		RangeTemplate:         uc.RouterConfig.RangeTemplate,
+		BreakoutTemplate:      uc.RouterConfig.BreakoutTemplate,
+		BTCTrendTemplate:      uc.RouterConfig.BTCTrendTemplate,
+		BTCTrendAtrPctMax:     uc.RouterConfig.BTCTrendAtrPctMax,
+		HighBetaSafeTemplate:  uc.RouterConfig.HighBetaSafeTemplate,
+		HighBetaSafeSymbols:   append([]string(nil), uc.RouterConfig.HighBetaSafeSymbols...),
+		HighBetaSafeAtrPct:    uc.RouterConfig.HighBetaSafeAtrPct,
+		HighBetaDisableAtrPct: uc.RouterConfig.HighBetaDisableAtrPct,
+	}
+	if routerCfg.StaticTemplateMap == nil {
+		routerCfg.StaticTemplateMap = make(map[string]string)
 	}
 	for _, sc := range cfg.Strategies {
 		if sc.Symbol == "" || sc.Template == "" {
 			continue
 		}
-		if _, ok := templateMap[sc.Symbol]; !ok {
-			templateMap[sc.Symbol] = sc.Template
+		if _, ok := routerCfg.StaticTemplateMap[sc.Symbol]; !ok {
+			routerCfg.StaticTemplateMap[sc.Symbol] = sc.Template
 		}
 	}
-	return universe.Config{
-		CandidateSymbols:      candidates,
-		StaticTemplateMap:     templateMap,
-		FreshnessWindow:       uc.FreshnessWindow,
-		RequireFinal:          uc.RequireFinal,
-		RequireTradable:       uc.RequireTradable,
-		RequireClean:          uc.RequireClean,
-		RangeTemplate:         uc.RangeTemplate,
-		BreakoutTemplate:      uc.BreakoutTemplate,
-		BTCTrendTemplate:      uc.BTCTrendTemplate,
-		BTCTrendAtrPctMax:     uc.BTCTrendAtrPctMax,
-		HighBetaSafeTemplate:  uc.HighBetaSafeTemplate,
-		HighBetaSafeSymbols:   uc.HighBetaSafeSymbols,
-		HighBetaSafeAtrPct:    uc.HighBetaSafeAtrPct,
-		HighBetaDisableAtrPct: uc.HighBetaDisableAtrPct,
+	return routerCfg.Clone()
+}
+
+// cloneRouterStaticTemplateMap 复制 Universe 中的静态模板映射，避免运行时共享底层 map。
+func cloneRouterStaticTemplateMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
 	}
+	out := make(map[string]string, len(in))
+	for symbol, template := range in {
+		out[symbol] = template
+	}
+	return out
 }
 
 // isUniverseBootstrap 判断当前是否仍处于 Universe 冷启动观测窗口内。
@@ -220,28 +266,56 @@ func (s *ServiceContext) applyStrategyConfig(sc config.StrategyConfig, now time.
 	return nil
 }
 
-// updateUniverseSnapshot 记录某个交易对最近一根 1m K 线的健康状态，供 UniverseSelector 使用。
+// updateUniverseSnapshot 记录 1m/15m/1h 多周期 K 线快照，供 Universe 融合判态与健康门禁复用。
 func (s *ServiceContext) updateUniverseSnapshot(kline *market.Kline) {
-	if s == nil || s.universeSelector == nil || kline == nil || kline.Symbol == "" || kline.Interval != "1m" {
+	if s == nil || s.universeSelector == nil || kline == nil || kline.Symbol == "" {
+		return
+	}
+	switch kline.Interval {
+	case "1m", "15m", "1h":
+	default:
 		return
 	}
 	features := featureengine.BuildFromKline(kline)
+	frame := universe.KlineFrame{
+		Symbol:      features.Symbol,
+		Interval:    features.Timeframe,
+		UpdatedAt:   features.UpdatedAt,
+		LastEventMs: kline.EventTime,
+		IsDirty:     kline.IsDirty,
+		IsTradable:  kline.IsTradable,
+		IsFinal:     kline.IsFinal,
+		Close:       features.Close,
+		Atr:         features.Atr,
+		Volume:      features.Volume,
+		Ema21:       features.Ema21,
+		Ema55:       features.Ema55,
+		Rsi:         features.Rsi,
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.universeSnapshots[kline.Symbol] = universe.Snapshot{
-		Symbol:       features.Symbol,
-		UpdatedAt:    features.UpdatedAt,
-		LastEventMs:  kline.EventTime,
-		IsDirty:      kline.IsDirty,
-		IsTradable:   kline.IsTradable,
-		IsFinal:      kline.IsFinal,
-		LastInterval: features.Timeframe,
-		Close:        features.Close,
-		Atr:          features.Atr,
-		Volume:       features.Volume,
-		Ema21:        features.Ema21,
-		Ema55:        features.Ema55,
+	snapshot := s.universeSnapshots[kline.Symbol]
+	snapshot.Symbol = features.Symbol
+	switch kline.Interval {
+	case "1m":
+		snapshot.UpdatedAt = features.UpdatedAt
+		snapshot.LastEventMs = kline.EventTime
+		snapshot.IsDirty = kline.IsDirty
+		snapshot.IsTradable = kline.IsTradable
+		snapshot.IsFinal = kline.IsFinal
+		snapshot.LastInterval = features.Timeframe
+		snapshot.Close = features.Close
+		snapshot.Atr = features.Atr
+		snapshot.Volume = features.Volume
+		snapshot.Ema21 = features.Ema21
+		snapshot.Ema55 = features.Ema55
+		snapshot.Kline1m = frame
+	case "15m":
+		snapshot.Kline15m = frame
+	case "1h":
+		snapshot.Kline1h = frame
 	}
+	s.universeSnapshots[kline.Symbol] = snapshot
 }
 
 // runUniverseLoop 周期性运行 Universe 评估和调度逻辑。
@@ -265,6 +339,153 @@ func (s *ServiceContext) runUniverseLoop(ctx context.Context) {
 	}
 }
 
+// cacheStrategyWarmupKline 保存最近多周期K线，供策略实例被重新创建时快速回灌本地缓存。
+func (s *ServiceContext) cacheStrategyWarmupKline(kline *market.Kline) {
+	if s == nil || kline == nil || kline.Symbol == "" || !kline.IsClosed {
+		return
+	}
+	limit := strategyWarmupLimit(kline.Interval)
+	if limit <= 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	state := s.strategyWarmup[kline.Symbol]
+	historyLenBefore := strategyWarmupHistoryLen(state, kline.Interval)
+	item := *kline
+	switch kline.Interval {
+	case "4h":
+		state.Klines4h = append(state.Klines4h, item)
+		if len(state.Klines4h) > limit {
+			state.Klines4h = state.Klines4h[len(state.Klines4h)-limit:]
+		}
+	case "1h":
+		state.Klines1h = append(state.Klines1h, item)
+		if len(state.Klines1h) > limit {
+			state.Klines1h = state.Klines1h[len(state.Klines1h)-limit:]
+		}
+	case "15m":
+		state.Klines15m = append(state.Klines15m, item)
+		if len(state.Klines15m) > limit {
+			state.Klines15m = state.Klines15m[len(state.Klines15m)-limit:]
+		}
+	case "1m":
+		state.Klines1m = append(state.Klines1m, item)
+		if len(state.Klines1m) > limit {
+			state.Klines1m = state.Klines1m[len(state.Klines1m)-limit:]
+		}
+	default:
+		return
+	}
+	s.strategyWarmup[kline.Symbol] = state
+	historyLenAfter := strategyWarmupHistoryLen(state, kline.Interval)
+	log.Printf(
+		"[strategy-warmup] cache symbol=%s interval=%s history_len_before=%d history_len_after=%d cache_4h_count=%d cache_1h_count=%d cache_15m_count=%d cache_1m_count=%d",
+		kline.Symbol,
+		kline.Interval,
+		historyLenBefore,
+		historyLenAfter,
+		len(state.Klines4h),
+		len(state.Klines1h),
+		len(state.Klines15m),
+		len(state.Klines1m),
+	)
+}
+
+// hydrateStrategyWarmupLocked 把 ServiceContext 缓存的最近K线回灌到新策略实例，减少 disable 后重新 enable 的冷启动窗口。
+func (s *ServiceContext) hydrateStrategyWarmupLocked(symbol string, strat *strategyengine.TrendFollowingStrategy) {
+	if s == nil || strat == nil || symbol == "" {
+		return
+	}
+	historyLenBefore := strategyRuntimeWarmupTotal(strat)
+	state, ok := s.strategyWarmup[symbol]
+	if !ok {
+		log.Printf(
+			"[strategy-warmup] hydrate symbol=%s interval=all history_len_before=%d history_len_after=%d hydrate_4h_count=%d hydrate_1h_count=%d hydrate_15m_count=%d hydrate_1m_count=%d",
+			symbol,
+			historyLenBefore,
+			historyLenBefore,
+			0,
+			0,
+			0,
+			0,
+		)
+		return
+	}
+	for i := range state.Klines4h {
+		item := state.Klines4h[i]
+		strat.WarmupKline(&item)
+	}
+	for i := range state.Klines1h {
+		item := state.Klines1h[i]
+		strat.WarmupKline(&item)
+	}
+	for i := range state.Klines15m {
+		item := state.Klines15m[i]
+		strat.WarmupKline(&item)
+	}
+	for i := range state.Klines1m {
+		item := state.Klines1m[i]
+		strat.WarmupKline(&item)
+	}
+	historyLenAfter := strategyRuntimeWarmupTotal(strat)
+	log.Printf(
+		"[strategy-warmup] hydrate symbol=%s interval=all history_len_before=%d history_len_after=%d hydrate_4h_count=%d hydrate_1h_count=%d hydrate_15m_count=%d hydrate_1m_count=%d",
+		symbol,
+		historyLenBefore,
+		historyLenAfter,
+		len(state.Klines4h),
+		len(state.Klines1h),
+		len(state.Klines15m),
+		len(state.Klines1m),
+	)
+}
+
+// strategyWarmupHistoryLen 返回指定周期当前缓存长度，便于统一输出 warmup 诊断日志。
+func strategyWarmupHistoryLen(state strategyWarmupState, interval string) int {
+	switch interval {
+	case "4h":
+		return len(state.Klines4h)
+	case "1h":
+		return len(state.Klines1h)
+	case "15m":
+		return len(state.Klines15m)
+	case "1m":
+		return len(state.Klines1m)
+	default:
+		return 0
+	}
+}
+
+// strategyRuntimeWarmupTotal 汇总策略实例当前已回灌的总K线数量，方便对比 hydrate 前后差异。
+func strategyRuntimeWarmupTotal(strat *strategyengine.TrendFollowingStrategy) int {
+	if strat == nil {
+		return 0
+	}
+	return strat.HistoryLen("4h") +
+		strat.HistoryLen("1h") +
+		strat.HistoryLen("15m") +
+		strat.HistoryLen("1m")
+}
+
+// strategyWarmupLimit 返回各周期需要保留的最近K线数量，和策略内部窗口上限保持一致。
+func strategyWarmupLimit(interval string) int {
+	switch interval {
+	case "4h":
+		return 60
+	case "1h":
+		return 70
+	case "15m":
+		return 80
+	case "1m":
+		return 120
+	default:
+		return 0
+	}
+}
+
 // evaluateUniverse 基于最新快照生成目标策略集合，并把 diff 应用到运行时。
 func (s *ServiceContext) evaluateUniverse(now time.Time) {
 	if s == nil || s.universeSelector == nil {
@@ -272,38 +493,78 @@ func (s *ServiceContext) evaluateUniverse(now time.Time) {
 	}
 	s.mu.RLock()
 	snapshots := make(map[string]universe.Snapshot, len(s.universeSnapshots))
-	stateFeatures := make(map[string]marketstate.Features, len(s.universeSnapshots))
-	stateResults := make(map[string]marketstate.Result, len(s.universeSnapshots))
 	for k, v := range s.universeSnapshots {
-		if s.marketStateDetector != nil {
-			features := marketstate.BuildFeaturesFromSnapshotValues(
-				v.Symbol,
-				v.LastInterval,
-				v.Close,
-				v.Ema21,
-				v.Ema55,
-				v.Atr,
-				v.IsDirty,
-				v.IsTradable,
-				v.IsFinal,
-				v.UpdatedAt,
-			)
-			result := s.marketStateDetector.Detect(now, features)
-			v.MarketState = result.State
-			stateFeatures[k] = features
-			stateResults[k] = result
-		}
 		snapshots[k] = v
 	}
 	s.mu.RUnlock()
+
+	stateFeatures := make(map[string]featureengine.Features, len(snapshots))
+	stateAnalyses := make(map[string]regimejudge.Analysis, len(snapshots))
+	stateResults := make(map[string]marketstate.Result, len(snapshots))
+	for symbol, snapshot := range snapshots {
+		baseEvaluation, hasBase := evaluateUniverseFrame(now, snapshot.Kline1m, s.marketStateConfig)
+		h1Evaluation, hasH1 := evaluateUniverseFrame(now, snapshot.Kline1h, s.marketStateConfig)
+		m15Evaluation, hasM15 := evaluateUniverseFrame(now, snapshot.Kline15m, s.marketStateConfig)
+
+		if hasH1 {
+			snapshot.Regime1h = universe.BuildRegimeFrame("1h", h1Evaluation)
+		} else {
+			snapshot.Regime1h = universe.RegimeFrame{Interval: "1h"}
+		}
+		if hasM15 {
+			snapshot.Regime15m = universe.BuildRegimeFrame("15m", m15Evaluation)
+		} else {
+			snapshot.Regime15m = universe.RegimeFrame{Interval: "15m"}
+		}
+
+		fusedState, fusedAnalysis, fusion := universe.FuseRegimes(
+			snapshot.Regime1h,
+			h1Evaluation.Analysis,
+			snapshot.Regime15m,
+			m15Evaluation.Analysis,
+		)
+		snapshot.Fusion = fusion
+		snapshot.MarketState = fusedState
+		snapshot.MarketAnalysis = fusedAnalysis
+
+		result := marketstate.Result{
+			Symbol:     snapshot.Symbol,
+			State:      fusedState,
+			Confidence: fusion.FusedScore,
+			Reason:     fusion.FusedReason,
+			UpdatedAt:  fusion.UpdatedAt,
+		}
+		if result.UpdatedAt.IsZero() && hasBase {
+			result.UpdatedAt = baseEvaluation.Result.UpdatedAt
+		}
+		if result.State == marketstate.MarketStateUnknown && hasBase {
+			snapshot.MarketState = baseEvaluation.Result.State
+			snapshot.MarketAnalysis = baseEvaluation.Analysis
+			snapshot.Fusion.FusedState = baseEvaluation.Result.State
+			snapshot.Fusion.FusedReason = "fallback_1m_only"
+			snapshot.Fusion.FusedScore = baseEvaluation.Result.Confidence
+			snapshot.Fusion.UpdatedAt = baseEvaluation.Result.UpdatedAt
+			result = baseEvaluation.Result
+			result.Reason = "fallback_1m_only"
+		}
+		if snapshot.Fusion.UpdatedAt.IsZero() {
+			snapshot.Fusion.UpdatedAt = result.UpdatedAt
+		}
+		snapshots[symbol] = snapshot
+		stateFeatures[symbol] = snapshot.MarketAnalysis.Features
+		stateAnalyses[symbol] = snapshot.MarketAnalysis
+		stateResults[symbol] = result
+	}
+	s.storeLatestUniverseSnapshots(snapshots)
 	if s.marketStateLogs != nil {
 		for symbol, result := range stateResults {
 			s.marketStateLogs.Write(s.Config.SignalLogDir, stateFeatures[symbol], result, now)
 		}
-		s.marketStateLogs.WriteMeta(s.Config.SignalLogDir, marketstate.BuildMetaLogEntry(now, stateFeatures, stateResults), now)
+		s.marketStateLogs.WriteMeta(s.Config.SignalLogDir, marketstate.BuildMetaLogEntry(now, stateFeatures, stateAnalyses, stateResults), now)
 	}
 
 	desired := s.universeSelector.Evaluate(now, snapshots)
+	s.storeLatestUniverseDesired(desired)
 	if s.weightEngine != nil && s.weightLogs != nil {
 		weightInput := s.buildWeightInputs(now, desired, snapshots, stateResults)
 		weightOutput := s.weightEngine.Evaluate(now, weightInput)
@@ -337,6 +598,7 @@ func (s *ServiceContext) evaluateUniverse(now time.Time) {
 			log.Printf("[universe] symbol=%s template=%s enabled=%v err=%v", d.Symbol, d.Template, d.Enabled, err)
 		}
 	}
+	s.storeLatestUniverseApplyResults(results)
 	meta := buildUniverseMetaLogEntry(now, desired, results)
 	if s.universeLogs != nil {
 		s.universeLogs.writeMeta(s.Config.SignalLogDir, meta, now)
@@ -352,13 +614,47 @@ func (s *ServiceContext) evaluateUniverse(now time.Time) {
 	)
 }
 
+// evaluateUniverseFrame 把某个周期快照转换成单周期判态结果，避免 evaluateUniverse 内部堆积重复样板代码。
+func evaluateUniverseFrame(now time.Time, frame universe.KlineFrame, cfg marketstate.Config) (marketstate.Evaluation, bool) {
+	input, ok := buildUniverseStateInput(frame)
+	if !ok {
+		return marketstate.Evaluation{}, false
+	}
+	features := featureengine.BuildFromSnapshot(input)
+	return marketstate.Evaluate(now, features, cfg), true
+}
+
+// buildUniverseStateInput 从多周期快照生成统一判态输入，缺少更新时间时直接跳过该周期。
+func buildUniverseStateInput(frame universe.KlineFrame) (featureengine.SnapshotValues, bool) {
+	if frame.UpdatedAt.IsZero() {
+		return featureengine.SnapshotValues{}, false
+	}
+	return featureengine.SnapshotValues{
+		Symbol:     frame.Symbol,
+		Timeframe:  frame.Interval,
+		Close:      frame.Close,
+		Ema21:      frame.Ema21,
+		Ema55:      frame.Ema55,
+		Atr:        frame.Atr,
+		Rsi:        frame.Rsi,
+		Volume:     frame.Volume,
+		UpdatedAt:  frame.UpdatedAt,
+		IsDirty:    frame.IsDirty,
+		IsTradable: frame.IsTradable,
+		IsFinal:    frame.IsFinal,
+	}, true
+}
+
 // buildWeightInputs 把当前轮 Universe、快照和 MarketState 结果整理成权重引擎输入。
 func (s *ServiceContext) buildWeightInputs(now time.Time, desired []universe.DesiredStrategy, snapshots map[string]universe.Snapshot, stateResults map[string]marketstate.Result) weights.Inputs {
 	in := weights.Inputs{
-		MarketState:  marketstate.Aggregate(now, stateResults),
-		Templates:    make(map[string]string),
-		SymbolScores: make(map[string]float64),
-		UpdatedAt:    now.UTC(),
+		MarketState:     marketstate.Aggregate(now, buildAnalysisMap(snapshots), stateResults),
+		RegimeAnalyses:  make(map[string]regimejudge.Analysis),
+		Templates:       make(map[string]string),
+		StrategyBuckets: make(map[string]string),
+		RouteReasons:    make(map[string]string),
+		SymbolScores:    make(map[string]float64),
+		UpdatedAt:       now.UTC(),
 	}
 	atrPctTotal := 0.0
 	volumeTotal := 0.0
@@ -368,8 +664,13 @@ func (s *ServiceContext) buildWeightInputs(now time.Time, desired []universe.Des
 		}
 		in.Symbols = append(in.Symbols, d.Symbol)
 		in.Templates[d.Symbol] = d.Template
-		in.SymbolScores[d.Symbol] = scoreDesiredStrategy(d)
+		in.StrategyBuckets[d.Symbol] = d.Bucket
+		in.RouteReasons[d.Symbol] = d.Reason
 		snap, ok := snapshots[d.Symbol]
+		if ok {
+			in.RegimeAnalyses[d.Symbol] = snap.MarketAnalysis
+		}
+		in.SymbolScores[d.Symbol] = scoreDesiredStrategy(d, snap)
 		if !ok || snap.Close <= 0 || snap.Atr <= 0 || snap.Volume <= 0 {
 			continue
 		}
@@ -384,15 +685,38 @@ func (s *ServiceContext) buildWeightInputs(now time.Time, desired []universe.Des
 	return in
 }
 
-// scoreDesiredStrategy 为 Phase 5 第一版提供一个最小 symbol score。
-func scoreDesiredStrategy(d universe.DesiredStrategy) float64 {
-	switch d.Reason {
-	case "market_state_trend":
-		return 1.2
-	case "trend_strong":
+// buildAnalysisMap 从 Universe 快照中提取统一 Analysis，供全局聚合与权重输入复用。
+func buildAnalysisMap(snapshots map[string]universe.Snapshot) map[string]regimejudge.Analysis {
+	out := make(map[string]regimejudge.Analysis, len(snapshots))
+	for symbol, snap := range snapshots {
+		out[symbol] = snap.MarketAnalysis
+	}
+	return out
+}
+
+// scoreDesiredStrategy 基于已产出的统一 Analysis 为权重层提供最小 symbol score。
+func scoreDesiredStrategy(d universe.DesiredStrategy, snap universe.Snapshot) float64 {
+	switch {
+	case snap.MarketAnalysis.BreakoutMatch:
+		return 1.15
+	case snap.MarketAnalysis.BullTrendStrict || snap.MarketAnalysis.BearTrendStrict:
+		if d.Reason == "market_state_trend" {
+			return 1.2
+		}
 		return 1.1
+	case snap.MarketAnalysis.RangeMatch:
+		return 1.05
 	default:
 		return 1
+	}
+}
+
+// buildMarketStateConfig 把 YAML 中的 marketstate 阈值收拢成可复用配置，避免不同调用点各自拼装。
+func buildMarketStateConfig(c config.Config) marketstate.Config {
+	return marketstate.Config{
+		FreshnessWindow:   c.MarketState.FreshnessWindow,
+		RangeAtrPctMax:    c.MarketState.RangeAtrPctMax,
+		BreakoutAtrPctMin: c.MarketState.BreakoutAtrPctMin,
 	}
 }
 
@@ -444,6 +768,216 @@ func (s *ServiceContext) storeLatestWeightRecommendations(out weights.Output) {
 	}
 }
 
+// storeLatestUniverseDesired 缓存 Universe 当前轮目标状态，供状态接口直接输出结构化路由视图。
+func (s *ServiceContext) storeLatestUniverseDesired(desired []universe.DesiredStrategy) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clear(s.latestUniverseView)
+	for _, item := range desired {
+		s.latestUniverseView[item.Symbol] = item
+	}
+}
+
+// storeLatestUniverseSnapshots 缓存 Universe 当前轮融合后的快照结果，供状态查询直接读取多周期判态。
+func (s *ServiceContext) storeLatestUniverseSnapshots(snapshots map[string]universe.Snapshot) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clear(s.latestUniverseSnap)
+	for symbol, snapshot := range snapshots {
+		s.latestUniverseSnap[symbol] = snapshot
+	}
+}
+
+// LatestUniverseSnapshot 返回某个 symbol 最近一轮融合后的 Universe 快照。
+func (s *ServiceContext) LatestUniverseSnapshot(symbol string) (universe.Snapshot, bool) {
+	if s == nil || symbol == "" {
+		return universe.Snapshot{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	snapshot, ok := s.latestUniverseSnap[symbol]
+	return snapshot, ok
+}
+
+// RecordLatestUniverseSnapshot 写入某个 symbol 最近一轮融合快照，供测试和状态接口复用。
+func (s *ServiceContext) RecordLatestUniverseSnapshot(snapshot universe.Snapshot) {
+	if s == nil || snapshot.Symbol == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.latestUniverseSnap == nil {
+		s.latestUniverseSnap = make(map[string]universe.Snapshot)
+	}
+	s.latestUniverseSnap[snapshot.Symbol] = snapshot
+}
+
+// LatestUniverseDesired 返回某个 symbol 最近一轮 Universe 目标状态快照。
+func (s *ServiceContext) LatestUniverseDesired(symbol string) (universe.DesiredStrategy, bool) {
+	if s == nil || symbol == "" {
+		return universe.DesiredStrategy{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	desired, ok := s.latestUniverseView[symbol]
+	return desired, ok
+}
+
+// RecordLatestUniverseDesired 写入某个 symbol 最近一轮 Universe 目标状态，供测试和轻量状态读路径复用。
+func (s *ServiceContext) RecordLatestUniverseDesired(desired universe.DesiredStrategy) {
+	if s == nil || desired.Symbol == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.latestUniverseView == nil {
+		s.latestUniverseView = make(map[string]universe.DesiredStrategy)
+	}
+	s.latestUniverseView[desired.Symbol] = desired
+}
+
+// storeLatestUniverseApplyResults 缓存 Universe 当前轮实际应用结果，供状态接口输出运行时视角。
+func (s *ServiceContext) storeLatestUniverseApplyResults(results map[string]universeApplyResult) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clear(s.latestUniverseApply)
+	for symbol, result := range results {
+		s.latestUniverseApply[symbol] = result
+	}
+}
+
+// LatestUniverseApplyResult 返回某个 symbol 最近一轮 Universe 实际应用结果。
+func (s *ServiceContext) LatestUniverseApplyResult(symbol string) (universeApplyResult, bool) {
+	if s == nil || symbol == "" {
+		return universeApplyResult{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result, ok := s.latestUniverseApply[symbol]
+	return result, ok
+}
+
+// RecordLatestUniverseApplyResult 写入某个 symbol 最近一轮 Universe 实际应用结果，供测试和轻量读路径复用。
+func (s *ServiceContext) RecordLatestUniverseApplyResult(symbol string, result universeApplyResult) {
+	if s == nil || symbol == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.latestUniverseApply == nil {
+		s.latestUniverseApply = make(map[string]universeApplyResult)
+	}
+	s.latestUniverseApply[symbol] = result
+}
+
+// RecordLatestUniverseRuntimeStatus 用轻量字段写入一轮 Universe 实际应用结果，便于跨包测试复用。
+func (s *ServiceContext) RecordLatestUniverseRuntimeStatus(symbol, action, reason string, enabled, hasStrategy, hasOpenPosition bool, currentTemplate, runtimeTemplate string) {
+	s.RecordLatestUniverseApplyResult(symbol, universeApplyResult{
+		Action:          action,
+		Reason:          reason,
+		Enabled:         enabled,
+		HasStrategy:     hasStrategy,
+		HasOpenPosition: hasOpenPosition,
+		CurrentTemplate: currentTemplate,
+		RuntimeTemplate: runtimeTemplate,
+	})
+}
+
+// StrategyWarmupStatus 返回某个 symbol 当前的多周期 warmup 长度，优先使用运行中实例，缺席时回退到缓存。
+func (s *ServiceContext) StrategyWarmupStatus(symbol string) StrategyWarmupStatusView {
+	if s == nil || symbol == "" {
+		return buildStrategyWarmupStatusView(0, 0, 0, 0, "empty")
+	}
+	s.mu.RLock()
+	strat := s.strategies[symbol]
+	warmup := s.strategyWarmup[symbol]
+	s.mu.RUnlock()
+	if strat != nil {
+		lens := strat.HistoryWarmupStatus()
+		return buildStrategyWarmupStatusView(
+			int32(lens.HistoryLen4h),
+			int32(lens.HistoryLen1h),
+			int32(lens.HistoryLen15m),
+			int32(lens.HistoryLen1m),
+			"runtime",
+		)
+	}
+	if len(warmup.Klines4h) == 0 &&
+		len(warmup.Klines1h) == 0 &&
+		len(warmup.Klines15m) == 0 &&
+		len(warmup.Klines1m) == 0 {
+		return buildStrategyWarmupStatusView(0, 0, 0, 0, "empty")
+	}
+	return buildStrategyWarmupStatusView(
+		int32(len(warmup.Klines4h)),
+		int32(len(warmup.Klines1h)),
+		int32(len(warmup.Klines15m)),
+		int32(len(warmup.Klines1m)),
+		"cache",
+	)
+}
+
+// buildStrategyWarmupStatusView 基于多周期历史长度生成统一 warmup 判定，供 RPC 和网关直接透出恢复状态。
+func buildStrategyWarmupStatusView(historyLen4h, historyLen1h, historyLen15m, historyLen1m int32, source string) StrategyWarmupStatusView {
+	view := StrategyWarmupStatusView{
+		HistoryLen4h:  historyLen4h,
+		HistoryLen1h:  historyLen1h,
+		HistoryLen15m: historyLen15m,
+		HistoryLen1m:  historyLen1m,
+		Source:        source,
+	}
+	view.Status, view.IncompleteReasons = evaluateStrategyWarmupCompleteness(view)
+	return view
+}
+
+// evaluateStrategyWarmupCompleteness 按各周期目标窗口判断 warmup 是否完整，并返回缺失原因列表。
+func evaluateStrategyWarmupCompleteness(view StrategyWarmupStatusView) (string, []string) {
+	reasons := make([]string, 0, 4)
+	if view.HistoryLen4h < int32(strategyWarmupLimit("4h")) {
+		reasons = append(reasons, "insufficient_4h_history")
+	}
+	if view.HistoryLen1h < int32(strategyWarmupLimit("1h")) {
+		reasons = append(reasons, "insufficient_1h_history")
+	}
+	if view.HistoryLen15m < int32(strategyWarmupLimit("15m")) {
+		reasons = append(reasons, "insufficient_15m_history")
+	}
+	if view.HistoryLen1m < int32(strategyWarmupLimit("1m")) {
+		reasons = append(reasons, "insufficient_1m_history")
+	}
+	if len(reasons) == 0 {
+		return "warmup_complete", nil
+	}
+	return "warmup_incomplete", reasons
+}
+
+// RecordStrategyWarmupStatus 写入某个 symbol 的 warmup 缓存长度，供测试和状态查询回退路径复用。
+func (s *ServiceContext) RecordStrategyWarmupStatus(symbol string, status StrategyWarmupStatusView) {
+	if s == nil || symbol == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.strategyWarmup == nil {
+		s.strategyWarmup = make(map[string]strategyWarmupState)
+	}
+	s.strategyWarmup[symbol] = strategyWarmupState{
+		Klines4h:  make([]market.Kline, int(status.HistoryLen4h)),
+		Klines1h:  make([]market.Kline, int(status.HistoryLen1h)),
+		Klines15m: make([]market.Kline, int(status.HistoryLen15m)),
+		Klines1m:  make([]market.Kline, int(status.HistoryLen1m)),
+	}
+}
+
 // LatestWeightRecommendation 返回某个 symbol 最近一轮的权重建议快照。
 func (s *ServiceContext) LatestWeightRecommendation(symbol string) (weights.Recommendation, bool) {
 	if s == nil || symbol == "" {
@@ -484,6 +1018,7 @@ func (s *ServiceContext) applyUniverseDecision(now time.Time, decision universe.
 	s.mu.RUnlock()
 	result.HasStrategy = strat != nil
 	result.CurrentTemplate = state.Template
+	result.RuntimeTemplate = state.Template
 	if strat != nil {
 		result.HasOpenPosition = strat.HasOpenPosition()
 	}
@@ -521,6 +1056,8 @@ func (s *ServiceContext) applyUniverseDecision(now time.Time, decision universe.
 		}
 		log.Printf("[universe] disable symbol=%s reason=%s", decision.Symbol, decision.Reason)
 		result.Action = "disable"
+		result.HasStrategy = false
+		result.RuntimeTemplate = decision.Template
 		return result, nil
 	}
 
@@ -533,6 +1070,7 @@ func (s *ServiceContext) applyUniverseDecision(now time.Time, decision universe.
 	}
 	if strat != nil && state.Template == decision.Template {
 		result.Action = "keep"
+		result.RuntimeTemplate = state.Template
 		return result, nil
 	}
 	if strat != nil && state.Template != "" && state.Template != decision.Template && strat.HasOpenPosition() {
@@ -547,6 +1085,8 @@ func (s *ServiceContext) applyUniverseDecision(now time.Time, decision universe.
 		result.Action = "enable_error"
 		return result, err
 	}
+	result.HasStrategy = true
+	result.RuntimeTemplate = decision.Template
 	if strat == nil {
 		log.Printf("[universe] enable symbol=%s template=%s reason=%s", decision.Symbol, decision.Template, decision.Reason)
 		result.Action = "enable"
@@ -617,6 +1157,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		Timeout:      time.Duration(c.HarvestPathLSTM.TimeoutMs) * time.Millisecond,
 	})
 
+	marketStateCfg := buildMarketStateConfig(c)
 	svcCtx := &ServiceContext{
 		Config:                   c,
 		signalProducer:           signalProducer,
@@ -627,20 +1168,21 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		executionCli:             executionCli,
 		strategies:               make(map[string]*strategyengine.TrendFollowingStrategy),
 		strategyConfigs:          make(map[string]config.StrategyConfig),
-		marketStateDetector: marketstate.NewDetector(marketstate.Config{
-			FreshnessWindow:   c.MarketState.FreshnessWindow,
-			RangeAtrPctMax:    c.MarketState.RangeAtrPctMax,
-			BreakoutAtrPctMin: c.MarketState.BreakoutAtrPctMin,
-		}),
-		marketStateLogs:   marketstate.NewLogState(),
-		weightEngine:      weights.NewEngine(buildWeightConfig(c)),
-		weightLogs:        weights.NewLogState(),
-		latestWeights:     make(map[string]weights.Recommendation),
-		universeSnapshots: make(map[string]universe.Snapshot),
-		universeStates:    make(map[string]universeRuntimeState),
-		universeLogs:      newUniverseLogState(),
-		universeStartedAt: time.Now().UTC(),
-		cancel:            cancel,
+		marketStateDetector:      marketstate.NewDetector(marketStateCfg),
+		marketStateConfig:        marketStateCfg,
+		marketStateLogs:          marketstate.NewLogState(),
+		weightEngine:             weights.NewEngine(buildWeightConfig(c)),
+		weightLogs:               weights.NewLogState(),
+		latestWeights:            make(map[string]weights.Recommendation),
+		latestUniverseView:       make(map[string]universe.DesiredStrategy),
+		latestUniverseApply:      make(map[string]universeApplyResult),
+		latestUniverseSnap:       make(map[string]universe.Snapshot),
+		universeSnapshots:        make(map[string]universe.Snapshot),
+		strategyWarmup:           make(map[string]strategyWarmupState),
+		universeStates:           make(map[string]universeRuntimeState),
+		universeLogs:             newUniverseLogState(),
+		universeStartedAt:        time.Now().UTC(),
+		cancel:                   cancel,
 	}
 	if c.Universe.Enabled {
 		svcCtx.universeSelector = universe.NewSelector(normalizeUniverseConfig(c))
@@ -696,6 +1238,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 			return nil
 		}
 		svcCtx.updateUniverseSnapshot(kline)
+		svcCtx.cacheStrategyWarmupKline(kline)
 		svcCtx.mu.RLock()
 		strat := svcCtx.strategies[kline.Symbol]
 		svcCtx.mu.RUnlock()
@@ -802,17 +1345,24 @@ func (s *ServiceContext) upsertStrategyLocked(cfg *strategypb.StrategyConfig) {
 		delete(s.strategies, cfg.Symbol)
 		return
 	}
-	s.strategies[cfg.Symbol] = strategyengine.NewTrendFollowingStrategy(
+	opts := &strategyengine.RuntimeOptions{
+		HarvestPathLSTMPredictor: s.harvestPathLSTMPredictor,
+		WeightProvider:           s.LatestWeightRecommendation,
+	}
+	if current, ok := s.strategies[cfg.Symbol]; ok && current != nil {
+		current.UpdateRuntimeConfig(cfg.Parameters, s.Config.SignalLogDir, opts)
+		return
+	}
+	strat := strategyengine.NewTrendFollowingStrategy(
 		cfg.Symbol,
 		cfg.Parameters,
 		s.signalProducer,
 		s.harvestPathProducer,
 		s.Config.SignalLogDir,
-		&strategyengine.RuntimeOptions{
-			HarvestPathLSTMPredictor: s.harvestPathLSTMPredictor,
-			WeightProvider:           s.LatestWeightRecommendation,
-		},
+		opts,
 	)
+	s.hydrateStrategyWarmupLocked(cfg.Symbol, strat)
+	s.strategies[cfg.Symbol] = strat
 }
 
 func (s *ServiceContext) StopStrategy(strategyID string) {

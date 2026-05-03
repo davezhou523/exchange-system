@@ -340,14 +340,18 @@ Templates:
     1m_min_holding_bars: 4
     1m_ema_exit_buffer_atr: 0.25
     strategy_variant: 2
-    range_lookback: 12
-    range_entry_atr_buffer: 0.35
     range_target_atr_multiplier: 1.2
-    range_rsi_long_max: 42
-    range_rsi_short_min: 58
-    range_require_flat_ema: 1
-    range_mid_no_trade_width_pct: 0.18
-    range_trend_ema_drift_max: 0.35
+    range_h1_adx_period: 14
+    range_h1_adx_max: 20
+    range_h1_boll_period: 20
+    range_h1_boll_stddev: 2
+    range_h1_boll_width_max_pct: 0.05
+    range_m15_boll_period: 20
+    range_m15_boll_stddev: 2
+    range_m15_boll_touch_buffer: 0.05
+    range_m15_rsi_long_max: 30
+    range_m15_rsi_short_min: 70
+    range_m15_rsi_turn_min: 0.5
     harvest_path_model_enabled: 1
     harvest_path_publish_threshold: 0.60
     harvest_path_lookback: 20
@@ -405,21 +409,22 @@ Universe:
     - BNBUSDT
     - SOLUSDT
     - XRPUSDT
-  StaticTemplateMap:
-    ETHUSDT: eth-core
-    BTCUSDT: btc-core
-    BNBUSDT: high-beta
-    SOLUSDT: high-beta
-    XRPUSDT: high-beta
-  RangeTemplate: range-core
-  BreakoutTemplate: breakout-core
-  BTCTrendTemplate: btc-trend
-  BTCTrendAtrPctMax: 0.003
-  HighBetaSafeTemplate: high-beta-safe
-  HighBetaSafeSymbols:
-    - SOLUSDT
-  HighBetaSafeAtrPct: 0.006
-  HighBetaDisableAtrPct: 0.012
+  RouterConfig:
+    StaticTemplateMap:
+      ETHUSDT: eth-core
+      BTCUSDT: btc-core
+      BNBUSDT: high-beta
+      SOLUSDT: high-beta
+      XRPUSDT: high-beta
+    RangeTemplate: range-core
+    BreakoutTemplate: breakout-core
+    BTCTrendTemplate: btc-trend
+    BTCTrendAtrPctMax: 0.003
+    HighBetaSafeTemplate: high-beta-safe
+    HighBetaSafeSymbols:
+      - SOLUSDT
+    HighBetaSafeAtrPct: 0.006
+    HighBetaDisableAtrPct: 0.012
 
 Strategy:
   Symbol: ETHUSDT

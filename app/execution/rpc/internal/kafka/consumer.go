@@ -387,7 +387,35 @@ func unmarshalCompat(data []byte, sig *strategypb.Signal) error {
 			SetupContext     string   `json:"setup_context"`
 			PathContext      string   `json:"path_context"`
 			ExecutionContext string   `json:"execution_context"`
+			ExitReasonKind   string   `json:"exit_reason_kind"`
+			ExitReasonLabel  string   `json:"exit_reason_label"`
 			Tags             []string `json:"tags"`
+			RouteBucket      string   `json:"route_bucket"`
+			RouteReason      string   `json:"route_reason"`
+			RouteTemplate    string   `json:"route_template"`
+			Range            *struct {
+				H1RangeOK      bool `json:"h1_range_ok"`
+				H1AdxOK        bool `json:"h1_adx_ok"`
+				H1BollWidthOK  bool `json:"h1_boll_width_ok"`
+				M15TouchLower  bool `json:"m15_touch_lower"`
+				M15RsiTurnUp   bool `json:"m15_rsi_turn_up"`
+				M15TouchUpper  bool `json:"m15_touch_upper"`
+				M15RsiTurnDown bool `json:"m15_rsi_turn_down"`
+			} `json:"range"`
+			Allocator *struct {
+				Template       string  `json:"template"`
+				RouteBucket    string  `json:"route_bucket"`
+				RouteReason    string  `json:"route_reason"`
+				Score          float64 `json:"score"`
+				ScoreSource    string  `json:"score_source"`
+				BucketBudget   float64 `json:"bucket_budget"`
+				StrategyWeight float64 `json:"strategy_weight"`
+				SymbolWeight   float64 `json:"symbol_weight"`
+				RiskScale      float64 `json:"risk_scale"`
+				PositionBudget float64 `json:"position_budget"`
+				TradingPaused  bool    `json:"trading_paused"`
+				PauseReason    string  `json:"pause_reason"`
+			} `json:"allocator"`
 		} `json:"signal_reason"`
 	}
 
@@ -417,7 +445,39 @@ func unmarshalCompat(data []byte, sig *strategypb.Signal) error {
 			SetupContext:     raw.SignalReason.SetupContext,
 			PathContext:      raw.SignalReason.PathContext,
 			ExecutionContext: raw.SignalReason.ExecutionContext,
+			ExitReasonKind:   raw.SignalReason.ExitReasonKind,
+			ExitReasonLabel:  raw.SignalReason.ExitReasonLabel,
 			Tags:             raw.SignalReason.Tags,
+			RouteBucket:      raw.SignalReason.RouteBucket,
+			RouteReason:      raw.SignalReason.RouteReason,
+			RouteTemplate:    raw.SignalReason.RouteTemplate,
+		}
+		if raw.SignalReason.Allocator != nil {
+			sig.SignalReason.Allocator = &strategypb.PositionAllocatorStatus{
+				Template:       raw.SignalReason.Allocator.Template,
+				RouteBucket:    raw.SignalReason.Allocator.RouteBucket,
+				RouteReason:    raw.SignalReason.Allocator.RouteReason,
+				Score:          raw.SignalReason.Allocator.Score,
+				ScoreSource:    raw.SignalReason.Allocator.ScoreSource,
+				BucketBudget:   raw.SignalReason.Allocator.BucketBudget,
+				StrategyWeight: raw.SignalReason.Allocator.StrategyWeight,
+				SymbolWeight:   raw.SignalReason.Allocator.SymbolWeight,
+				RiskScale:      raw.SignalReason.Allocator.RiskScale,
+				PositionBudget: raw.SignalReason.Allocator.PositionBudget,
+				TradingPaused:  raw.SignalReason.Allocator.TradingPaused,
+				PauseReason:    raw.SignalReason.Allocator.PauseReason,
+			}
+		}
+		if raw.SignalReason.Range != nil {
+			sig.SignalReason.Range = &strategypb.RangeSignalReason{
+				H1RangeOk:      raw.SignalReason.Range.H1RangeOK,
+				H1AdxOk:        raw.SignalReason.Range.H1AdxOK,
+				H1BollWidthOk:  raw.SignalReason.Range.H1BollWidthOK,
+				M15TouchLower:  raw.SignalReason.Range.M15TouchLower,
+				M15RsiTurnUp:   raw.SignalReason.Range.M15RsiTurnUp,
+				M15TouchUpper:  raw.SignalReason.Range.M15TouchUpper,
+				M15RsiTurnDown: raw.SignalReason.Range.M15RsiTurnDown,
+			}
 		}
 		if sig.Reason == "" {
 			sig.Reason = raw.SignalReason.Summary

@@ -41,6 +41,7 @@ type AggregateResult struct {
 	Reason          string
 	UpdatedAt       time.Time
 	StateCounts     map[string]int
+	MatchCounts     map[string]int
 	HealthyCount    int
 	UnknownCount    int
 	DominantSymbols []string

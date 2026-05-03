@@ -71,14 +71,17 @@ const (
 type position struct {
 	side          positionSide
 	entryPrice    float64
+	quantity      float64 // 当前策略视角下的剩余持仓数量，用于分批止盈和完整平仓信号
 	stopLoss      float64
 	takeProfit1   float64 // 第一止盈位（1.5×ATR）
 	takeProfit2   float64 // 第二止盈位（3×ATR）
 	entryBarTime  int64   // 入场K线时间
 	atr           float64 // 入场时ATR，用于EMA破位缓冲带计算
 	hitTP1        bool    // 是否已达到第一止盈位（触发移动止损）
+	partialClosed bool    // 是否已经执行过第一段分批止盈，避免重复发送部分平仓信号
 	breakBelowCnt int     // EMA破位确认计数
 	breakAboveCnt int     // EMA破位确认计数
+	maxProfit     float64 // 持仓期间记录的最大浮盈，供移动止损使用
 }
 
 // TrendFollowingStrategy 多时间周期趋势跟踪策略
@@ -134,6 +137,14 @@ type RuntimeOptions struct {
 	WeightProvider           func(string) (weights.Recommendation, bool)
 }
 
+// HistoryWarmupStatus 汇总策略实例当前各周期已缓存的K线数量，便于上层判断冷启动恢复是否完整。
+type HistoryWarmupStatus struct {
+	HistoryLen4h  int
+	HistoryLen1h  int
+	HistoryLen15m int
+	HistoryLen1m  int
+}
+
 const positionSyncEpsilon = 1e-8
 
 // ---------------------------------------------------------------------------
@@ -156,6 +167,23 @@ func NewTrendFollowingStrategy(symbol string, params map[string]float64, produce
 		signalLogFiles:           make(map[string]*os.File),
 		decisionLogFiles:         make(map[string]*os.File),
 	}
+}
+
+// UpdateRuntimeConfig 原地更新策略实例的运行时参数，避免模板切换时重建实例导致多周期缓存丢失。
+func (s *TrendFollowingStrategy) UpdateRuntimeConfig(params map[string]float64, signalLogDir string, opts *RuntimeOptions) {
+	if s == nil {
+		return
+	}
+	if params == nil {
+		params = map[string]float64{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.params = params
+	s.signalLogDir = signalLogDir
+	s.harvestPathLSTMPredictor = runtimeHarvestPathLSTMPredictor(opts)
+	s.weightProvider = runtimeWeightProvider(opts)
 }
 
 func runtimeHarvestPathLSTMPredictor(opts *RuntimeOptions) *harvestpathmodel.LSTMPredictor {
@@ -312,14 +340,62 @@ const (
 	param1mEmaExitBufferATR = "1m_ema_exit_buffer_atr" // 1m EMA破位缓冲ATR倍数（默认0.3）
 
 	// 策略变体参数
-	paramStrategyVariant         = "strategy_variant"             // 策略变体：0=趋势跟踪（默认）| 1=突破策略 | 2=震荡策略
-	paramBreakoutVolumeRatioMin  = "breakout_volume_ratio_min"    // 突破时当前成交量相对均量的最低倍数
-	paramBreakoutEntryBufferATR  = "breakout_entry_buffer_atr"    // 突破判定缓冲带 = ATR × N
-	paramBreakoutRsiLongMin      = "breakout_rsi_long_min"        // 向上突破时 RSI 最低阈值
-	paramBreakoutRsiShortMax     = "breakout_rsi_short_max"       // 向下突破时 RSI 最高阈值
-	paramBreakoutRequireEmaTrend = "breakout_require_ema_trend"   // 是否要求 EMA 顺势排列：0=否 | 1=是
+	paramStrategyVariant         = "strategy_variant"           // 策略变体：0=趋势跟踪（默认）| 1=突破策略 | 2=震荡策略
+	paramBreakoutVolumeRatioMin  = "breakout_volume_ratio_min"  // 突破时当前成交量相对均量的最低倍数
+	paramBreakoutEntryBufferATR  = "breakout_entry_buffer_atr"  // 突破判定缓冲带 = ATR × N
+	paramBreakoutRsiLongMin      = "breakout_rsi_long_min"      // 向上突破时 RSI 最低阈值
+	paramBreakoutRsiShortMax     = "breakout_rsi_short_max"     // 向下突破时 RSI 最高阈值
+	paramBreakoutRequireEmaTrend = "breakout_require_ema_trend" // 是否要求 EMA 顺势排列：0=否 | 1=是
+
+	// 震荡策略的 1H 震荡判定 + 15M 入场参数
+	paramRangeH4AdxPeriod        = "range_h4_adx_period"          // 4H ADX 周期（默认14）
+	paramRangeH4AdxMax           = "range_h4_adx_max"             // 4H 震荡判定的 ADX 上限（默认20）
+	paramRangeH4EmaClosenessMax  = "range_h4_ema_closeness_max"   // 4H EMA21 与 EMA55 的最大接近比例（默认0.005）
+	paramRangeH4ScoreMin         = "range_h4_score_min"           // 4H 震荡评分最低通过分（默认2）
+	paramRangeH1AdxPeriod        = "range_h1_adx_period"          // 1H ADX 周期（默认14）
+	paramRangeH1AdxMax           = "range_h1_adx_max"             // 1H 震荡判定的 ADX 上限（默认20）
+	paramRangeH1BollPeriod       = "range_h1_boll_period"         // 1H Boll 周期（默认20）
+	paramRangeH1BollStdDev       = "range_h1_boll_stddev"         // 1H Boll 标准差倍数（默认2）
+	paramRangeH1BollWidthMaxPct  = "range_h1_boll_width_max_pct"  // 1H Boll 带宽占中轨比例上限（默认0.05）
+	paramRangeH1CandleFilter     = "range_h1_candle_filter"       // 是否要求 1H 当前K线方向与入场方向一致：0=否 | 1=是
+	paramRangeM15BollPeriod      = "range_m15_boll_period"        // 15M Boll 周期（默认20）
+	paramRangeM15BollStdDev      = "range_m15_boll_stddev"        // 15M Boll 标准差倍数（默认2）
+	paramRangeM15BollTouchBuffer = "range_m15_boll_touch_buffer"  // 15M 触边容差，占带宽比例（默认0.05）
+	paramRangeM15RsiLongMax      = "range_m15_rsi_long_max"       // 15M 做多 RSI 上限（默认30）
+	paramRangeM15RsiShortMin     = "range_m15_rsi_short_min"      // 15M 做空 RSI 下限（默认70）
+	paramRangeM15RsiTurnMin      = "range_m15_rsi_turn_min"       // 15M RSI 拐头最小变化（默认0.5）
+	paramRangeM15RsiConfirmLong  = "range_m15_rsi_confirm_long"   // 15M 做多时 RSI 从超卖区回升后的确认阈值（默认32）
+	paramRangeM15RsiConfirmShort = "range_m15_rsi_confirm_short"  // 15M 做空时 RSI 从超买区回落后的确认阈值（默认68）
 	paramRangeLookback           = "range_lookback"               // 震荡区间回看窗口（默认12）
 	paramRangeEntryAtrBuffer     = "range_entry_atr_buffer"       // 接近区间边界的缓冲带 = ATR × N
+	paramRangeSignalMinCount     = "range_signal_min_count"       // 做多/做空至少需要满足的 15M 信号数量（默认2）
+	paramRangeRequireBBBounce    = "range_require_bb_bounce"      // 是否强制要求出现 15M Boll 反弹信号：0=否 | 1=是
+	paramRangeUsePinBar          = "range_use_pin_bar"            // 是否启用 Pin Bar 信号：0=否 | 1=是
+	paramRangeUseEngulfing       = "range_use_engulfing"          // 是否启用吞没形态信号：0=否 | 1=是
+	paramRangePinBarRatio        = "range_pin_bar_ratio"          // Pin Bar 影线与实体的最小倍数（默认2）
+	paramRangeZoneProximity      = "range_zone_proximity"         // 价格接近 1H 上下轨的距离比例（默认0.2）
+	paramRangeFakeBreakout       = "range_fake_breakout"          // 是否允许在 1H 轨道外做假突破反向入场：0=否 | 1=是
+	paramRangeStopAtrOffset      = "range_stop_atr_offset"        // 止损放在 1H 区间边界外的 ATR 偏移倍数（默认0.3）
+	paramRangeUseH4TrendFilter   = "range_use_h4_trend_filter"    // 是否启用 4H EMA 方向过滤：0=否 | 1=是
+	paramRangeUseH1RsiFilter     = "range_use_h1_rsi_filter"      // 是否启用 1H RSI 过滤：0=否 | 1=是
+	paramRangeH1RsiLongMax       = "range_h1_rsi_long_max"        // 做多时 1H RSI 上限（默认0=关闭）
+	paramRangeH1RsiShortMin      = "range_h1_rsi_short_min"       // 做空时 1H RSI 下限（默认0=关闭）
+	paramRangeMinH1BollWidthPct  = "range_min_h1_boll_width_pct"  // 1H Boll 最小带宽比例（默认0=关闭）
+	paramRangeStopMethod         = "range_stop_method"            // 震荡止损模式：0=h1bb | 1=m15bb
+	paramRangeTakeProfitMethod   = "range_take_profit_method"     // 震荡止盈模式：0=band | 1=mid | 2=mid_atr | 3=rsi | 4=split
+	paramRangeTakeProfitAtrOff   = "range_take_profit_atr_offset" // mid_atr 模式下围绕 1H 中轨的 ATR 偏移倍数
+	paramRangeSplitTPRatio       = "range_split_tp_ratio"         // split 模式下首次分批止盈的比例（默认0.5）
+	paramRangeMinRR              = "range_min_rr"                 // 震荡策略最小风险收益比（默认0=关闭）
+	paramRangeUseTimeStop        = "range_use_time_stop"          // 是否启用时间止损：0=否 | 1=是
+	paramRangeMaxBars            = "range_max_bars"               // 时间止损允许持有的最大K线数（默认0=关闭）
+	paramRangeUseBreakevenStop   = "range_use_breakeven_stop"     // 是否启用保本止损：0=否 | 1=是
+	paramRangeBreakevenActivate  = "range_breakeven_activate"     // 盈利达到目标距离的该比例后将止损抬到成本（默认0.6）
+	paramRangeUseSteppedTrail    = "range_use_stepped_trail"      // 是否启用阶梯追踪：0=否 | 1=是
+	paramRangeTrailStep1Pct      = "range_trail_step1_pct"        // 阶梯追踪第一阶段触发比例（默认0.9）
+	paramRangeTrailStep1SL       = "range_trail_step1_sl"         // 第一阶段把止损推到目标距离的该比例（默认0.65）
+	paramRangeUseTrailingStop    = "range_use_trailing_stop"      // 是否启用 ATR 移动止损：0=否 | 1=是
+	paramRangeTrailAtrMult       = "range_trail_atr_mult"         // 移动止损使用的 ATR 倍数
+	paramRangeTrailActivate      = "range_trail_activate"         // 最大浮盈达到 ATR×该倍数后激活移动止损
 	paramRangeTargetAtrMult      = "range_target_atr_multiplier"  // 震荡策略首个止盈使用的 ATR 倍数
 	paramRangeRsiLongMax         = "range_rsi_long_max"           // 震荡做多时 RSI 上限，避免追涨
 	paramRangeRsiShortMin        = "range_rsi_short_min"          // 震荡做空时 RSI 下限，避免追空
@@ -366,7 +442,151 @@ func (s *TrendFollowingStrategy) OnKline(ctx context.Context, k *marketpb.Kline)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 保存K线快照到对应周期历史
+	if !s.applyKlineSnapshotLocked(k) {
+		return nil // 忽略其他周期
+	}
+
+	// 判断信号模式：0=15m(默认) | 1=1m
+	signalMode := int(s.getParam(paramSignalMode, 0))
+	isBreakoutVariant := s.isBreakoutVariant()
+	isRangeVariant := s.isRangeVariant()
+
+	if signalMode == 1 {
+		// 1m信号模式：检查1m成交暂停标志
+		pause1m := int(s.getParam(param1mTradingPaused, 0))
+		if pause1m == 1 && k.Interval == "1m" {
+			// 1m成交暂停：不生成交易信号，但继续更新1m指标快照供多周期判断使用
+			s.pause1mLogOnce.Do(func() {
+				log.Printf("[策略] %s 1m成交已暂停，仅保留指标计算用于多周期判断", s.symbol)
+			})
+			return nil
+		}
+
+		// 如果1m成交暂停，但收到15m K线，则降级到15m信号模式进行交易判断
+		if pause1m == 1 && k.Interval == "15m" {
+			if !k.IsFinal {
+				return nil
+			}
+			if s.pos.side != sideNone {
+				if isRangeVariant {
+					return s.checkRangeExitConditions(ctx, k)
+				}
+				return s.checkExitConditions(ctx, k)
+			}
+			if isRangeVariant {
+				return s.checkRangeEntryConditions(ctx, k)
+			}
+			if isBreakoutVariant {
+				return s.checkBreakoutEntryConditions(ctx, k)
+			}
+			return s.checkEntryConditions(ctx, k)
+		}
+
+		// 1m信号模式：仅在1m K线到达时执行策略判断
+		if k.Interval != "1m" {
+			return nil
+		}
+		// isFinal 守卫：仅在 watermark 确认后的K线上交易
+		if !k.IsFinal {
+			return nil
+		}
+		// 持仓时 → 检查出场条件；空仓时 → 检查入场条件
+		if s.pos.side != sideNone {
+			if isRangeVariant {
+				return s.checkRangeExitConditions1m(ctx, k)
+			}
+			return s.checkExitConditions1m(ctx, k)
+		}
+		if isRangeVariant {
+			return s.checkRangeEntryConditions1m(ctx, k)
+		}
+		if isBreakoutVariant {
+			return s.checkBreakoutEntryConditions1m(ctx, k)
+		}
+		return s.checkEntryConditions1m(ctx, k)
+	}
+
+	// 15m信号模式（默认）：仅在15m K线到达时执行策略判断
+	// 4h/1h/1m K线仅用于更新指标快照，供15m入场时读取
+	if k.Interval != "15m" {
+		return nil
+	}
+
+	// isFinal 守卫：仅在 watermark 确认后的K线上交易
+	if !k.IsFinal {
+		return nil
+	}
+
+	// 持仓时 → 检查出场条件
+	if s.pos.side != sideNone {
+		if isRangeVariant {
+			return s.checkRangeExitConditions(ctx, k)
+		}
+		return s.checkExitConditions(ctx, k)
+	}
+	if isRangeVariant {
+		return s.checkRangeEntryConditions(ctx, k)
+	}
+	if isBreakoutVariant {
+		return s.checkBreakoutEntryConditions(ctx, k)
+	}
+
+	// 空仓时 → 检查入场条件
+	return s.checkEntryConditions(ctx, k)
+}
+
+// WarmupKline 仅回灌历史K线到本地缓存，不触发任何交易判断，供运行时冷启动恢复使用。
+func (s *TrendFollowingStrategy) WarmupKline(k *marketpb.Kline) {
+	if s == nil || k == nil || k.Symbol != s.symbol || !k.IsClosed {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.applyKlineSnapshotLocked(k)
+}
+
+// HistoryLen 返回指定周期当前已缓存的K线数量，便于验证冷启动回灌是否生效。
+func (s *TrendFollowingStrategy) HistoryLen(interval string) int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch interval {
+	case "4h":
+		return len(s.klines4h)
+	case "1h":
+		return len(s.klines1h)
+	case "15m":
+		return len(s.klines15m)
+	case "1m":
+		return len(s.klines1m)
+	default:
+		return 0
+	}
+}
+
+// HistoryWarmupStatus 返回策略实例当前多周期缓存长度快照，供状态查询直接展示 warmup 进度。
+func (s *TrendFollowingStrategy) HistoryWarmupStatus() HistoryWarmupStatus {
+	if s == nil {
+		return HistoryWarmupStatus{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return HistoryWarmupStatus{
+		HistoryLen4h:  len(s.klines4h),
+		HistoryLen1h:  len(s.klines1h),
+		HistoryLen15m: len(s.klines15m),
+		HistoryLen1m:  len(s.klines1m),
+	}
+}
+
+// applyKlineSnapshotLocked 把一根已收盘K线写入对应周期缓存，调用方需持有策略锁。
+func (s *TrendFollowingStrategy) applyKlineSnapshotLocked(k *marketpb.Kline) bool {
+	if s == nil || k == nil || !k.IsClosed {
+		return false
+	}
+
 	snap := klineSnapshot{
 		OpenTime:    k.OpenTime,
 		Open:        k.Open,
@@ -402,8 +622,8 @@ func (s *TrendFollowingStrategy) OnKline(ctx context.Context, k *marketpb.Kline)
 	case "15m":
 		s.latest15m = snap
 		s.klines15m = append(s.klines15m, snap)
-		if len(s.klines15m) > 20 {
-			s.klines15m = s.klines15m[len(s.klines15m)-20:]
+		if len(s.klines15m) > 80 {
+			s.klines15m = s.klines15m[len(s.klines15m)-80:]
 		}
 	case "1m":
 		s.latest1m = snap
@@ -412,87 +632,9 @@ func (s *TrendFollowingStrategy) OnKline(ctx context.Context, k *marketpb.Kline)
 			s.klines1m = s.klines1m[len(s.klines1m)-120:]
 		}
 	default:
-		return nil // 忽略其他周期
+		return false
 	}
-
-	// 判断信号模式：0=15m(默认) | 1=1m
-	signalMode := int(s.getParam(paramSignalMode, 0))
-	isBreakoutVariant := s.isBreakoutVariant()
-	isRangeVariant := s.isRangeVariant()
-
-	if signalMode == 1 {
-		// 1m信号模式：检查1m成交暂停标志
-		pause1m := int(s.getParam(param1mTradingPaused, 0))
-		if pause1m == 1 && k.Interval == "1m" {
-			// 1m成交暂停：不生成交易信号，但继续更新1m指标快照供多周期判断使用
-			s.pause1mLogOnce.Do(func() {
-				log.Printf("[策略] %s 1m成交已暂停，仅保留指标计算用于多周期判断", s.symbol)
-			})
-			return nil
-		}
-
-		// 如果1m成交暂停，但收到15m K线，则降级到15m信号模式进行交易判断
-		if pause1m == 1 && k.Interval == "15m" {
-			if !k.IsFinal {
-				return nil
-			}
-			if s.pos.side != sideNone {
-				return s.checkExitConditions(ctx, k)
-			}
-			if isRangeVariant {
-				return s.checkRangeEntryConditions(ctx, k)
-			}
-			if isBreakoutVariant {
-				return s.checkBreakoutEntryConditions(ctx, k)
-			}
-			return s.checkEntryConditions(ctx, k)
-		}
-
-		// 1m信号模式：仅在1m K线到达时执行策略判断
-		if k.Interval != "1m" {
-			return nil
-		}
-		// isFinal 守卫：仅在 watermark 确认后的K线上交易
-		if !k.IsFinal {
-			return nil
-		}
-		// 持仓时 → 检查出场条件；空仓时 → 检查入场条件
-		if s.pos.side != sideNone {
-			return s.checkExitConditions1m(ctx, k)
-		}
-		if isRangeVariant {
-			return s.checkRangeEntryConditions1m(ctx, k)
-		}
-		if isBreakoutVariant {
-			return s.checkBreakoutEntryConditions1m(ctx, k)
-		}
-		return s.checkEntryConditions1m(ctx, k)
-	}
-
-	// 15m信号模式（默认）：仅在15m K线到达时执行策略判断
-	// 4h/1h/1m K线仅用于更新指标快照，供15m入场时读取
-	if k.Interval != "15m" {
-		return nil
-	}
-
-	// isFinal 守卫：仅在 watermark 确认后的K线上交易
-	if !k.IsFinal {
-		return nil
-	}
-
-	// 持仓时 → 检查出场条件
-	if s.pos.side != sideNone {
-		return s.checkExitConditions(ctx, k)
-	}
-	if isRangeVariant {
-		return s.checkRangeEntryConditions(ctx, k)
-	}
-	if isBreakoutVariant {
-		return s.checkBreakoutEntryConditions(ctx, k)
-	}
-
-	// 空仓时 → 检查入场条件
-	return s.checkEntryConditions(ctx, k)
+	return true
 }
 
 func (s *TrendFollowingStrategy) OnDepth(depth *marketpb.Depth) {
@@ -1019,14 +1161,16 @@ func (s *TrendFollowingStrategy) openPosition(ctx context.Context, k *marketpb.K
 
 	// 记录持仓
 	s.pos = position{
-		side:         sideLong,
-		entryPrice:   m15.Close,
-		stopLoss:     stopLoss,
-		takeProfit1:  tp1,
-		takeProfit2:  tp2,
-		entryBarTime: m15.OpenTime,
-		atr:          m15.Atr,
-		hitTP1:       false,
+		side:          sideLong,
+		entryPrice:    m15.Close,
+		quantity:      quantity,
+		stopLoss:      stopLoss,
+		takeProfit1:   tp1,
+		takeProfit2:   tp2,
+		entryBarTime:  m15.OpenTime,
+		atr:           m15.Atr,
+		hitTP1:        false,
+		partialClosed: false,
 	}
 	if entry == entryShort {
 		s.pos.side = sideShort
@@ -1116,14 +1260,18 @@ func (s *TrendFollowingStrategy) checkExitConditions(ctx context.Context, k *mar
 
 	var exitAction string
 	var exitReason string
+	var exitReasonKind string
+	var exitReasonLabel string
 
 	// 1. 止损检查
 	if s.pos.side == sideLong && price <= s.pos.stopLoss {
 		exitAction = "SELL"
 		exitReason = fmt.Sprintf("多头止损：价格%.2f ≤ 止损%.2f", price, s.pos.stopLoss)
+		exitReasonKind, exitReasonLabel = s.currentStopExitReason()
 	} else if s.pos.side == sideShort && price >= s.pos.stopLoss {
 		exitAction = "BUY"
 		exitReason = fmt.Sprintf("空头止损：价格%.2f ≥ 止损%.2f", price, s.pos.stopLoss)
+		exitReasonKind, exitReasonLabel = s.currentStopExitReason()
 	}
 
 	// 2. 止盈检查
@@ -1132,6 +1280,8 @@ func (s *TrendFollowingStrategy) checkExitConditions(ctx context.Context, k *mar
 			if price >= s.pos.takeProfit2 {
 				exitAction = "SELL"
 				exitReason = fmt.Sprintf("多头止盈2：价格%.2f ≥ TP2%.2f（3×ATR）", price, s.pos.takeProfit2)
+				exitReasonKind = "take_profit"
+				exitReasonLabel = "目标止盈"
 			} else if price >= s.pos.takeProfit1 {
 				// 达到TP1：移动止损到入场价（保本）
 				if !s.pos.hitTP1 {
@@ -1145,6 +1295,8 @@ func (s *TrendFollowingStrategy) checkExitConditions(ctx context.Context, k *mar
 			if price <= s.pos.takeProfit2 {
 				exitAction = "BUY"
 				exitReason = fmt.Sprintf("空头止盈2：价格%.2f ≤ TP2%.2f（3×ATR）", price, s.pos.takeProfit2)
+				exitReasonKind = "take_profit"
+				exitReasonLabel = "目标止盈"
 			} else if price <= s.pos.takeProfit1 {
 				if !s.pos.hitTP1 {
 					s.pos.hitTP1 = true
@@ -1167,6 +1319,8 @@ func (s *TrendFollowingStrategy) checkExitConditions(ctx context.Context, k *mar
 					exitAction = "SELL"
 					exitReason = fmt.Sprintf("多头EMA破位：价格%.2f < EMA21%.2f - 缓冲%.2f（连续%d根确认）",
 						price, m15.Ema21, buffer, s.pos.breakBelowCnt)
+					exitReasonKind = "final_close"
+					exitReasonLabel = "最终平仓"
 				}
 			} else {
 				s.pos.breakBelowCnt = 0
@@ -1180,6 +1334,8 @@ func (s *TrendFollowingStrategy) checkExitConditions(ctx context.Context, k *mar
 					exitAction = "BUY"
 					exitReason = fmt.Sprintf("空头EMA破位：价格%.2f > EMA21%.2f + 缓冲%.2f（连续%d根确认）",
 						price, m15.Ema21, buffer, s.pos.breakAboveCnt)
+					exitReasonKind = "final_close"
+					exitReasonLabel = "最终平仓"
 				}
 			} else {
 				s.pos.breakAboveCnt = 0
@@ -1206,36 +1362,31 @@ func (s *TrendFollowingStrategy) checkExitConditions(ctx context.Context, k *mar
 		side = "SHORT"
 	}
 
+	exitSignalReason := s.newExitSignalReason(
+		exitReason,
+		fmt.Sprintf("持仓方向=%s | 周期=15m", side),
+		exitReason,
+		fmt.Sprintf("平仓价=%.2f | 已实现盈亏=%.2f | 止损=%.2f", price, pnl, s.pos.stopLoss),
+		exitReasonKind,
+		exitReasonLabel,
+		"15m", s.strategySignalTag(), "close", side,
+	)
 	signal := map[string]interface{}{
-		"strategy_id":  s.strategySignalID("15m"),
-		"symbol":       s.symbol,
-		"interval":     "15m",
-		"action":       exitAction,
-		"side":         side,
-		"signal_type":  "CLOSE",
-		"quantity":     0.01, // 出场用相同数量
-		"entry_price":  price,
-		"stop_loss":    s.pos.stopLoss,
-		"take_profits": []float64{s.pos.takeProfit1, s.pos.takeProfit2},
-		"reason": s.newSignalReason(
-			exitReason,
-			"CLOSE_EXIT",
-			fmt.Sprintf("持仓方向=%s | 周期=15m", side),
-			exitReason,
-			fmt.Sprintf("平仓价=%.2f | 已实现盈亏=%.2f | 止损=%.2f", price, pnl, s.pos.stopLoss),
-			"15m", s.strategySignalTag(), "close", side,
-		).Summary,
-		"signal_reason": s.newSignalReason(
-			exitReason,
-			"CLOSE_EXIT",
-			fmt.Sprintf("持仓方向=%s | 周期=15m", side),
-			exitReason,
-			fmt.Sprintf("平仓价=%.2f | 已实现盈亏=%.2f | 止损=%.2f", price, pnl, s.pos.stopLoss),
-			"15m", s.strategySignalTag(), "close", side,
-		),
-		"timestamp":   time.Now().UnixMilli(),
-		"atr":         m15.Atr,
-		"risk_reward": 0, // 出场信号无需风险收益比
+		"strategy_id":   s.strategySignalID("15m"),
+		"symbol":        s.symbol,
+		"interval":      "15m",
+		"action":        exitAction,
+		"side":          side,
+		"signal_type":   "CLOSE",
+		"quantity":      0.01, // 出场用相同数量
+		"entry_price":   price,
+		"stop_loss":     s.pos.stopLoss,
+		"take_profits":  []float64{s.pos.takeProfit1, s.pos.takeProfit2},
+		"reason":        exitSignalReason.Summary,
+		"signal_reason": exitSignalReason,
+		"timestamp":     time.Now().UnixMilli(),
+		"atr":           m15.Atr,
+		"risk_reward":   0, // 出场信号无需风险收益比
 		"indicators": map[string]interface{}{
 			"m15_ema21": m15.Ema21,
 			"m15_rsi":   m15.Rsi,
@@ -1333,6 +1484,45 @@ func (s *TrendFollowingStrategy) applyWeightRecommendation(quantity float64) (fl
 		return quantity, false, ""
 	}
 	return applyWeightScale(quantity, rec)
+}
+
+// latestWeightRecommendation 读取当前 symbol 最近一轮权重快照，统一供日志和下单链路复用。
+func (s *TrendFollowingStrategy) latestWeightRecommendation() (weights.Recommendation, bool) {
+	if s == nil || s.weightProvider == nil {
+		return weights.Recommendation{}, false
+	}
+	return s.weightProvider(s.symbol)
+}
+
+// enrichDecisionExtrasWithRoute 把统一路由视角写入 decision extras，避免下游再从模板名反推 bucket。
+func (s *TrendFollowingStrategy) enrichDecisionExtrasWithRoute(extras map[string]interface{}) map[string]interface{} {
+	if s == nil {
+		return extras
+	}
+	var out map[string]interface{}
+	if len(extras) > 0 {
+		out = make(map[string]interface{}, len(extras)+2)
+		for k, v := range extras {
+			out[k] = v
+		}
+	}
+	rec, ok := s.latestWeightRecommendation()
+	if !ok {
+		return out
+	}
+	if out == nil {
+		out = make(map[string]interface{}, 2)
+	}
+	if rec.Bucket != "" {
+		out["route_bucket"] = rec.Bucket
+	}
+	if rec.RouteReason != "" {
+		out["route_reason"] = rec.RouteReason
+	}
+	if rec.Template != "" {
+		out["route_template"] = rec.Template
+	}
+	return out
 }
 
 // applyWeightScale 根据最新一轮权重建议缩放开仓数量。
@@ -1473,27 +1663,31 @@ func (s *TrendFollowingStrategy) sendSignal(ctx context.Context, signal map[stri
 			fmtFloatOrNA(indicators["m15_rsi"]), fmtFloatOrNA(indicators["m15_atr"]))
 	}
 	weightsStr := ""
-	if s.weightProvider != nil {
-		if rec, ok := s.weightProvider(s.symbol); ok {
-			weightsStr = fmt.Sprintf(
-				" | weights(template=%s budget=%.4f risk=%.4f strategy=%.4f symbol=%.4f paused=%v",
-				rec.Template,
-				rec.PositionBudget,
-				rec.RiskScale,
-				rec.StrategyWeight,
-				rec.SymbolWeight,
-				rec.TradingPaused,
-			)
-			if rec.PauseReason != "" {
-				weightsStr += fmt.Sprintf(" reason=%s", rec.PauseReason)
-			}
-			weightsStr += ")"
+	if rec, ok := s.latestWeightRecommendation(); ok {
+		weightsStr = fmt.Sprintf(
+			" | weights(template=%s bucket=%s route_reason=%s budget=%.4f bucket_budget=%.4f risk=%.4f strategy=%.4f symbol=%.4f score=%.4f source=%s paused=%v",
+			rec.Template,
+			rec.Bucket,
+			rec.RouteReason,
+			rec.PositionBudget,
+			rec.BucketBudget,
+			rec.RiskScale,
+			rec.StrategyWeight,
+			rec.SymbolWeight,
+			rec.Score,
+			rec.ScoreSource,
+			rec.TradingPaused,
+		)
+		if rec.PauseReason != "" {
+			weightsStr += fmt.Sprintf(" reason=%s", rec.PauseReason)
 		}
+		weightsStr += ")"
 	}
 
 	log.Printf("[策略信号] %s %s %s | 方向=%s | 价格=%.2f | 数量=%.4f | 止损=%.2f | 止盈=%s | %s | %s%s",
 		s.symbol, interval, action, side, entryPrice, quantity, stopLoss, tpStr, indicatorsStr, reason, weightsStr)
 
+	signal = s.enrichSignalWithRouteContext(signal)
 	s.writeSignalLog(signal, k)
 
 	return s.producer.SendMarketData(ctx, signal)
@@ -1525,6 +1719,26 @@ type signalLogEntry struct {
 
 type signalWeightSnapshot struct {
 	Template       string  `json:"template,omitempty"`
+	RouteBucket    string  `json:"route_bucket,omitempty"`
+	RouteReason    string  `json:"route_reason,omitempty"`
+	Score          float64 `json:"score,omitempty"`
+	ScoreSource    string  `json:"score_source,omitempty"`
+	BucketBudget   float64 `json:"bucket_budget,omitempty"`
+	StrategyWeight float64 `json:"strategy_weight"`
+	SymbolWeight   float64 `json:"symbol_weight"`
+	RiskScale      float64 `json:"risk_scale"`
+	PositionBudget float64 `json:"position_budget"`
+	TradingPaused  bool    `json:"trading_paused"`
+	PauseReason    string  `json:"pause_reason,omitempty"`
+}
+
+type signalReasonAllocatorPayload struct {
+	Template       string  `json:"template,omitempty"`
+	RouteBucket    string  `json:"route_bucket,omitempty"`
+	RouteReason    string  `json:"route_reason,omitempty"`
+	Score          float64 `json:"score,omitempty"`
+	ScoreSource    string  `json:"score_source,omitempty"`
+	BucketBudget   float64 `json:"bucket_budget,omitempty"`
 	StrategyWeight float64 `json:"strategy_weight"`
 	SymbolWeight   float64 `json:"symbol_weight"`
 	RiskScale      float64 `json:"risk_scale"`
@@ -1594,17 +1808,52 @@ func (o *orderedSignalIndicators) MarshalJSON() ([]byte, error) {
 }
 
 type signalReasonPayload struct {
-	Summary          string   `json:"summary"`
-	Phase            string   `json:"phase"`
-	TrendContext     string   `json:"trend_context,omitempty"`
-	SetupContext     string   `json:"setup_context,omitempty"`
-	PathContext      string   `json:"path_context,omitempty"`
-	ExecutionContext string   `json:"execution_context,omitempty"`
-	Tags             []string `json:"tags,omitempty"`
+	Summary          string                        `json:"summary"`
+	Phase            string                        `json:"phase"`
+	TrendContext     string                        `json:"trend_context,omitempty"`
+	SetupContext     string                        `json:"setup_context,omitempty"`
+	PathContext      string                        `json:"path_context,omitempty"`
+	ExecutionContext string                        `json:"execution_context,omitempty"`
+	ExitReasonKind   string                        `json:"exit_reason_kind,omitempty"`
+	ExitReasonLabel  string                        `json:"exit_reason_label,omitempty"`
+	Tags             []string                      `json:"tags,omitempty"`
+	RouteBucket      string                        `json:"route_bucket,omitempty"`
+	RouteReason      string                        `json:"route_reason,omitempty"`
+	RouteTemplate    string                        `json:"route_template,omitempty"`
+	Allocator        *signalReasonAllocatorPayload `json:"allocator,omitempty"`
+	Range            *signalReasonRangePayload     `json:"range,omitempty"`
+}
+
+type signalReasonRangePayload struct {
+	H1RangeOK      bool `json:"h1_range_ok"`
+	H1AdxOK        bool `json:"h1_adx_ok"`
+	H1BollWidthOK  bool `json:"h1_boll_width_ok"`
+	M15TouchLower  bool `json:"m15_touch_lower"`
+	M15RsiTurnUp   bool `json:"m15_rsi_turn_up"`
+	M15TouchUpper  bool `json:"m15_touch_upper"`
+	M15RsiTurnDown bool `json:"m15_rsi_turn_down"`
+}
+
+// signalReasonAllocatorPayloadFromRecommendation 生成随 signal_reason 一起下发的 allocator 快照。
+func signalReasonAllocatorPayloadFromRecommendation(rec weights.Recommendation) *signalReasonAllocatorPayload {
+	return &signalReasonAllocatorPayload{
+		Template:       rec.Template,
+		RouteBucket:    rec.Bucket,
+		RouteReason:    rec.RouteReason,
+		Score:          rec.Score,
+		ScoreSource:    rec.ScoreSource,
+		BucketBudget:   rec.BucketBudget,
+		StrategyWeight: rec.StrategyWeight,
+		SymbolWeight:   rec.SymbolWeight,
+		RiskScale:      rec.RiskScale,
+		PositionBudget: rec.PositionBudget,
+		TradingPaused:  rec.TradingPaused,
+		PauseReason:    rec.PauseReason,
+	}
 }
 
 func (s *TrendFollowingStrategy) newSignalReason(summary, phase, trendContext, setupContext, executionContext string, tags ...string) signalReasonPayload {
-	return signalReasonPayload{
+	payload := signalReasonPayload{
 		Summary:          summary,
 		Phase:            phase,
 		TrendContext:     trendContext,
@@ -1613,6 +1862,60 @@ func (s *TrendFollowingStrategy) newSignalReason(summary, phase, trendContext, s
 		ExecutionContext: executionContext,
 		Tags:             tags,
 	}
+	if rec, ok := s.latestWeightRecommendation(); ok {
+		payload.RouteBucket = rec.Bucket
+		payload.RouteReason = rec.RouteReason
+		payload.RouteTemplate = rec.Template
+		payload.Allocator = signalReasonAllocatorPayloadFromRecommendation(rec)
+	}
+	return payload
+}
+
+// withExitReason 在 signal_reason 中补充稳定的出场原因分类，供下游直接展示。
+func (p signalReasonPayload) withExitReason(kind, label string) signalReasonPayload {
+	p.ExitReasonKind = strings.TrimSpace(kind)
+	p.ExitReasonLabel = strings.TrimSpace(label)
+	return p
+}
+
+// newExitSignalReason 统一构造带结构化出场原因的 signal_reason，避免各策略分支重复拼装。
+func (s *TrendFollowingStrategy) newExitSignalReason(summary, trendContext, setupContext, executionContext, exitReasonKind, exitReasonLabel string, tags ...string) signalReasonPayload {
+	return s.newSignalReason(summary, "CLOSE_EXIT", trendContext, setupContext, executionContext, tags...).withExitReason(exitReasonKind, exitReasonLabel)
+}
+
+// currentStopExitReason 基于当前止损位与入场价的关系，区分普通止损和保本止损。
+func (s *TrendFollowingStrategy) currentStopExitReason() (string, string) {
+	if isBreakevenPrice(s.pos.stopLoss, s.pos.entryPrice) {
+		return "break_even_stop", "保本止损"
+	}
+	return "stop_loss", "止损"
+}
+
+// isBreakevenPrice 判断止损位是否已经抬到接近入场价，用于稳定识别保本止损。
+func isBreakevenPrice(stopLoss, entryPrice float64) bool {
+	tolerance := math.Max(1e-8, math.Abs(entryPrice)*1e-6)
+	return math.Abs(stopLoss-entryPrice) <= tolerance
+}
+
+// enrichSignalWithRouteContext 在实际发送前把统一路由视角补进 signal 顶层，方便 Kafka 下游直接消费。
+func (s *TrendFollowingStrategy) enrichSignalWithRouteContext(signal map[string]interface{}) map[string]interface{} {
+	if len(signal) == 0 {
+		return signal
+	}
+	rec, ok := s.latestWeightRecommendation()
+	if !ok {
+		return signal
+	}
+	if rec.Bucket != "" {
+		signal["route_bucket"] = rec.Bucket
+	}
+	if rec.RouteReason != "" {
+		signal["route_reason"] = rec.RouteReason
+	}
+	if rec.Template != "" {
+		signal["route_template"] = rec.Template
+	}
+	return signal
 }
 
 func (s *TrendFollowingStrategy) harvestPathReasonContext() string {
@@ -1721,17 +2024,20 @@ func (s *TrendFollowingStrategy) writeSignalLog(signal map[string]interface{}, k
 		}
 	}
 	var weightSnapshot *signalWeightSnapshot
-	if s.weightProvider != nil {
-		if rec, ok := s.weightProvider(s.symbol); ok {
-			weightSnapshot = &signalWeightSnapshot{
-				Template:       rec.Template,
-				StrategyWeight: round2(rec.StrategyWeight),
-				SymbolWeight:   round2(rec.SymbolWeight),
-				RiskScale:      round2(rec.RiskScale),
-				PositionBudget: round2(rec.PositionBudget),
-				TradingPaused:  rec.TradingPaused,
-				PauseReason:    rec.PauseReason,
-			}
+	if rec, ok := s.latestWeightRecommendation(); ok {
+		weightSnapshot = &signalWeightSnapshot{
+			Template:       rec.Template,
+			RouteBucket:    rec.Bucket,
+			RouteReason:    rec.RouteReason,
+			Score:          round2(rec.Score),
+			ScoreSource:    rec.ScoreSource,
+			BucketBudget:   round2(rec.BucketBudget),
+			StrategyWeight: round2(rec.StrategyWeight),
+			SymbolWeight:   round2(rec.SymbolWeight),
+			RiskScale:      round2(rec.RiskScale),
+			PositionBudget: round2(rec.PositionBudget),
+			TradingPaused:  rec.TradingPaused,
+			PauseReason:    rec.PauseReason,
 		}
 	}
 
@@ -1851,6 +2157,7 @@ func orderedDecisionExtraKeys(values map[string]interface{}) []string {
 	priority := []string{
 		"summary",
 		"action", "side", "entry_price", "stop_loss", "take_profits",
+		"route_bucket", "route_reason", "route_template",
 		"trend", "pullback", "entry",
 		"price_in_range", "rsi_ok", "structure_ok", "ema_trend_ok",
 		"h1_rsi_low", "h1_rsi_high", "prev_h1_ema21", "prev_h1_low", "prev_h1_high",
@@ -2016,7 +2323,7 @@ func (s *TrendFollowingStrategy) writeDecisionLogIfEnabled(stage, decision, reas
 		s.decisionLogFiles[key] = f
 	}
 
-	orderedExtras := newOrderedDecisionExtras(extras)
+	orderedExtras := newOrderedDecisionExtras(s.enrichDecisionExtrasWithRoute(extras))
 	entry := decisionLogEntry{
 		Timestamp:   formatDecisionLogTime(now),
 		Symbol:      s.symbol,
@@ -2664,14 +2971,16 @@ func (s *TrendFollowingStrategy) openPosition1m(ctx context.Context, k *marketpb
 
 	// 记录持仓
 	s.pos = position{
-		side:         sideLong,
-		entryPrice:   m1.Close,
-		stopLoss:     stopLoss,
-		takeProfit1:  tp1,
-		takeProfit2:  tp2,
-		entryBarTime: m1.OpenTime,
-		atr:          m1.Atr,
-		hitTP1:       false,
+		side:          sideLong,
+		entryPrice:    m1.Close,
+		quantity:      quantity,
+		stopLoss:      stopLoss,
+		takeProfit1:   tp1,
+		takeProfit2:   tp2,
+		entryBarTime:  m1.OpenTime,
+		atr:           m1.Atr,
+		hitTP1:        false,
+		partialClosed: false,
 	}
 	if entry == entryShort {
 		s.pos.side = sideShort
@@ -2754,14 +3063,18 @@ func (s *TrendFollowingStrategy) checkExitConditions1m(ctx context.Context, k *m
 
 	var exitAction string
 	var exitReason string
+	var exitReasonKind string
+	var exitReasonLabel string
 
 	// 1. 止损检查
 	if s.pos.side == sideLong && price <= s.pos.stopLoss {
 		exitAction = "SELL"
 		exitReason = fmt.Sprintf("[1m] 多头止损：价格%.2f ≤ 止损%.2f", price, s.pos.stopLoss)
+		exitReasonKind, exitReasonLabel = s.currentStopExitReason()
 	} else if s.pos.side == sideShort && price >= s.pos.stopLoss {
 		exitAction = "BUY"
 		exitReason = fmt.Sprintf("[1m] 空头止损：价格%.2f ≥ 止损%.2f", price, s.pos.stopLoss)
+		exitReasonKind, exitReasonLabel = s.currentStopExitReason()
 	}
 
 	// 2. 止盈检查
@@ -2770,6 +3083,8 @@ func (s *TrendFollowingStrategy) checkExitConditions1m(ctx context.Context, k *m
 			if price >= s.pos.takeProfit2 {
 				exitAction = "SELL"
 				exitReason = fmt.Sprintf("[1m] 多头止盈2：价格%.2f ≥ TP2%.2f（3×ATR）", price, s.pos.takeProfit2)
+				exitReasonKind = "take_profit"
+				exitReasonLabel = "目标止盈"
 			} else if price >= s.pos.takeProfit1 {
 				if !s.pos.hitTP1 {
 					s.pos.hitTP1 = true
@@ -2781,6 +3096,8 @@ func (s *TrendFollowingStrategy) checkExitConditions1m(ctx context.Context, k *m
 			if price <= s.pos.takeProfit2 {
 				exitAction = "BUY"
 				exitReason = fmt.Sprintf("[1m] 空头止盈2：价格%.2f ≤ TP2%.2f（3×ATR）", price, s.pos.takeProfit2)
+				exitReasonKind = "take_profit"
+				exitReasonLabel = "目标止盈"
 			} else if price <= s.pos.takeProfit1 {
 				if !s.pos.hitTP1 {
 					s.pos.hitTP1 = true
@@ -2802,6 +3119,8 @@ func (s *TrendFollowingStrategy) checkExitConditions1m(ctx context.Context, k *m
 					exitAction = "SELL"
 					exitReason = fmt.Sprintf("[1m] 多头EMA破位：价格%.2f < EMA21%.2f - 缓冲%.2f（连续%d根确认）",
 						price, m1.Ema21, buffer, s.pos.breakBelowCnt)
+					exitReasonKind = "final_close"
+					exitReasonLabel = "最终平仓"
 				}
 			} else {
 				s.pos.breakBelowCnt = 0
@@ -2814,6 +3133,8 @@ func (s *TrendFollowingStrategy) checkExitConditions1m(ctx context.Context, k *m
 					exitAction = "BUY"
 					exitReason = fmt.Sprintf("[1m] 空头EMA破位：价格%.2f > EMA21%.2f + 缓冲%.2f（连续%d根确认）",
 						price, m1.Ema21, buffer, s.pos.breakAboveCnt)
+					exitReasonKind = "final_close"
+					exitReasonLabel = "最终平仓"
 				}
 			} else {
 				s.pos.breakAboveCnt = 0
@@ -2840,36 +3161,31 @@ func (s *TrendFollowingStrategy) checkExitConditions1m(ctx context.Context, k *m
 		side = "SHORT"
 	}
 
+	exitSignalReason := s.newExitSignalReason(
+		exitReason,
+		fmt.Sprintf("持仓方向=%s | 周期=1m", side),
+		exitReason,
+		fmt.Sprintf("平仓价=%.2f | 已实现盈亏=%.2f | 止损=%.2f", price, pnl, s.pos.stopLoss),
+		exitReasonKind,
+		exitReasonLabel,
+		"1m", s.strategySignalTag(), "close", side,
+	)
 	signal := map[string]interface{}{
-		"strategy_id":  s.strategySignalID("1m"),
-		"symbol":       s.symbol,
-		"interval":     "1m",
-		"action":       exitAction,
-		"side":         side,
-		"signal_type":  "CLOSE",
-		"quantity":     0.01,
-		"entry_price":  price,
-		"stop_loss":    s.pos.stopLoss,
-		"take_profits": []float64{s.pos.takeProfit1, s.pos.takeProfit2},
-		"reason": s.newSignalReason(
-			exitReason,
-			"CLOSE_EXIT",
-			fmt.Sprintf("持仓方向=%s | 周期=1m", side),
-			exitReason,
-			fmt.Sprintf("平仓价=%.2f | 已实现盈亏=%.2f | 止损=%.2f", price, pnl, s.pos.stopLoss),
-			"1m", s.strategySignalTag(), "close", side,
-		).Summary,
-		"signal_reason": s.newSignalReason(
-			exitReason,
-			"CLOSE_EXIT",
-			fmt.Sprintf("持仓方向=%s | 周期=1m", side),
-			exitReason,
-			fmt.Sprintf("平仓价=%.2f | 已实现盈亏=%.2f | 止损=%.2f", price, pnl, s.pos.stopLoss),
-			"1m", s.strategySignalTag(), "close", side,
-		),
-		"timestamp":   time.Now().UnixMilli(),
-		"atr":         m1.Atr,
-		"risk_reward": 0,
+		"strategy_id":   s.strategySignalID("1m"),
+		"symbol":        s.symbol,
+		"interval":      "1m",
+		"action":        exitAction,
+		"side":          side,
+		"signal_type":   "CLOSE",
+		"quantity":      0.01,
+		"entry_price":   price,
+		"stop_loss":     s.pos.stopLoss,
+		"take_profits":  []float64{s.pos.takeProfit1, s.pos.takeProfit2},
+		"reason":        exitSignalReason.Summary,
+		"signal_reason": exitSignalReason,
+		"timestamp":     time.Now().UnixMilli(),
+		"atr":           m1.Atr,
+		"risk_reward":   0,
 		"indicators": map[string]interface{}{
 			"m1_ema21": m1.Ema21,
 			"m1_rsi":   m1.Rsi,

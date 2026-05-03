@@ -1,6 +1,16 @@
 package marketstate
 
-import "time"
+import (
+	"time"
+
+	"exchange-system/common/regimejudge"
+)
+
+// Evaluation 表示一次市场判态同时产出的底层 Analysis 和对外 Result。
+type Evaluation struct {
+	Analysis regimejudge.Analysis
+	Result   Result
+}
 
 // Detector 定义市场状态识别器接口，便于后续替换成更复杂的实现。
 type Detector interface {
@@ -15,6 +25,12 @@ type DefaultDetector struct {
 
 // NewDetector 创建一个带保守默认阈值的状态识别器。
 func NewDetector(cfg Config) *DefaultDetector {
+	cfg = normalizeConfig(cfg)
+	return &DefaultDetector{cfg: cfg}
+}
+
+// normalizeConfig 为判态器补齐最小默认阈值，保证不同入口的判态口径一致。
+func normalizeConfig(cfg Config) Config {
 	if cfg.FreshnessWindow <= 0 {
 		cfg.FreshnessWindow = 3 * time.Minute
 	}
@@ -24,11 +40,12 @@ func NewDetector(cfg Config) *DefaultDetector {
 	if cfg.BreakoutAtrPctMin <= 0 {
 		cfg.BreakoutAtrPctMin = 0.006
 	}
-	return &DefaultDetector{cfg: cfg}
+	return cfg
 }
 
-// Detect 根据最小趋势和波动规则识别当前市场状态。
-func (d *DefaultDetector) Detect(now time.Time, features Features) Result {
+// Evaluate 基于统一 Regime Judge 产出底层 Analysis 和对外市场状态结果。
+func Evaluate(now time.Time, features Features, cfg Config) Evaluation {
+	cfg = normalizeConfig(cfg)
 	features = NormalizeFeatures(features)
 	result := Result{
 		Symbol:    features.Symbol,
@@ -36,59 +53,67 @@ func (d *DefaultDetector) Detect(now time.Time, features Features) Result {
 		Reason:    "insufficient_features",
 		UpdatedAt: now.UTC(),
 	}
-	if d == nil {
-		return result
-	}
-	if !features.Healthy {
+	analysis := regimejudge.Analyze(now, features, regimejudge.Config{
+		FreshnessWindow:   cfg.FreshnessWindow,
+		RangeAtrPctMax:    cfg.RangeAtrPctMax,
+		BreakoutAtrPctMin: cfg.BreakoutAtrPctMin,
+	})
+	features = analysis.Features
+	if !analysis.Healthy {
 		if features.LastReason != "" {
 			result.Reason = features.LastReason
 		} else {
 			result.Reason = "unhealthy_data"
 		}
-		return result
+		return Evaluation{Analysis: analysis, Result: result}
 	}
-	if !d.isFresh(now, features) {
+	if !analysis.Fresh {
 		result.Reason = "stale_features"
-		return result
+		return Evaluation{Analysis: analysis, Result: result}
 	}
-	if features.Close <= 0 || features.Ema21 <= 0 || features.Ema55 <= 0 {
+	if !analysis.HasTrendFeatures {
 		result.Reason = "missing_trend_features"
-		return result
+		return Evaluation{Analysis: analysis, Result: result}
 	}
-	if features.AtrPct >= d.cfg.BreakoutAtrPctMin {
+	if analysis.BreakoutMatch {
 		result.State = MarketStateBreakout
 		result.Confidence = 0.8
 		result.Reason = "atr_pct_high"
-		return result
+		return Evaluation{Analysis: analysis, Result: result}
 	}
-	if features.AtrPct > 0 && features.AtrPct <= d.cfg.RangeAtrPctMax {
+	if analysis.RangeMatch {
 		result.State = MarketStateRange
 		result.Confidence = 0.7
 		result.Reason = "atr_pct_low"
-		return result
+		return Evaluation{Analysis: analysis, Result: result}
 	}
-	if features.Close > features.Ema21 && features.Ema21 > features.Ema55 {
+	if analysis.BullTrendStrict {
 		result.State = MarketStateTrendUp
 		result.Confidence = 0.75
 		result.Reason = "ema_bull_alignment"
-		return result
+		return Evaluation{Analysis: analysis, Result: result}
 	}
-	if features.Close < features.Ema21 && features.Ema21 < features.Ema55 {
+	if analysis.BearTrendStrict {
 		result.State = MarketStateTrendDown
 		result.Confidence = 0.75
 		result.Reason = "ema_bear_alignment"
-		return result
+		return Evaluation{Analysis: analysis, Result: result}
 	}
 	result.State = MarketStateRange
 	result.Confidence = 0.5
 	result.Reason = "fallback_range"
-	return result
+	return Evaluation{Analysis: analysis, Result: result}
 }
 
-// isFresh 判断输入特征是否仍在状态识别允许的新鲜度窗口内。
-func (d *DefaultDetector) isFresh(now time.Time, features Features) bool {
-	if d == nil || features.UpdatedAt.IsZero() {
-		return false
+// Detect 根据最小趋势和波动规则识别当前市场状态。
+func (d *DefaultDetector) Detect(now time.Time, features Features) Result {
+	if d == nil {
+		return Result{
+			Symbol:    features.Symbol,
+			State:     MarketStateUnknown,
+			Reason:    "insufficient_features",
+			UpdatedAt: now.UTC(),
+		}
 	}
-	return now.Sub(features.UpdatedAt) <= d.cfg.FreshnessWindow
+	return Evaluate(now, features, d.cfg).Result
 }

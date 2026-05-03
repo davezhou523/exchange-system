@@ -272,22 +272,161 @@ func (x *OpenOrderItem) GetTimeInForce() string {
 }
 
 // 历史委托条目
+type PositionAllocatorStatus struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Template       string                 `protobuf:"bytes,1,opt,name=template,proto3" json:"template,omitempty"`
+	RouteBucket    string                 `protobuf:"bytes,2,opt,name=route_bucket,json=routeBucket,proto3" json:"route_bucket,omitempty"`
+	RouteReason    string                 `protobuf:"bytes,3,opt,name=route_reason,json=routeReason,proto3" json:"route_reason,omitempty"`
+	Score          float64                `protobuf:"fixed64,4,opt,name=score,proto3" json:"score,omitempty"`
+	ScoreSource    string                 `protobuf:"bytes,5,opt,name=score_source,json=scoreSource,proto3" json:"score_source,omitempty"`
+	BucketBudget   float64                `protobuf:"fixed64,6,opt,name=bucket_budget,json=bucketBudget,proto3" json:"bucket_budget,omitempty"`
+	StrategyWeight float64                `protobuf:"fixed64,7,opt,name=strategy_weight,json=strategyWeight,proto3" json:"strategy_weight,omitempty"`
+	SymbolWeight   float64                `protobuf:"fixed64,8,opt,name=symbol_weight,json=symbolWeight,proto3" json:"symbol_weight,omitempty"`
+	RiskScale      float64                `protobuf:"fixed64,9,opt,name=risk_scale,json=riskScale,proto3" json:"risk_scale,omitempty"`
+	PositionBudget float64                `protobuf:"fixed64,10,opt,name=position_budget,json=positionBudget,proto3" json:"position_budget,omitempty"`
+	TradingPaused  bool                   `protobuf:"varint,11,opt,name=trading_paused,json=tradingPaused,proto3" json:"trading_paused,omitempty"`
+	PauseReason    string                 `protobuf:"bytes,12,opt,name=pause_reason,json=pauseReason,proto3" json:"pause_reason,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *PositionAllocatorStatus) Reset() {
+	*x = PositionAllocatorStatus{}
+	mi := &file_order_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PositionAllocatorStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PositionAllocatorStatus) ProtoMessage() {}
+
+func (x *PositionAllocatorStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_order_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PositionAllocatorStatus.ProtoReflect.Descriptor instead.
+func (*PositionAllocatorStatus) Descriptor() ([]byte, []int) {
+	return file_order_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *PositionAllocatorStatus) GetTemplate() string {
+	if x != nil {
+		return x.Template
+	}
+	return ""
+}
+
+func (x *PositionAllocatorStatus) GetRouteBucket() string {
+	if x != nil {
+		return x.RouteBucket
+	}
+	return ""
+}
+
+func (x *PositionAllocatorStatus) GetRouteReason() string {
+	if x != nil {
+		return x.RouteReason
+	}
+	return ""
+}
+
+func (x *PositionAllocatorStatus) GetScore() float64 {
+	if x != nil {
+		return x.Score
+	}
+	return 0
+}
+
+func (x *PositionAllocatorStatus) GetScoreSource() string {
+	if x != nil {
+		return x.ScoreSource
+	}
+	return ""
+}
+
+func (x *PositionAllocatorStatus) GetBucketBudget() float64 {
+	if x != nil {
+		return x.BucketBudget
+	}
+	return 0
+}
+
+func (x *PositionAllocatorStatus) GetStrategyWeight() float64 {
+	if x != nil {
+		return x.StrategyWeight
+	}
+	return 0
+}
+
+func (x *PositionAllocatorStatus) GetSymbolWeight() float64 {
+	if x != nil {
+		return x.SymbolWeight
+	}
+	return 0
+}
+
+func (x *PositionAllocatorStatus) GetRiskScale() float64 {
+	if x != nil {
+		return x.RiskScale
+	}
+	return 0
+}
+
+func (x *PositionAllocatorStatus) GetPositionBudget() float64 {
+	if x != nil {
+		return x.PositionBudget
+	}
+	return 0
+}
+
+func (x *PositionAllocatorStatus) GetTradingPaused() bool {
+	if x != nil {
+		return x.TradingPaused
+	}
+	return false
+}
+
+func (x *PositionAllocatorStatus) GetPauseReason() string {
+	if x != nil {
+		return x.PauseReason
+	}
+	return ""
+}
+
 type SignalReason struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	Summary          string                 `protobuf:"bytes,1,opt,name=summary,proto3" json:"summary,omitempty"`
-	Phase            string                 `protobuf:"bytes,2,opt,name=phase,proto3" json:"phase,omitempty"`
-	TrendContext     string                 `protobuf:"bytes,3,opt,name=trend_context,json=trendContext,proto3" json:"trend_context,omitempty"`
-	SetupContext     string                 `protobuf:"bytes,4,opt,name=setup_context,json=setupContext,proto3" json:"setup_context,omitempty"`
-	PathContext      string                 `protobuf:"bytes,5,opt,name=path_context,json=pathContext,proto3" json:"path_context,omitempty"`
-	ExecutionContext string                 `protobuf:"bytes,6,opt,name=execution_context,json=executionContext,proto3" json:"execution_context,omitempty"`
-	Tags             []string               `protobuf:"bytes,7,rep,name=tags,proto3" json:"tags,omitempty"`
+	state            protoimpl.MessageState   `protogen:"open.v1"`
+	Summary          string                   `protobuf:"bytes,1,opt,name=summary,proto3" json:"summary,omitempty"`
+	Phase            string                   `protobuf:"bytes,2,opt,name=phase,proto3" json:"phase,omitempty"`
+	TrendContext     string                   `protobuf:"bytes,3,opt,name=trend_context,json=trendContext,proto3" json:"trend_context,omitempty"`
+	SetupContext     string                   `protobuf:"bytes,4,opt,name=setup_context,json=setupContext,proto3" json:"setup_context,omitempty"`
+	PathContext      string                   `protobuf:"bytes,5,opt,name=path_context,json=pathContext,proto3" json:"path_context,omitempty"`
+	ExecutionContext string                   `protobuf:"bytes,6,opt,name=execution_context,json=executionContext,proto3" json:"execution_context,omitempty"`
+	Tags             []string                 `protobuf:"bytes,7,rep,name=tags,proto3" json:"tags,omitempty"`
+	RouteBucket      string                   `protobuf:"bytes,8,opt,name=route_bucket,json=routeBucket,proto3" json:"route_bucket,omitempty"`
+	RouteReason      string                   `protobuf:"bytes,9,opt,name=route_reason,json=routeReason,proto3" json:"route_reason,omitempty"`
+	RouteTemplate    string                   `protobuf:"bytes,10,opt,name=route_template,json=routeTemplate,proto3" json:"route_template,omitempty"`
+	Allocator        *PositionAllocatorStatus `protobuf:"bytes,11,opt,name=allocator,proto3" json:"allocator,omitempty"`
+	Range            *RangeSignalReason       `protobuf:"bytes,12,opt,name=range,proto3" json:"range,omitempty"`
+	ExitReasonKind   string                   `protobuf:"bytes,13,opt,name=exit_reason_kind,json=exitReasonKind,proto3" json:"exit_reason_kind,omitempty"`
+	ExitReasonLabel  string                   `protobuf:"bytes,14,opt,name=exit_reason_label,json=exitReasonLabel,proto3" json:"exit_reason_label,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
 
 func (x *SignalReason) Reset() {
 	*x = SignalReason{}
-	mi := &file_order_proto_msgTypes[2]
+	mi := &file_order_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -299,7 +438,7 @@ func (x *SignalReason) String() string {
 func (*SignalReason) ProtoMessage() {}
 
 func (x *SignalReason) ProtoReflect() protoreflect.Message {
-	mi := &file_order_proto_msgTypes[2]
+	mi := &file_order_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -312,7 +451,7 @@ func (x *SignalReason) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignalReason.ProtoReflect.Descriptor instead.
 func (*SignalReason) Descriptor() ([]byte, []int) {
-	return file_order_proto_rawDescGZIP(), []int{2}
+	return file_order_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *SignalReason) GetSummary() string {
@@ -364,6 +503,307 @@ func (x *SignalReason) GetTags() []string {
 	return nil
 }
 
+func (x *SignalReason) GetRouteBucket() string {
+	if x != nil {
+		return x.RouteBucket
+	}
+	return ""
+}
+
+func (x *SignalReason) GetRouteReason() string {
+	if x != nil {
+		return x.RouteReason
+	}
+	return ""
+}
+
+func (x *SignalReason) GetRouteTemplate() string {
+	if x != nil {
+		return x.RouteTemplate
+	}
+	return ""
+}
+
+func (x *SignalReason) GetAllocator() *PositionAllocatorStatus {
+	if x != nil {
+		return x.Allocator
+	}
+	return nil
+}
+
+func (x *SignalReason) GetRange() *RangeSignalReason {
+	if x != nil {
+		return x.Range
+	}
+	return nil
+}
+
+func (x *SignalReason) GetExitReasonKind() string {
+	if x != nil {
+		return x.ExitReasonKind
+	}
+	return ""
+}
+
+func (x *SignalReason) GetExitReasonLabel() string {
+	if x != nil {
+		return x.ExitReasonLabel
+	}
+	return ""
+}
+
+type RangeSignalReason struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	H1RangeOk      bool                   `protobuf:"varint,1,opt,name=h1_range_ok,json=h1RangeOk,proto3" json:"h1_range_ok,omitempty"`
+	H1AdxOk        bool                   `protobuf:"varint,2,opt,name=h1_adx_ok,json=h1AdxOk,proto3" json:"h1_adx_ok,omitempty"`
+	H1BollWidthOk  bool                   `protobuf:"varint,3,opt,name=h1_boll_width_ok,json=h1BollWidthOk,proto3" json:"h1_boll_width_ok,omitempty"`
+	M15TouchLower  bool                   `protobuf:"varint,4,opt,name=m15_touch_lower,json=m15TouchLower,proto3" json:"m15_touch_lower,omitempty"`
+	M15RsiTurnUp   bool                   `protobuf:"varint,5,opt,name=m15_rsi_turn_up,json=m15RsiTurnUp,proto3" json:"m15_rsi_turn_up,omitempty"`
+	M15TouchUpper  bool                   `protobuf:"varint,6,opt,name=m15_touch_upper,json=m15TouchUpper,proto3" json:"m15_touch_upper,omitempty"`
+	M15RsiTurnDown bool                   `protobuf:"varint,7,opt,name=m15_rsi_turn_down,json=m15RsiTurnDown,proto3" json:"m15_rsi_turn_down,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *RangeSignalReason) Reset() {
+	*x = RangeSignalReason{}
+	mi := &file_order_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RangeSignalReason) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RangeSignalReason) ProtoMessage() {}
+
+func (x *RangeSignalReason) ProtoReflect() protoreflect.Message {
+	mi := &file_order_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RangeSignalReason.ProtoReflect.Descriptor instead.
+func (*RangeSignalReason) Descriptor() ([]byte, []int) {
+	return file_order_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *RangeSignalReason) GetH1RangeOk() bool {
+	if x != nil {
+		return x.H1RangeOk
+	}
+	return false
+}
+
+func (x *RangeSignalReason) GetH1AdxOk() bool {
+	if x != nil {
+		return x.H1AdxOk
+	}
+	return false
+}
+
+func (x *RangeSignalReason) GetH1BollWidthOk() bool {
+	if x != nil {
+		return x.H1BollWidthOk
+	}
+	return false
+}
+
+func (x *RangeSignalReason) GetM15TouchLower() bool {
+	if x != nil {
+		return x.M15TouchLower
+	}
+	return false
+}
+
+func (x *RangeSignalReason) GetM15RsiTurnUp() bool {
+	if x != nil {
+		return x.M15RsiTurnUp
+	}
+	return false
+}
+
+func (x *RangeSignalReason) GetM15TouchUpper() bool {
+	if x != nil {
+		return x.M15TouchUpper
+	}
+	return false
+}
+
+func (x *RangeSignalReason) GetM15RsiTurnDown() bool {
+	if x != nil {
+		return x.M15RsiTurnDown
+	}
+	return false
+}
+
+type ProtectionLegStatus struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Requested     bool                   `protobuf:"varint,1,opt,name=requested,proto3" json:"requested,omitempty"`
+	Status        string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	TriggerPrice  float64                `protobuf:"fixed64,3,opt,name=trigger_price,json=triggerPrice,proto3" json:"trigger_price,omitempty"`
+	Reason        string                 `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
+	OrderId       string                 `protobuf:"bytes,5,opt,name=order_id,json=orderId,proto3" json:"order_id,omitempty"`
+	ClientOrderId string                 `protobuf:"bytes,6,opt,name=client_order_id,json=clientOrderId,proto3" json:"client_order_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProtectionLegStatus) Reset() {
+	*x = ProtectionLegStatus{}
+	mi := &file_order_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProtectionLegStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProtectionLegStatus) ProtoMessage() {}
+
+func (x *ProtectionLegStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_order_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProtectionLegStatus.ProtoReflect.Descriptor instead.
+func (*ProtectionLegStatus) Descriptor() ([]byte, []int) {
+	return file_order_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ProtectionLegStatus) GetRequested() bool {
+	if x != nil {
+		return x.Requested
+	}
+	return false
+}
+
+func (x *ProtectionLegStatus) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *ProtectionLegStatus) GetTriggerPrice() float64 {
+	if x != nil {
+		return x.TriggerPrice
+	}
+	return 0
+}
+
+func (x *ProtectionLegStatus) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *ProtectionLegStatus) GetOrderId() string {
+	if x != nil {
+		return x.OrderId
+	}
+	return ""
+}
+
+func (x *ProtectionLegStatus) GetClientOrderId() string {
+	if x != nil {
+		return x.ClientOrderId
+	}
+	return ""
+}
+
+type ProtectionStatus struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Requested     bool                   `protobuf:"varint,1,opt,name=requested,proto3" json:"requested,omitempty"`
+	Status        string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	Reason        string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	StopLoss      *ProtectionLegStatus   `protobuf:"bytes,4,opt,name=stop_loss,json=stopLoss,proto3" json:"stop_loss,omitempty"`
+	TakeProfit    *ProtectionLegStatus   `protobuf:"bytes,5,opt,name=take_profit,json=takeProfit,proto3" json:"take_profit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProtectionStatus) Reset() {
+	*x = ProtectionStatus{}
+	mi := &file_order_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProtectionStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProtectionStatus) ProtoMessage() {}
+
+func (x *ProtectionStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_order_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProtectionStatus.ProtoReflect.Descriptor instead.
+func (*ProtectionStatus) Descriptor() ([]byte, []int) {
+	return file_order_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ProtectionStatus) GetRequested() bool {
+	if x != nil {
+		return x.Requested
+	}
+	return false
+}
+
+func (x *ProtectionStatus) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *ProtectionStatus) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *ProtectionStatus) GetStopLoss() *ProtectionLegStatus {
+	if x != nil {
+		return x.StopLoss
+	}
+	return nil
+}
+
+func (x *ProtectionStatus) GetTakeProfit() *ProtectionLegStatus {
+	if x != nil {
+		return x.TakeProfit
+	}
+	return nil
+}
+
 type AllOrderItem struct {
 	state                       protoimpl.MessageState `protogen:"open.v1"`
 	OrderId                     int64                  `protobuf:"varint,1,opt,name=order_id,json=orderId,proto3" json:"order_id,omitempty"`
@@ -403,13 +843,14 @@ type AllOrderItem struct {
 	HarvestPathAppliedThreshold string                 `protobuf:"bytes,35,opt,name=harvest_path_applied_threshold,json=harvestPathAppliedThreshold,proto3" json:"harvest_path_applied_threshold,omitempty"`
 	HarvestPathBookProbability  string                 `protobuf:"bytes,36,opt,name=harvest_path_book_probability,json=harvestPathBookProbability,proto3" json:"harvest_path_book_probability,omitempty"`
 	HarvestPathBookSummary      string                 `protobuf:"bytes,37,opt,name=harvest_path_book_summary,json=harvestPathBookSummary,proto3" json:"harvest_path_book_summary,omitempty"`
+	Protection                  *ProtectionStatus      `protobuf:"bytes,38,opt,name=protection,proto3" json:"protection,omitempty"`
 	unknownFields               protoimpl.UnknownFields
 	sizeCache                   protoimpl.SizeCache
 }
 
 func (x *AllOrderItem) Reset() {
 	*x = AllOrderItem{}
-	mi := &file_order_proto_msgTypes[3]
+	mi := &file_order_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -421,7 +862,7 @@ func (x *AllOrderItem) String() string {
 func (*AllOrderItem) ProtoMessage() {}
 
 func (x *AllOrderItem) ProtoReflect() protoreflect.Message {
-	mi := &file_order_proto_msgTypes[3]
+	mi := &file_order_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -434,7 +875,7 @@ func (x *AllOrderItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AllOrderItem.ProtoReflect.Descriptor instead.
 func (*AllOrderItem) Descriptor() ([]byte, []int) {
-	return file_order_proto_rawDescGZIP(), []int{3}
+	return file_order_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *AllOrderItem) GetOrderId() int64 {
@@ -696,6 +1137,13 @@ func (x *AllOrderItem) GetHarvestPathBookSummary() string {
 	return ""
 }
 
+func (x *AllOrderItem) GetProtection() *ProtectionStatus {
+	if x != nil {
+		return x.Protection
+	}
+	return nil
+}
+
 // 历史成交条目
 type UserTradeItem struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
@@ -722,7 +1170,7 @@ type UserTradeItem struct {
 
 func (x *UserTradeItem) Reset() {
 	*x = UserTradeItem{}
-	mi := &file_order_proto_msgTypes[4]
+	mi := &file_order_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -734,7 +1182,7 @@ func (x *UserTradeItem) String() string {
 func (*UserTradeItem) ProtoMessage() {}
 
 func (x *UserTradeItem) ProtoReflect() protoreflect.Message {
-	mi := &file_order_proto_msgTypes[4]
+	mi := &file_order_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -747,7 +1195,7 @@ func (x *UserTradeItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserTradeItem.ProtoReflect.Descriptor instead.
 func (*UserTradeItem) Descriptor() ([]byte, []int) {
-	return file_order_proto_rawDescGZIP(), []int{4}
+	return file_order_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *UserTradeItem) GetId() int64 {
@@ -885,7 +1333,7 @@ type IncomeItem struct {
 
 func (x *IncomeItem) Reset() {
 	*x = IncomeItem{}
-	mi := &file_order_proto_msgTypes[5]
+	mi := &file_order_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -897,7 +1345,7 @@ func (x *IncomeItem) String() string {
 func (*IncomeItem) ProtoMessage() {}
 
 func (x *IncomeItem) ProtoReflect() protoreflect.Message {
-	mi := &file_order_proto_msgTypes[5]
+	mi := &file_order_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -910,7 +1358,7 @@ func (x *IncomeItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IncomeItem.ProtoReflect.Descriptor instead.
 func (*IncomeItem) Descriptor() ([]byte, []int) {
-	return file_order_proto_rawDescGZIP(), []int{5}
+	return file_order_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *IncomeItem) GetSymbol() string {
@@ -975,7 +1423,7 @@ type FundingRateItem struct {
 
 func (x *FundingRateItem) Reset() {
 	*x = FundingRateItem{}
-	mi := &file_order_proto_msgTypes[6]
+	mi := &file_order_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -987,7 +1435,7 @@ func (x *FundingRateItem) String() string {
 func (*FundingRateItem) ProtoMessage() {}
 
 func (x *FundingRateItem) ProtoReflect() protoreflect.Message {
-	mi := &file_order_proto_msgTypes[6]
+	mi := &file_order_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1000,7 +1448,7 @@ func (x *FundingRateItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FundingRateItem.ProtoReflect.Descriptor instead.
 func (*FundingRateItem) Descriptor() ([]byte, []int) {
-	return file_order_proto_rawDescGZIP(), []int{6}
+	return file_order_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *FundingRateItem) GetSymbol() string {
@@ -1047,7 +1495,7 @@ type FundingFeeItem struct {
 
 func (x *FundingFeeItem) Reset() {
 	*x = FundingFeeItem{}
-	mi := &file_order_proto_msgTypes[7]
+	mi := &file_order_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1059,7 +1507,7 @@ func (x *FundingFeeItem) String() string {
 func (*FundingFeeItem) ProtoMessage() {}
 
 func (x *FundingFeeItem) ProtoReflect() protoreflect.Message {
-	mi := &file_order_proto_msgTypes[7]
+	mi := &file_order_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1072,7 +1520,7 @@ func (x *FundingFeeItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FundingFeeItem.ProtoReflect.Descriptor instead.
 func (*FundingFeeItem) Descriptor() ([]byte, []int) {
-	return file_order_proto_rawDescGZIP(), []int{7}
+	return file_order_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *FundingFeeItem) GetSymbol() string {
@@ -1134,7 +1582,7 @@ type OpenOrderResponse struct {
 
 func (x *OpenOrderResponse) Reset() {
 	*x = OpenOrderResponse{}
-	mi := &file_order_proto_msgTypes[8]
+	mi := &file_order_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1146,7 +1594,7 @@ func (x *OpenOrderResponse) String() string {
 func (*OpenOrderResponse) ProtoMessage() {}
 
 func (x *OpenOrderResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_order_proto_msgTypes[8]
+	mi := &file_order_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1159,7 +1607,7 @@ func (x *OpenOrderResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenOrderResponse.ProtoReflect.Descriptor instead.
 func (*OpenOrderResponse) Descriptor() ([]byte, []int) {
-	return file_order_proto_rawDescGZIP(), []int{8}
+	return file_order_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *OpenOrderResponse) GetItems() []*OpenOrderItem {
@@ -1178,7 +1626,7 @@ type AllOrderResponse struct {
 
 func (x *AllOrderResponse) Reset() {
 	*x = AllOrderResponse{}
-	mi := &file_order_proto_msgTypes[9]
+	mi := &file_order_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1190,7 +1638,7 @@ func (x *AllOrderResponse) String() string {
 func (*AllOrderResponse) ProtoMessage() {}
 
 func (x *AllOrderResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_order_proto_msgTypes[9]
+	mi := &file_order_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1203,7 +1651,7 @@ func (x *AllOrderResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AllOrderResponse.ProtoReflect.Descriptor instead.
 func (*AllOrderResponse) Descriptor() ([]byte, []int) {
-	return file_order_proto_rawDescGZIP(), []int{9}
+	return file_order_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *AllOrderResponse) GetItems() []*AllOrderItem {
@@ -1222,7 +1670,7 @@ type UserTradeResponse struct {
 
 func (x *UserTradeResponse) Reset() {
 	*x = UserTradeResponse{}
-	mi := &file_order_proto_msgTypes[10]
+	mi := &file_order_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1234,7 +1682,7 @@ func (x *UserTradeResponse) String() string {
 func (*UserTradeResponse) ProtoMessage() {}
 
 func (x *UserTradeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_order_proto_msgTypes[10]
+	mi := &file_order_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1247,7 +1695,7 @@ func (x *UserTradeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UserTradeResponse.ProtoReflect.Descriptor instead.
 func (*UserTradeResponse) Descriptor() ([]byte, []int) {
-	return file_order_proto_rawDescGZIP(), []int{10}
+	return file_order_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *UserTradeResponse) GetItems() []*UserTradeItem {
@@ -1266,7 +1714,7 @@ type IncomeResponse struct {
 
 func (x *IncomeResponse) Reset() {
 	*x = IncomeResponse{}
-	mi := &file_order_proto_msgTypes[11]
+	mi := &file_order_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1278,7 +1726,7 @@ func (x *IncomeResponse) String() string {
 func (*IncomeResponse) ProtoMessage() {}
 
 func (x *IncomeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_order_proto_msgTypes[11]
+	mi := &file_order_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1291,7 +1739,7 @@ func (x *IncomeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IncomeResponse.ProtoReflect.Descriptor instead.
 func (*IncomeResponse) Descriptor() ([]byte, []int) {
-	return file_order_proto_rawDescGZIP(), []int{11}
+	return file_order_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *IncomeResponse) GetItems() []*IncomeItem {
@@ -1310,7 +1758,7 @@ type FundingRateResponse struct {
 
 func (x *FundingRateResponse) Reset() {
 	*x = FundingRateResponse{}
-	mi := &file_order_proto_msgTypes[12]
+	mi := &file_order_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1322,7 +1770,7 @@ func (x *FundingRateResponse) String() string {
 func (*FundingRateResponse) ProtoMessage() {}
 
 func (x *FundingRateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_order_proto_msgTypes[12]
+	mi := &file_order_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1335,7 +1783,7 @@ func (x *FundingRateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FundingRateResponse.ProtoReflect.Descriptor instead.
 func (*FundingRateResponse) Descriptor() ([]byte, []int) {
-	return file_order_proto_rawDescGZIP(), []int{12}
+	return file_order_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *FundingRateResponse) GetItems() []*FundingRateItem {
@@ -1354,7 +1802,7 @@ type FundingFeeResponse struct {
 
 func (x *FundingFeeResponse) Reset() {
 	*x = FundingFeeResponse{}
-	mi := &file_order_proto_msgTypes[13]
+	mi := &file_order_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1366,7 +1814,7 @@ func (x *FundingFeeResponse) String() string {
 func (*FundingFeeResponse) ProtoMessage() {}
 
 func (x *FundingFeeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_order_proto_msgTypes[13]
+	mi := &file_order_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1379,7 +1827,7 @@ func (x *FundingFeeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FundingFeeResponse.ProtoReflect.Descriptor instead.
 func (*FundingFeeResponse) Descriptor() ([]byte, []int) {
-	return file_order_proto_rawDescGZIP(), []int{13}
+	return file_order_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *FundingFeeResponse) GetItems() []*FundingFeeItem {
@@ -1398,7 +1846,7 @@ type EmptyRequest struct {
 
 func (x *EmptyRequest) Reset() {
 	*x = EmptyRequest{}
-	mi := &file_order_proto_msgTypes[14]
+	mi := &file_order_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1410,7 +1858,7 @@ func (x *EmptyRequest) String() string {
 func (*EmptyRequest) ProtoMessage() {}
 
 func (x *EmptyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_order_proto_msgTypes[14]
+	mi := &file_order_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1423,7 +1871,7 @@ func (x *EmptyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EmptyRequest.ProtoReflect.Descriptor instead.
 func (*EmptyRequest) Descriptor() ([]byte, []int) {
-	return file_order_proto_rawDescGZIP(), []int{14}
+	return file_order_proto_rawDescGZIP(), []int{18}
 }
 
 var File_order_proto protoreflect.FileDescriptor
@@ -1460,7 +1908,22 @@ const file_order_proto_rawDesc = "" +
 	"\vreduce_only\x18\x0f \x01(\bR\n" +
 	"reduceOnly\x12%\n" +
 	"\x0eclose_position\x18\x10 \x01(\bR\rclosePosition\x12\"\n" +
-	"\rtime_in_force\x18\x11 \x01(\tR\vtimeInForce\"\xec\x01\n" +
+	"\rtime_in_force\x18\x11 \x01(\tR\vtimeInForce\"\xb9\x03\n" +
+	"\x17PositionAllocatorStatus\x12\x1a\n" +
+	"\btemplate\x18\x01 \x01(\tR\btemplate\x12!\n" +
+	"\froute_bucket\x18\x02 \x01(\tR\vrouteBucket\x12!\n" +
+	"\froute_reason\x18\x03 \x01(\tR\vrouteReason\x12\x14\n" +
+	"\x05score\x18\x04 \x01(\x01R\x05score\x12!\n" +
+	"\fscore_source\x18\x05 \x01(\tR\vscoreSource\x12#\n" +
+	"\rbucket_budget\x18\x06 \x01(\x01R\fbucketBudget\x12'\n" +
+	"\x0fstrategy_weight\x18\a \x01(\x01R\x0estrategyWeight\x12#\n" +
+	"\rsymbol_weight\x18\b \x01(\x01R\fsymbolWeight\x12\x1d\n" +
+	"\n" +
+	"risk_scale\x18\t \x01(\x01R\triskScale\x12'\n" +
+	"\x0fposition_budget\x18\n" +
+	" \x01(\x01R\x0epositionBudget\x12%\n" +
+	"\x0etrading_paused\x18\v \x01(\bR\rtradingPaused\x12!\n" +
+	"\fpause_reason\x18\f \x01(\tR\vpauseReason\"\x9d\x04\n" +
 	"\fSignalReason\x12\x18\n" +
 	"\asummary\x18\x01 \x01(\tR\asummary\x12\x14\n" +
 	"\x05phase\x18\x02 \x01(\tR\x05phase\x12#\n" +
@@ -1468,7 +1931,37 @@ const file_order_proto_rawDesc = "" +
 	"\rsetup_context\x18\x04 \x01(\tR\fsetupContext\x12!\n" +
 	"\fpath_context\x18\x05 \x01(\tR\vpathContext\x12+\n" +
 	"\x11execution_context\x18\x06 \x01(\tR\x10executionContext\x12\x12\n" +
-	"\x04tags\x18\a \x03(\tR\x04tags\"\xb3\f\n" +
+	"\x04tags\x18\a \x03(\tR\x04tags\x12!\n" +
+	"\froute_bucket\x18\b \x01(\tR\vrouteBucket\x12!\n" +
+	"\froute_reason\x18\t \x01(\tR\vrouteReason\x12%\n" +
+	"\x0eroute_template\x18\n" +
+	" \x01(\tR\rrouteTemplate\x12<\n" +
+	"\tallocator\x18\v \x01(\v2\x1e.order.PositionAllocatorStatusR\tallocator\x12.\n" +
+	"\x05range\x18\f \x01(\v2\x18.order.RangeSignalReasonR\x05range\x12(\n" +
+	"\x10exit_reason_kind\x18\r \x01(\tR\x0eexitReasonKind\x12*\n" +
+	"\x11exit_reason_label\x18\x0e \x01(\tR\x0fexitReasonLabel\"\x9a\x02\n" +
+	"\x11RangeSignalReason\x12\x1e\n" +
+	"\vh1_range_ok\x18\x01 \x01(\bR\th1RangeOk\x12\x1a\n" +
+	"\th1_adx_ok\x18\x02 \x01(\bR\ah1AdxOk\x12'\n" +
+	"\x10h1_boll_width_ok\x18\x03 \x01(\bR\rh1BollWidthOk\x12&\n" +
+	"\x0fm15_touch_lower\x18\x04 \x01(\bR\rm15TouchLower\x12%\n" +
+	"\x0fm15_rsi_turn_up\x18\x05 \x01(\bR\fm15RsiTurnUp\x12&\n" +
+	"\x0fm15_touch_upper\x18\x06 \x01(\bR\rm15TouchUpper\x12)\n" +
+	"\x11m15_rsi_turn_down\x18\a \x01(\bR\x0em15RsiTurnDown\"\xcb\x01\n" +
+	"\x13ProtectionLegStatus\x12\x1c\n" +
+	"\trequested\x18\x01 \x01(\bR\trequested\x12\x16\n" +
+	"\x06status\x18\x02 \x01(\tR\x06status\x12#\n" +
+	"\rtrigger_price\x18\x03 \x01(\x01R\ftriggerPrice\x12\x16\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\x12\x19\n" +
+	"\border_id\x18\x05 \x01(\tR\aorderId\x12&\n" +
+	"\x0fclient_order_id\x18\x06 \x01(\tR\rclientOrderId\"\xd6\x01\n" +
+	"\x10ProtectionStatus\x12\x1c\n" +
+	"\trequested\x18\x01 \x01(\bR\trequested\x12\x16\n" +
+	"\x06status\x18\x02 \x01(\tR\x06status\x12\x16\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\x127\n" +
+	"\tstop_loss\x18\x04 \x01(\v2\x1a.order.ProtectionLegStatusR\bstopLoss\x12;\n" +
+	"\vtake_profit\x18\x05 \x01(\v2\x1a.order.ProtectionLegStatusR\n" +
+	"takeProfit\"\xec\f\n" +
 	"\fAllOrderItem\x12\x19\n" +
 	"\border_id\x18\x01 \x01(\x03R\aorderId\x12\x16\n" +
 	"\x06symbol\x18\x02 \x01(\tR\x06symbol\x12\x16\n" +
@@ -1512,7 +2005,10 @@ const file_order_proto_rawDesc = "" +
 	"\x1dharvest_path_threshold_source\x18\" \x01(\tR\x1aharvestPathThresholdSource\x12C\n" +
 	"\x1eharvest_path_applied_threshold\x18# \x01(\tR\x1bharvestPathAppliedThreshold\x12A\n" +
 	"\x1dharvest_path_book_probability\x18$ \x01(\tR\x1aharvestPathBookProbability\x129\n" +
-	"\x19harvest_path_book_summary\x18% \x01(\tR\x16harvestPathBookSummary\"\xe5\x03\n" +
+	"\x19harvest_path_book_summary\x18% \x01(\tR\x16harvestPathBookSummary\x127\n" +
+	"\n" +
+	"protection\x18& \x01(\v2\x17.order.ProtectionStatusR\n" +
+	"protection\"\xe5\x03\n" +
 	"\rUserTradeItem\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x16\n" +
 	"\x06symbol\x18\x02 \x01(\tR\x06symbol\x12\x19\n" +
@@ -1594,51 +2090,60 @@ func file_order_proto_rawDescGZIP() []byte {
 	return file_order_proto_rawDescData
 }
 
-var file_order_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_order_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_order_proto_goTypes = []any{
-	(*OrderQueryRequest)(nil),   // 0: order.OrderQueryRequest
-	(*OpenOrderItem)(nil),       // 1: order.OpenOrderItem
-	(*SignalReason)(nil),        // 2: order.SignalReason
-	(*AllOrderItem)(nil),        // 3: order.AllOrderItem
-	(*UserTradeItem)(nil),       // 4: order.UserTradeItem
-	(*IncomeItem)(nil),          // 5: order.IncomeItem
-	(*FundingRateItem)(nil),     // 6: order.FundingRateItem
-	(*FundingFeeItem)(nil),      // 7: order.FundingFeeItem
-	(*OpenOrderResponse)(nil),   // 8: order.OpenOrderResponse
-	(*AllOrderResponse)(nil),    // 9: order.AllOrderResponse
-	(*UserTradeResponse)(nil),   // 10: order.UserTradeResponse
-	(*IncomeResponse)(nil),      // 11: order.IncomeResponse
-	(*FundingRateResponse)(nil), // 12: order.FundingRateResponse
-	(*FundingFeeResponse)(nil),  // 13: order.FundingFeeResponse
-	(*EmptyRequest)(nil),        // 14: order.EmptyRequest
+	(*OrderQueryRequest)(nil),       // 0: order.OrderQueryRequest
+	(*OpenOrderItem)(nil),           // 1: order.OpenOrderItem
+	(*PositionAllocatorStatus)(nil), // 2: order.PositionAllocatorStatus
+	(*SignalReason)(nil),            // 3: order.SignalReason
+	(*RangeSignalReason)(nil),       // 4: order.RangeSignalReason
+	(*ProtectionLegStatus)(nil),     // 5: order.ProtectionLegStatus
+	(*ProtectionStatus)(nil),        // 6: order.ProtectionStatus
+	(*AllOrderItem)(nil),            // 7: order.AllOrderItem
+	(*UserTradeItem)(nil),           // 8: order.UserTradeItem
+	(*IncomeItem)(nil),              // 9: order.IncomeItem
+	(*FundingRateItem)(nil),         // 10: order.FundingRateItem
+	(*FundingFeeItem)(nil),          // 11: order.FundingFeeItem
+	(*OpenOrderResponse)(nil),       // 12: order.OpenOrderResponse
+	(*AllOrderResponse)(nil),        // 13: order.AllOrderResponse
+	(*UserTradeResponse)(nil),       // 14: order.UserTradeResponse
+	(*IncomeResponse)(nil),          // 15: order.IncomeResponse
+	(*FundingRateResponse)(nil),     // 16: order.FundingRateResponse
+	(*FundingFeeResponse)(nil),      // 17: order.FundingFeeResponse
+	(*EmptyRequest)(nil),            // 18: order.EmptyRequest
 }
 var file_order_proto_depIdxs = []int32{
-	2,  // 0: order.AllOrderItem.signal_reason:type_name -> order.SignalReason
-	1,  // 1: order.OpenOrderResponse.items:type_name -> order.OpenOrderItem
-	3,  // 2: order.AllOrderResponse.items:type_name -> order.AllOrderItem
-	4,  // 3: order.UserTradeResponse.items:type_name -> order.UserTradeItem
-	5,  // 4: order.IncomeResponse.items:type_name -> order.IncomeItem
-	6,  // 5: order.FundingRateResponse.items:type_name -> order.FundingRateItem
-	7,  // 6: order.FundingFeeResponse.items:type_name -> order.FundingFeeItem
-	0,  // 7: order.OrderService.GetOpenOrders:input_type -> order.OrderQueryRequest
-	0,  // 8: order.OrderService.GetAllOrders:input_type -> order.OrderQueryRequest
-	0,  // 9: order.OrderService.GetUserTrades:input_type -> order.OrderQueryRequest
-	0,  // 10: order.OrderService.GetIncomeHistory:input_type -> order.OrderQueryRequest
-	0,  // 11: order.OrderService.GetFundingRateHistory:input_type -> order.OrderQueryRequest
-	0,  // 12: order.OrderService.GetFundingFees:input_type -> order.OrderQueryRequest
-	0,  // 13: order.OrderService.FetchAllData:input_type -> order.OrderQueryRequest
-	8,  // 14: order.OrderService.GetOpenOrders:output_type -> order.OpenOrderResponse
-	9,  // 15: order.OrderService.GetAllOrders:output_type -> order.AllOrderResponse
-	10, // 16: order.OrderService.GetUserTrades:output_type -> order.UserTradeResponse
-	11, // 17: order.OrderService.GetIncomeHistory:output_type -> order.IncomeResponse
-	12, // 18: order.OrderService.GetFundingRateHistory:output_type -> order.FundingRateResponse
-	13, // 19: order.OrderService.GetFundingFees:output_type -> order.FundingFeeResponse
-	14, // 20: order.OrderService.FetchAllData:output_type -> order.EmptyRequest
-	14, // [14:21] is the sub-list for method output_type
-	7,  // [7:14] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	2,  // 0: order.SignalReason.allocator:type_name -> order.PositionAllocatorStatus
+	4,  // 1: order.SignalReason.range:type_name -> order.RangeSignalReason
+	5,  // 2: order.ProtectionStatus.stop_loss:type_name -> order.ProtectionLegStatus
+	5,  // 3: order.ProtectionStatus.take_profit:type_name -> order.ProtectionLegStatus
+	3,  // 4: order.AllOrderItem.signal_reason:type_name -> order.SignalReason
+	6,  // 5: order.AllOrderItem.protection:type_name -> order.ProtectionStatus
+	1,  // 6: order.OpenOrderResponse.items:type_name -> order.OpenOrderItem
+	7,  // 7: order.AllOrderResponse.items:type_name -> order.AllOrderItem
+	8,  // 8: order.UserTradeResponse.items:type_name -> order.UserTradeItem
+	9,  // 9: order.IncomeResponse.items:type_name -> order.IncomeItem
+	10, // 10: order.FundingRateResponse.items:type_name -> order.FundingRateItem
+	11, // 11: order.FundingFeeResponse.items:type_name -> order.FundingFeeItem
+	0,  // 12: order.OrderService.GetOpenOrders:input_type -> order.OrderQueryRequest
+	0,  // 13: order.OrderService.GetAllOrders:input_type -> order.OrderQueryRequest
+	0,  // 14: order.OrderService.GetUserTrades:input_type -> order.OrderQueryRequest
+	0,  // 15: order.OrderService.GetIncomeHistory:input_type -> order.OrderQueryRequest
+	0,  // 16: order.OrderService.GetFundingRateHistory:input_type -> order.OrderQueryRequest
+	0,  // 17: order.OrderService.GetFundingFees:input_type -> order.OrderQueryRequest
+	0,  // 18: order.OrderService.FetchAllData:input_type -> order.OrderQueryRequest
+	12, // 19: order.OrderService.GetOpenOrders:output_type -> order.OpenOrderResponse
+	13, // 20: order.OrderService.GetAllOrders:output_type -> order.AllOrderResponse
+	14, // 21: order.OrderService.GetUserTrades:output_type -> order.UserTradeResponse
+	15, // 22: order.OrderService.GetIncomeHistory:output_type -> order.IncomeResponse
+	16, // 23: order.OrderService.GetFundingRateHistory:output_type -> order.FundingRateResponse
+	17, // 24: order.OrderService.GetFundingFees:output_type -> order.FundingFeeResponse
+	18, // 25: order.OrderService.FetchAllData:output_type -> order.EmptyRequest
+	19, // [19:26] is the sub-list for method output_type
+	12, // [12:19] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_order_proto_init() }
@@ -1652,7 +2157,7 @@ func file_order_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_order_proto_rawDesc), len(file_order_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   15,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

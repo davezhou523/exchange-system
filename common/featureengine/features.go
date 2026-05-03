@@ -30,45 +30,137 @@ type Features struct {
 	IsFinal    bool
 }
 
+// SnapshotValues 表示特征引擎从任意上游输入收拢出的统一原始字段。
+type SnapshotValues struct {
+	Symbol     string
+	Timeframe  string
+	Close      float64
+	Ema21      float64
+	Ema55      float64
+	Atr        float64
+	AtrPct     float64
+	Adx        float64
+	Rsi        float64
+	Volume     float64
+	TrendScore float64
+	Volatility float64
+	UpdatedAt  time.Time
+	IsDirty    bool
+	IsTradable bool
+	IsFinal    bool
+	Healthy    bool
+	HasHealth  bool
+	LastReason string
+}
+
+// Engine 定义统一 Feature Engine 的最小实现，负责把分散输入转换成标准化特征。
+type Engine struct{}
+
+// New 创建一个最小版 Feature Engine，供选币、判态、路由和分仓统一复用。
+func New() *Engine {
+	return &Engine{}
+}
+
 // BuildFromKline 把统一的 Kline 消息转换为标准化特征，避免下游重复手工拆字段。
 func BuildFromKline(k *market.Kline) Features {
+	return New().BuildFromKline(k)
+}
+
+// BuildFromKline 把统一的 Kline 消息转换为标准化特征，避免下游重复手工拆字段。
+func (e *Engine) BuildFromKline(k *market.Kline) Features {
 	if k == nil {
 		return Features{Healthy: false, LastReason: "nil_kline"}
 	}
-	return BuildFromSnapshotValues(
-		k.Symbol,
-		k.Interval,
-		k.Close,
-		k.Ema21,
-		k.Ema55,
-		k.Atr,
-		k.Rsi,
-		k.Volume,
-		k.IsDirty,
-		k.IsTradable,
-		k.IsFinal,
-		resolveUpdatedAt(k.EventTime),
-	)
+	return e.BuildFromSnapshot(SnapshotValues{
+		Symbol:     k.Symbol,
+		Timeframe:  k.Interval,
+		Close:      k.Close,
+		Ema21:      k.Ema21,
+		Ema55:      k.Ema55,
+		Atr:        k.Atr,
+		Rsi:        k.Rsi,
+		Volume:     k.Volume,
+		IsDirty:    k.IsDirty,
+		IsTradable: k.IsTradable,
+		IsFinal:    k.IsFinal,
+		UpdatedAt:  resolveUpdatedAt(k.EventTime),
+	})
 }
 
 // BuildFromSnapshotValues 把分散字段收拢成统一特征结构，并补齐最小衍生特征。
 func BuildFromSnapshotValues(symbol, timeframe string, close, ema21, ema55, atr, rsi, volume float64, isDirty, isTradable, isFinal bool, updatedAt time.Time) Features {
-	features := Features{
+	return New().BuildFromSnapshotValues(symbol, timeframe, close, ema21, ema55, atr, rsi, volume, isDirty, isTradable, isFinal, updatedAt)
+}
+
+// BuildFromSnapshotValues 把分散字段收拢成统一特征结构，并补齐最小衍生特征。
+func (e *Engine) BuildFromSnapshotValues(symbol, timeframe string, close, ema21, ema55, atr, rsi, volume float64, isDirty, isTradable, isFinal bool, updatedAt time.Time) Features {
+	return e.BuildFromSnapshot(SnapshotValues{
 		Symbol:     symbol,
 		Timeframe:  timeframe,
-		Price:      close,
 		Close:      close,
 		Ema21:      ema21,
 		Ema55:      ema55,
 		Atr:        atr,
 		Rsi:        rsi,
 		Volume:     volume,
-		UpdatedAt:  updatedAt.UTC(),
 		IsDirty:    isDirty,
 		IsTradable: isTradable,
 		IsFinal:    isFinal,
+		UpdatedAt:  updatedAt,
+	})
+}
+
+// BuildFromSnapshot 把统一原始字段转换为标准化特征，是 Feature Engine 的核心收口入口。
+func BuildFromSnapshot(in SnapshotValues) Features {
+	return New().BuildFromSnapshot(in)
+}
+
+// BuildFromSnapshot 把统一原始字段转换为标准化特征，是 Feature Engine 的核心收口入口。
+func (e *Engine) BuildFromSnapshot(in SnapshotValues) Features {
+	features := Features{
+		Symbol:     in.Symbol,
+		Timeframe:  in.Timeframe,
+		Price:      in.Close,
+		Close:      in.Close,
+		Ema21:      in.Ema21,
+		Ema55:      in.Ema55,
+		Atr:        in.Atr,
+		AtrPct:     in.AtrPct,
+		Adx:        in.Adx,
+		Rsi:        in.Rsi,
+		Volume:     in.Volume,
+		TrendScore: in.TrendScore,
+		Volatility: in.Volatility,
+		UpdatedAt:  in.UpdatedAt.UTC(),
+		IsDirty:    in.IsDirty,
+		IsTradable: in.IsTradable,
+		IsFinal:    in.IsFinal,
 	}
-	return Normalize(features)
+	features = Normalize(features)
+	if in.HasHealth {
+		features.Healthy = in.Healthy
+		if in.LastReason != "" {
+			features.LastReason = in.LastReason
+		}
+	}
+	return features
+}
+
+// BuildFeatureMap 批量构建标准化特征，统一供选币、判态和路由层复用。
+func BuildFeatureMap(inputs map[string]SnapshotValues) map[string]Features {
+	return New().BuildFeatureMap(inputs)
+}
+
+// BuildFeatureMap 批量构建标准化特征，统一供选币、判态和路由层复用。
+func (e *Engine) BuildFeatureMap(inputs map[string]SnapshotValues) map[string]Features {
+	out := make(map[string]Features, len(inputs))
+	for symbol, item := range inputs {
+		if item.Symbol == "" {
+			item.Symbol = symbol
+		}
+		out[symbol] = e.BuildFromSnapshot(item)
+	}
+	return out
 }
 
 // Normalize 补齐可从基础字段推导的特征，保证不同上游入口产出的结果一致。

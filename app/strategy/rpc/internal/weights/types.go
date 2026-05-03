@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"exchange-system/app/strategy/rpc/internal/marketstate"
+	"exchange-system/common/regimejudge"
 )
 
 // Config 定义最小版 Strategy Weight Engine 的阈值参数。
@@ -30,8 +31,11 @@ type Config struct {
 // Inputs 表示一次权重评估所需的最小输入。
 type Inputs struct {
 	MarketState        marketstate.AggregateResult
+	RegimeAnalyses     map[string]regimejudge.Analysis
 	Symbols            []string
 	Templates          map[string]string
+	StrategyBuckets    map[string]string
+	RouteReasons       map[string]string
 	SymbolScores       map[string]float64
 	LossStreak         int
 	DailyLossPct       float64
@@ -46,6 +50,11 @@ type Inputs struct {
 type Recommendation struct {
 	Symbol         string  `json:"symbol"`
 	Template       string  `json:"template,omitempty"`
+	Bucket         string  `json:"route_bucket,omitempty"`
+	RouteReason    string  `json:"route_reason,omitempty"`
+	Score          float64 `json:"score,omitempty"`
+	ScoreSource    string  `json:"score_source,omitempty"`
+	BucketBudget   float64 `json:"bucket_budget,omitempty"`
 	StrategyWeight float64 `json:"strategy_weight"`
 	SymbolWeight   float64 `json:"symbol_weight"`
 	RiskScale      float64 `json:"risk_scale"`
@@ -56,13 +65,17 @@ type Recommendation struct {
 
 // Output 表示一次权重评估的结构化输出。
 type Output struct {
-	Recommendations   []Recommendation `json:"recommendations"`
-	MarketPaused      bool             `json:"market_paused"`
-	MarketPauseReason string           `json:"market_pause_reason,omitempty"`
-	CoolingUntil      time.Time        `json:"cooling_until,omitempty"`
-	AtrSpikeRatio     float64          `json:"atr_spike_ratio,omitempty"`
-	VolumeSpikeRatio  float64          `json:"volume_spike_ratio,omitempty"`
-	UpdatedAt         time.Time        `json:"updated_at"`
+	Recommendations   []Recommendation   `json:"recommendations"`
+	MarketPaused      bool               `json:"market_paused"`
+	MarketPauseReason string             `json:"market_pause_reason,omitempty"`
+	CoolingUntil      time.Time          `json:"cooling_until,omitempty"`
+	AtrSpikeRatio     float64            `json:"atr_spike_ratio,omitempty"`
+	VolumeSpikeRatio  float64            `json:"volume_spike_ratio,omitempty"`
+	MatchCounts       map[string]int     `json:"match_counts,omitempty"`
+	StrategyMix       map[string]float64 `json:"strategy_mix,omitempty"`
+	BucketBudgets     map[string]float64 `json:"bucket_budgets,omitempty"`
+	BucketSymbolCount map[string]int     `json:"bucket_symbol_count,omitempty"`
+	UpdatedAt         time.Time          `json:"updated_at"`
 }
 
 // Engine 定义权重引擎接口，便于后续替换成更复杂的实现。

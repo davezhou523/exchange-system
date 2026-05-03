@@ -159,12 +159,37 @@ func (s *SimulatedExchange) Name() string {
 	return "simulated"
 }
 
-// SetStopLossTakeProfit 设置止损止盈（模拟交易所）
-func (s *SimulatedExchange) SetStopLossTakeProfit(ctx context.Context, symbol string, positionSide string, quantity float64, stopLossPrice float64, takeProfitPrices []float64) error {
+// SetStopLossTakeProfit 设置止损止盈（模拟交易所），并返回结构化结果方便上层统一记录。
+func (s *SimulatedExchange) SetStopLossTakeProfit(ctx context.Context, symbol string, positionSide string, quantity float64, stopLossPrice float64, takeProfitPrices []float64) (*ProtectionSetupResult, error) {
 	// 模拟交易所的止损止盈设置逻辑
 	posSide := PositionSide(positionSide)
 	s.SetPositionSLTP(symbol, posSide, quantity, stopLossPrice, takeProfitPrices, "")
-	return nil
+	result := &ProtectionSetupResult{
+		Requested: true,
+		Status:    "success",
+		Reason:    "simulated protection orders recorded locally",
+	}
+	if stopLossPrice > 0 {
+		result.StopLoss = &ProtectionLegResult{
+			Requested:    true,
+			Status:       "success",
+			TriggerPrice: stopLossPrice,
+			Reason:       "simulated stop loss recorded locally",
+		}
+	}
+	for _, price := range takeProfitPrices {
+		if price <= 0 {
+			continue
+		}
+		result.TakeProfit = &ProtectionLegResult{
+			Requested:    true,
+			Status:       "success",
+			TriggerPrice: price,
+			Reason:       "simulated take profit recorded locally",
+		}
+		break
+	}
+	return result, nil
 }
 
 // SetPriceProvider 设置外部价格提供者（用于获取当前市场价格）
@@ -335,7 +360,7 @@ func (s *SimulatedExchange) createOrderInstantMode(orderID string, param CreateO
 	return result, nil
 }
 
-// OnKline1m 处理1m K线数据，驱动撮合判断
+// OnKline1m 处理1m K线数据，驱动撮合判断。
 //
 // 撮合逻辑：
 //  1. 遍历所有待撮合订单：
@@ -351,18 +376,24 @@ func (s *SimulatedExchange) createOrderInstantMode(orderID string, param CreateO
 //     - 空头止盈：K线最低价 ≤ 止盈价 → 触发平仓
 func (s *SimulatedExchange) OnKline1m(symbol string, open, high, low, close float64, openTime int64) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	callbackResults := s.matchPendingOrders(symbol, open, high, low, close, openTime)
+	if result := s.checkPositionSLTP(symbol, high, low, close, openTime); result != nil {
+		callbackResults = append(callbackResults, result)
+	}
+	s.mu.Unlock()
 
-	// 1. 撮合待成交订单
-	s.matchPendingOrders(symbol, open, high, low, close, openTime)
-
-	// 2. 检查持仓止损止盈
-	s.checkPositionSLTP(symbol, high, low, close, openTime)
+	// 成交回调可能继续设置 SL/TP，因此必须放在解锁之后执行，避免重入死锁。
+	for _, result := range callbackResults {
+		if s.onFillCallback != nil {
+			s.onFillCallback(result)
+		}
+	}
 }
 
-// matchPendingOrders 用1m K线撮合待成交订单
-func (s *SimulatedExchange) matchPendingOrders(symbol string, open, high, low, close float64, openTime int64) {
+// matchPendingOrders 用 1m K 线撮合待成交订单，并返回需要在解锁后触发的成交结果。
+func (s *SimulatedExchange) matchPendingOrders(symbol string, open, high, low, close float64, openTime int64) []*OrderResult {
 	var filledIDs []string
+	callbackResults := make([]*OrderResult, 0)
 
 	for orderID, pending := range s.pendingOrders {
 		// 只撮合同symbol的订单
@@ -465,23 +496,21 @@ func (s *SimulatedExchange) matchPendingOrders(symbol string, open, high, low, c
 			orderID, pending.side, pending.positionSide, symbol,
 			fillPrice, open, high, low, quantity, commission)
 
-		// 回调通知上层
-		if s.onFillCallback != nil {
-			s.onFillCallback(result)
-		}
+		callbackResults = append(callbackResults, result)
 	}
 
 	// 从待撮合队列中移除已成交订单
 	for _, id := range filledIDs {
 		delete(s.pendingOrders, id)
 	}
+	return callbackResults
 }
 
-// checkPositionSLTP 检查持仓止损止盈（1m K线驱动）
-func (s *SimulatedExchange) checkPositionSLTP(symbol string, high, low, close float64, openTime int64) {
+// checkPositionSLTP 检查持仓止损止盈，并返回需要在解锁后触发的平仓结果。
+func (s *SimulatedExchange) checkPositionSLTP(symbol string, high, low, close float64, openTime int64) *OrderResult {
 	sltp, ok := s.positionSLTP[symbol]
 	if !ok {
-		return
+		return nil
 	}
 
 	var triggerPrice float64
@@ -529,7 +558,7 @@ func (s *SimulatedExchange) checkPositionSLTP(symbol string, high, low, close fl
 	}
 
 	if triggerPrice == 0 {
-		return
+		return nil
 	}
 
 	// 生成止损止盈平仓订单
@@ -565,10 +594,7 @@ func (s *SimulatedExchange) checkPositionSLTP(symbol string, high, low, close fl
 	log.Printf("[模拟撮合-1m] %s | %s | 成交价=%.2f 触发价=%.2f 高=%.2f 低=%.2f | 数量=%.4f | 策略=%s",
 		triggerReason, symbol, fillPrice, triggerPrice, high, low, quantity, sltp.strategyID)
 
-	// 回调通知上层
-	if s.onFillCallback != nil {
-		s.onFillCallback(result)
-	}
+	return result
 }
 
 // SetPositionSLTP 设置持仓止损止盈（1m K线模式下由上层在开仓成交后调用）

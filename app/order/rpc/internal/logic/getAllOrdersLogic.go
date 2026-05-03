@@ -46,7 +46,7 @@ func (l *GetAllOrdersLogic) GetAllOrders(in *pb.OrderQueryRequest) (*pb.AllOrder
 	}
 
 	items := make([]*pb.AllOrderItem, 0, len(orders))
-	lifecycleMap := svc.BuildOrderLifecycleMap(orders)
+	lifecycleMap := l.svcCtx.BuildOrderLifecycleMap(orders)
 	for _, o := range orders {
 		items = append(items, convertAllOrder(l.svcCtx, lifecycleMap, &o))
 	}
@@ -62,10 +62,11 @@ func convertAllOrder(svcCtx *svc.ServiceContext, lifecycleMap map[int64]svc.Orde
 	estimatedFee, actualFee, actualFeeAsset, actionType, positionCycleID := "", "", "", "", ""
 	harvestPathProbability, harvestPathRuleProbability, harvestPathLSTMProbability, harvestPathBookProbability, harvestPathBookSummary, harvestPathVolatilityRegime, harvestPathThresholdSource, harvestPathAppliedThreshold, harvestPathAction, harvestPathRiskLevel, harvestPathTargetSide, harvestPathReferencePrice, harvestPathMarketPrice, reason := "", "", "", "", "", "", "", "", "", "", "", "", "", ""
 	var signalReason *pb.SignalReason
+	var protection *pb.ProtectionStatus
 	if svcCtx != nil {
 		estimatedFee, actualFee, actualFeeAsset = svcCtx.AllOrderFeeFields(*o)
 		actionType, positionCycleID = svcCtx.AllOrderLifecycleFields(*o, lifecycleMap)
-		harvestPathProbability, harvestPathRuleProbability, harvestPathLSTMProbability, harvestPathBookProbability, harvestPathBookSummary, harvestPathVolatilityRegime, harvestPathThresholdSource, harvestPathAppliedThreshold, harvestPathAction, harvestPathRiskLevel, harvestPathTargetSide, harvestPathReferencePrice, harvestPathMarketPrice, reason, signalReason = svcCtx.AllOrderHarvestPathFields(*o)
+		harvestPathProbability, harvestPathRuleProbability, harvestPathLSTMProbability, harvestPathBookProbability, harvestPathBookSummary, harvestPathVolatilityRegime, harvestPathThresholdSource, harvestPathAppliedThreshold, harvestPathAction, harvestPathRiskLevel, harvestPathTargetSide, harvestPathReferencePrice, harvestPathMarketPrice, reason, signalReason, protection = svcCtx.AllOrderHarvestPathFields(*o)
 	}
 	return &pb.AllOrderItem{
 		OrderId:                     o.OrderID,
@@ -105,5 +106,6 @@ func convertAllOrder(svcCtx *svc.ServiceContext, lifecycleMap map[int64]svc.Orde
 		HarvestPathMarketPrice:      harvestPathMarketPrice,
 		Reason:                      reason,
 		SignalReason:                signalReason,
+		Protection:                  protection,
 	}
 }

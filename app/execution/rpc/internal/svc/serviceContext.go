@@ -395,9 +395,9 @@ func (s *ServiceContext) HandleSignal(ctx context.Context, sig *strategypb.Signa
 	clientID := buildSignalClientOrderID(strategyID, sig.GetTimestamp())
 
 	// 平仓信号：使用 reduce_only 参数（交易所会自动平掉对应方向的仓位）
-	reduceOnly := signalType == "CLOSE"
-	if signalType == "CLOSE" {
-		closeQty, err := s.resolveCloseQuantity(ctx, symbol, side)
+	reduceOnly := signalType == "CLOSE" || signalType == "PARTIAL_CLOSE"
+	if reduceOnly {
+		closeQty, err := s.resolveCloseQuantity(ctx, symbol, side, quantity)
 		if err != nil {
 			s.logger.LogOrderFailure(sig, exchange.StatusRejected, clientID, fmt.Sprintf("resolve close quantity failed: %v", err), quantity, s.currentHarvestPathMeta(symbol, side))
 			s.deduplicator.Remove(sigKey)
@@ -549,8 +549,7 @@ func (s *ServiceContext) handleFilledOrder(sig *strategypb.Signal, orderResult *
 		orderResult.ExecutedQuantity, orderResult.AvgPrice,
 		orderResult.Commission, orderResult.Slippage)
 
-	// 记录订单执行结果日志
-	s.logger.LogOrder(sig, orderResult, quantity, s.currentHarvestPathMeta(symbol, string(orderResult.PositionSide)))
+	var protectionResult *exchange.ProtectionSetupResult
 
 	// 开仓成交后设置止损止盈
 	if signalType == "OPEN" || signalType == "" {
@@ -559,13 +558,18 @@ func (s *ServiceContext) handleFilledOrder(sig *strategypb.Signal, orderResult *
 			if targetPositionSide == "" || targetPositionSide == string(exchange.PosBoth) {
 				targetPositionSide = string(mapSideToPositionSide(sig.GetSide()))
 			}
-			if err := s.router.SetStopLossTakeProfit(context.Background(), symbol, targetPositionSide, quantity, stopLoss, takeProfits); err != nil {
-				log.Printf("[信号] 设置止损止盈失败 | symbol=%s error=%v", symbol, err)
+			result, err := s.router.SetStopLossTakeProfit(context.Background(), symbol, targetPositionSide, quantity, stopLoss, takeProfits)
+			protectionResult = result
+			if err != nil {
+				log.Printf("[信号] 设置止损止盈失败 | symbol=%s status=%s reason=%s error=%v", symbol, resultStatus(result), resultReason(result), err)
 			} else {
-				log.Printf("[信号] 止损止盈设置成功 | symbol=%s positionSide=%s 止损=%.2f 止盈=%v", symbol, targetPositionSide, stopLoss, takeProfits)
+				log.Printf("[信号] 止损止盈设置成功 | symbol=%s positionSide=%s status=%s reason=%s 止损=%.2f 止盈=%v", symbol, targetPositionSide, resultStatus(result), resultReason(result), stopLoss, takeProfits)
 			}
 		}
 	}
+
+	// 记录订单执行结果日志，包含保护单下发结果，方便后续查询与排障。
+	s.logger.LogOrder(sig, orderResult, quantity, s.currentHarvestPathMeta(symbol, string(orderResult.PositionSide)), protectionResult)
 
 	// 1m撮合模式：开仓成交后设置止损止盈
 	if s.shouldUseSimulatedSLTP(symbol) && signalType == "OPEN" {
@@ -590,6 +594,22 @@ func (s *ServiceContext) shouldUseSimulatedSLTP(symbol string) bool {
 		return false
 	}
 	return routedExchange != nil && routedExchange.Name() == "simulated"
+}
+
+// resultStatus 提供保护单结果的安全状态读取，避免日志打印时空指针。
+func resultStatus(v *exchange.ProtectionSetupResult) string {
+	if v == nil {
+		return ""
+	}
+	return strings.TrimSpace(v.Status)
+}
+
+// resultReason 提供保护单结果的安全原因读取，避免日志打印时空指针。
+func resultReason(v *exchange.ProtectionSetupResult) string {
+	if v == nil {
+		return ""
+	}
+	return strings.TrimSpace(v.Reason)
 }
 
 // ---------------------------------------------------------------------------
@@ -655,7 +675,7 @@ func (s *ServiceContext) handleSimFill(result *exchange.OrderResult) {
 			log.Printf("[1m撮合回调] 发布订单结果失败: %v", err)
 		}
 	}
-	s.logger.LogOrder(sig, result, result.ExecutedQuantity, s.currentHarvestPathMeta(result.Symbol, string(result.PositionSide)))
+	s.logger.LogOrder(sig, result, result.ExecutedQuantity, s.currentHarvestPathMeta(result.Symbol, string(result.PositionSide)), nil)
 
 	// 4. 1m撮合模式下，开仓成交后补设模拟止损止盈。
 	if signalType == "OPEN" && s.shouldUseSimulatedSLTP(result.Symbol) {
@@ -696,11 +716,55 @@ func cloneSignalReason(v *strategypb.SignalReason) *strategypb.SignalReason {
 		SetupContext:     v.GetSetupContext(),
 		PathContext:      v.GetPathContext(),
 		ExecutionContext: v.GetExecutionContext(),
+		ExitReasonKind:   v.GetExitReasonKind(),
+		ExitReasonLabel:  v.GetExitReasonLabel(),
+		RouteBucket:      v.GetRouteBucket(),
+		RouteReason:      v.GetRouteReason(),
+		RouteTemplate:    v.GetRouteTemplate(),
+		Allocator:        cloneAllocatorStatus(v.GetAllocator()),
+		Range:            cloneRangeSignalReason(v.GetRange()),
 	}
 	if tags := v.GetTags(); len(tags) > 0 {
 		out.Tags = append([]string(nil), tags...)
 	}
 	return out
+}
+
+// cloneRangeSignalReason 复制 signal 携带的 range 摘要，避免下游复用原对象。
+func cloneRangeSignalReason(v *strategypb.RangeSignalReason) *strategypb.RangeSignalReason {
+	if v == nil {
+		return nil
+	}
+	return &strategypb.RangeSignalReason{
+		H1RangeOk:      v.GetH1RangeOk(),
+		H1AdxOk:        v.GetH1AdxOk(),
+		H1BollWidthOk:  v.GetH1BollWidthOk(),
+		M15TouchLower:  v.GetM15TouchLower(),
+		M15RsiTurnUp:   v.GetM15RsiTurnUp(),
+		M15TouchUpper:  v.GetM15TouchUpper(),
+		M15RsiTurnDown: v.GetM15RsiTurnDown(),
+	}
+}
+
+// cloneAllocatorStatus 复制 signal 携带的 allocator 快照，避免下游复用原对象。
+func cloneAllocatorStatus(v *strategypb.PositionAllocatorStatus) *strategypb.PositionAllocatorStatus {
+	if v == nil {
+		return nil
+	}
+	return &strategypb.PositionAllocatorStatus{
+		Template:       v.GetTemplate(),
+		RouteBucket:    v.GetRouteBucket(),
+		RouteReason:    v.GetRouteReason(),
+		Score:          v.GetScore(),
+		ScoreSource:    v.GetScoreSource(),
+		BucketBudget:   v.GetBucketBudget(),
+		StrategyWeight: v.GetStrategyWeight(),
+		SymbolWeight:   v.GetSymbolWeight(),
+		RiskScale:      v.GetRiskScale(),
+		PositionBudget: v.GetPositionBudget(),
+		TradingPaused:  v.GetTradingPaused(),
+		PauseReason:    v.GetPauseReason(),
+	}
 }
 
 func cloneIndicators(v map[string]float64) map[string]float64 {
@@ -848,7 +912,8 @@ func (s *ServiceContext) currentHarvestPathMeta(symbol, side string) *orderlog.H
 	}
 }
 
-func (s *ServiceContext) resolveCloseQuantity(ctx context.Context, symbol, side string) (float64, error) {
+// resolveCloseQuantity 根据当前交易所仓位和策略请求的平仓数量，计算本次 reduce-only 应实际下发的数量。
+func (s *ServiceContext) resolveCloseQuantity(ctx context.Context, symbol, side string, requestedQty float64) (float64, error) {
 	account, err := s.router.GetAccountInfo(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("get account info: %v", err)
@@ -867,6 +932,9 @@ func (s *ServiceContext) resolveCloseQuantity(ctx context.Context, symbol, side 
 		if !wantPositive && pos.PositionAmount < 0 {
 			totalQty += -pos.PositionAmount
 		}
+	}
+	if requestedQty > 0 && requestedQty < totalQty {
+		return requestedQty, nil
 	}
 	return totalQty, nil
 }
@@ -922,6 +990,14 @@ func orderlogSignalReasonMap(reason *strategypb.SignalReason) map[string]interfa
 		"setup_context":     strings.TrimSpace(reason.GetSetupContext()),
 		"path_context":      strings.TrimSpace(reason.GetPathContext()),
 		"execution_context": strings.TrimSpace(reason.GetExecutionContext()),
+		"exit_reason_kind":  strings.TrimSpace(reason.GetExitReasonKind()),
+		"exit_reason_label": strings.TrimSpace(reason.GetExitReasonLabel()),
+		"route_bucket":      strings.TrimSpace(reason.GetRouteBucket()),
+		"route_reason":      strings.TrimSpace(reason.GetRouteReason()),
+		"route_template":    strings.TrimSpace(reason.GetRouteTemplate()),
+	}
+	if allocator := allocatorStatusMap(reason.GetAllocator()); allocator != nil {
+		out["allocator"] = allocator
 	}
 	if tags := reason.GetTags(); len(tags) > 0 {
 		out["tags"] = append([]string(nil), tags...)
@@ -935,6 +1011,48 @@ func orderlogSignalReasonMap(reason *strategypb.SignalReason) map[string]interfa
 			}
 		case []string:
 			if len(x) > 0 {
+				empty = false
+			}
+		}
+	}
+	if empty {
+		return nil
+	}
+	return out
+}
+
+// allocatorStatusMap 将 allocator 快照转成日志/事件可直接序列化的 map。
+func allocatorStatusMap(v *strategypb.PositionAllocatorStatus) map[string]interface{} {
+	if v == nil {
+		return nil
+	}
+	out := map[string]interface{}{
+		"template":        strings.TrimSpace(v.GetTemplate()),
+		"route_bucket":    strings.TrimSpace(v.GetRouteBucket()),
+		"route_reason":    strings.TrimSpace(v.GetRouteReason()),
+		"score":           v.GetScore(),
+		"score_source":    strings.TrimSpace(v.GetScoreSource()),
+		"bucket_budget":   v.GetBucketBudget(),
+		"strategy_weight": v.GetStrategyWeight(),
+		"symbol_weight":   v.GetSymbolWeight(),
+		"risk_scale":      v.GetRiskScale(),
+		"position_budget": v.GetPositionBudget(),
+		"trading_paused":  v.GetTradingPaused(),
+		"pause_reason":    strings.TrimSpace(v.GetPauseReason()),
+	}
+	empty := true
+	for _, value := range out {
+		switch x := value.(type) {
+		case string:
+			if x != "" {
+				empty = false
+			}
+		case float64:
+			if x != 0 {
+				empty = false
+			}
+		case bool:
+			if x {
 				empty = false
 			}
 		}

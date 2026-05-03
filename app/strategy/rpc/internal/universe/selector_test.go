@@ -5,15 +5,20 @@ import (
 	"time"
 
 	"exchange-system/app/strategy/rpc/internal/marketstate"
+	"exchange-system/app/strategy/rpc/internal/strategyrouter"
+	"exchange-system/common/featureengine"
+	"exchange-system/common/regimejudge"
 )
 
 func TestSelectorEvaluate(t *testing.T) {
 	now := time.Date(2026, 4, 26, 7, 0, 0, 0, time.UTC)
 	selector := NewSelector(Config{
 		CandidateSymbols: []string{"BTCUSDT", "SOLUSDT"},
-		StaticTemplateMap: map[string]string{
-			"BTCUSDT": "btc-core",
-			"SOLUSDT": "high-beta",
+		RouterConfig: strategyrouter.Config{
+			StaticTemplateMap: map[string]string{
+				"BTCUSDT": "btc-core",
+				"SOLUSDT": "high-beta",
+			},
 		},
 		FreshnessWindow: 3 * time.Minute,
 		RequireFinal:    true,
@@ -55,8 +60,10 @@ func TestSelectorEvaluateStaleSnapshot(t *testing.T) {
 	now := time.Date(2026, 4, 26, 7, 0, 0, 0, time.UTC)
 	selector := NewSelector(Config{
 		CandidateSymbols: []string{"ETHUSDT"},
-		StaticTemplateMap: map[string]string{
-			"ETHUSDT": "eth-core",
+		RouterConfig: strategyrouter.Config{
+			StaticTemplateMap: map[string]string{
+				"ETHUSDT": "eth-core",
+			},
 		},
 		FreshnessWindow: 3 * time.Minute,
 		RequireFinal:    true,
@@ -87,15 +94,17 @@ func TestSelectorEvaluateBTCTrendTemplate(t *testing.T) {
 	now := time.Date(2026, 4, 26, 7, 0, 0, 0, time.UTC)
 	selector := NewSelector(Config{
 		CandidateSymbols: []string{"BTCUSDT"},
-		StaticTemplateMap: map[string]string{
-			"BTCUSDT": "btc-core",
+		RouterConfig: strategyrouter.Config{
+			StaticTemplateMap: map[string]string{
+				"BTCUSDT": "btc-core",
+			},
+			BTCTrendTemplate:  "btc-trend",
+			BTCTrendAtrPctMax: 0.003,
 		},
-		BTCTrendTemplate:  "btc-trend",
-		BTCTrendAtrPctMax: 0.003,
-		FreshnessWindow:   3 * time.Minute,
-		RequireFinal:      true,
-		RequireTradable:   true,
-		RequireClean:      true,
+		FreshnessWindow: 3 * time.Minute,
+		RequireFinal:    true,
+		RequireTradable: true,
+		RequireClean:    true,
 	})
 
 	got := selector.Evaluate(now, map[string]Snapshot{
@@ -125,15 +134,17 @@ func TestSelectorEvaluateBTCTrendTemplateWithMarketState(t *testing.T) {
 	now := time.Date(2026, 4, 26, 7, 0, 0, 0, time.UTC)
 	selector := NewSelector(Config{
 		CandidateSymbols: []string{"BTCUSDT"},
-		StaticTemplateMap: map[string]string{
-			"BTCUSDT": "btc-core",
+		RouterConfig: strategyrouter.Config{
+			StaticTemplateMap: map[string]string{
+				"BTCUSDT": "btc-core",
+			},
+			BTCTrendTemplate:  "btc-trend",
+			BTCTrendAtrPctMax: 0.003,
 		},
-		BTCTrendTemplate:  "btc-trend",
-		BTCTrendAtrPctMax: 0.003,
-		FreshnessWindow:   3 * time.Minute,
-		RequireFinal:      true,
-		RequireTradable:   true,
-		RequireClean:      true,
+		FreshnessWindow: 3 * time.Minute,
+		RequireFinal:    true,
+		RequireTradable: true,
+		RequireClean:    true,
 	})
 
 	got := selector.Evaluate(now, map[string]Snapshot{
@@ -164,14 +175,16 @@ func TestSelectorEvaluateBreakoutTemplateWithMarketState(t *testing.T) {
 	now := time.Date(2026, 4, 26, 7, 0, 0, 0, time.UTC)
 	selector := NewSelector(Config{
 		CandidateSymbols: []string{"ETHUSDT"},
-		StaticTemplateMap: map[string]string{
-			"ETHUSDT": "eth-core",
+		RouterConfig: strategyrouter.Config{
+			StaticTemplateMap: map[string]string{
+				"ETHUSDT": "eth-core",
+			},
+			BreakoutTemplate: "breakout-core",
 		},
-		BreakoutTemplate: "breakout-core",
-		FreshnessWindow:  3 * time.Minute,
-		RequireFinal:     true,
-		RequireTradable:  true,
-		RequireClean:     true,
+		FreshnessWindow: 3 * time.Minute,
+		RequireFinal:    true,
+		RequireTradable: true,
+		RequireClean:    true,
 	})
 
 	got := selector.Evaluate(now, map[string]Snapshot{
@@ -202,10 +215,12 @@ func TestSelectorEvaluateRangeTemplateWithMarketState(t *testing.T) {
 	now := time.Date(2026, 4, 26, 7, 0, 0, 0, time.UTC)
 	selector := NewSelector(Config{
 		CandidateSymbols: []string{"ETHUSDT"},
-		StaticTemplateMap: map[string]string{
-			"ETHUSDT": "eth-core",
+		RouterConfig: strategyrouter.Config{
+			StaticTemplateMap: map[string]string{
+				"ETHUSDT": "eth-core",
+			},
+			RangeTemplate: "range-core",
 		},
-		RangeTemplate:   "range-core",
 		FreshnessWindow: 3 * time.Minute,
 		RequireFinal:    true,
 		RequireTradable: true,
@@ -236,21 +251,130 @@ func TestSelectorEvaluateRangeTemplateWithMarketState(t *testing.T) {
 	}
 }
 
+func TestSelectorEvaluateUsesRegimeAnalysisWithoutMarketState(t *testing.T) {
+	now := time.Date(2026, 4, 26, 7, 0, 0, 0, time.UTC)
+	selector := NewSelector(Config{
+		CandidateSymbols: []string{"ETHUSDT", "BTCUSDT"},
+		RouterConfig: strategyrouter.Config{
+			StaticTemplateMap: map[string]string{
+				"ETHUSDT": "eth-core",
+				"BTCUSDT": "btc-core",
+			},
+			RangeTemplate:     "range-core",
+			BTCTrendTemplate:  "btc-trend",
+			BTCTrendAtrPctMax: 0.003,
+		},
+		FreshnessWindow: 3 * time.Minute,
+		RequireFinal:    true,
+		RequireTradable: true,
+		RequireClean:    true,
+	})
+
+	got := selector.Evaluate(now, map[string]Snapshot{
+		"ETHUSDT": {
+			Symbol:      "ETHUSDT",
+			UpdatedAt:   now.Add(-time.Minute),
+			IsTradable:  true,
+			IsFinal:     true,
+			IsDirty:     false,
+			LastEventMs: now.UnixMilli(),
+			Close:       100,
+			Atr:         0.2,
+			MarketAnalysis: regimejudge.Analysis{
+				Healthy:    true,
+				Fresh:      true,
+				RangeMatch: true,
+				Features: featureengine.Features{
+					AtrPct: 0.002,
+				},
+			},
+		},
+		"BTCUSDT": {
+			Symbol:      "BTCUSDT",
+			UpdatedAt:   now.Add(-time.Minute),
+			IsTradable:  true,
+			IsFinal:     true,
+			IsDirty:     false,
+			LastEventMs: now.UnixMilli(),
+			Close:       100,
+			Atr:         0.2,
+			MarketAnalysis: regimejudge.Analysis{
+				Healthy:         true,
+				Fresh:           true,
+				BullTrendStrict: true,
+				Features: featureengine.Features{
+					AtrPct: 0.002,
+				},
+			},
+		},
+	})
+
+	if got[0].Template != "range-core" || got[0].Reason != "market_state_range" {
+		t.Fatalf("ETHUSDT = %+v, want range-core via analysis", got[0])
+	}
+	if got[1].Template != "btc-trend" || got[1].Reason != "market_state_trend" {
+		t.Fatalf("BTCUSDT = %+v, want btc-trend via analysis", got[1])
+	}
+}
+
+func TestSelectorEvaluateUsesRouterConfigEntry(t *testing.T) {
+	now := time.Date(2026, 4, 26, 7, 0, 0, 0, time.UTC)
+	selector := NewSelector(Config{
+		CandidateSymbols: []string{"ETHUSDT"},
+		FreshnessWindow:  3 * time.Minute,
+		RequireFinal:     true,
+		RequireTradable:  true,
+		RequireClean:     true,
+		RouterConfig: strategyrouter.Config{
+			StaticTemplateMap: map[string]string{
+				"ETHUSDT": "eth-core",
+			},
+			RangeTemplate: "range-core",
+		},
+	})
+	got := selector.Evaluate(now, map[string]Snapshot{
+		"ETHUSDT": {
+			Symbol:      "ETHUSDT",
+			UpdatedAt:   now.Add(-time.Minute),
+			IsTradable:  true,
+			IsFinal:     true,
+			IsDirty:     false,
+			LastEventMs: now.UnixMilli(),
+			MarketAnalysis: regimejudge.Analysis{
+				Healthy:    true,
+				Fresh:      true,
+				RangeMatch: true,
+				Features: featureengine.Features{
+					AtrPct: 0.002,
+				},
+			},
+		},
+	})
+	if len(got) != 1 {
+		t.Fatalf("Evaluate() len = %d, want 1", len(got))
+	}
+	if got[0].Template != "range-core" || got[0].Reason != "market_state_range" {
+		t.Fatalf("Evaluate() = %+v, want range-core/market_state_range", got[0])
+	}
+}
+
 func TestSelectorEvaluateSOLHighBetaSafeAndDisable(t *testing.T) {
 	now := time.Date(2026, 4, 26, 7, 0, 0, 0, time.UTC)
 	selector := NewSelector(Config{
 		CandidateSymbols: []string{"SOLUSDT"},
-		StaticTemplateMap: map[string]string{
-			"SOLUSDT": "high-beta",
+		RouterConfig: strategyrouter.Config{
+			StaticTemplateMap: map[string]string{
+				"SOLUSDT": "high-beta",
+			},
+			HighBetaSafeTemplate:  "high-beta-safe",
+			HighBetaSafeSymbols:   []string{"SOLUSDT"},
+			HighBetaSafeAtrPct:    0.006,
+			HighBetaDisableAtrPct: 0.012,
 		},
-		HighBetaSafeTemplate:  "high-beta-safe",
-		HighBetaSafeSymbols:   []string{"SOLUSDT"},
-		HighBetaSafeAtrPct:    0.006,
-		HighBetaDisableAtrPct: 0.012,
-		FreshnessWindow:       3 * time.Minute,
-		RequireFinal:          true,
-		RequireTradable:       true,
-		RequireClean:          true,
+		FreshnessWindow: 3 * time.Minute,
+		RequireFinal:    true,
+		RequireTradable: true,
+		RequireClean:    true,
 	})
 
 	got := selector.Evaluate(now, map[string]Snapshot{

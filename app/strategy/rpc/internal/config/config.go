@@ -37,25 +37,27 @@ type Config struct {
 	Strategies []StrategyConfig
 	Templates  map[string]map[string]float64
 	Universe   struct {
-		Enabled               bool
-		BootstrapDuration     time.Duration
-		EvaluateInterval      time.Duration
-		FreshnessWindow       time.Duration
-		MinEnabledDuration    time.Duration
-		CooldownDuration      time.Duration
-		RequireFinal          bool
-		RequireTradable       bool
-		RequireClean          bool
-		CandidateSymbols      []string
-		StaticTemplateMap     map[string]string
-		RangeTemplate         string
-		BreakoutTemplate      string
-		BTCTrendTemplate      string
-		BTCTrendAtrPctMax     float64
-		HighBetaSafeTemplate  string
-		HighBetaSafeSymbols   []string
-		HighBetaSafeAtrPct    float64
-		HighBetaDisableAtrPct float64
+		Enabled            bool
+		BootstrapDuration  time.Duration
+		EvaluateInterval   time.Duration
+		FreshnessWindow    time.Duration
+		MinEnabledDuration time.Duration
+		CooldownDuration   time.Duration
+		RequireFinal       bool
+		RequireTradable    bool
+		RequireClean       bool
+		CandidateSymbols   []string
+		RouterConfig       struct {
+			StaticTemplateMap     map[string]string `json:",optional"`
+			RangeTemplate         string            `json:",optional"`
+			BreakoutTemplate      string            `json:",optional"`
+			BTCTrendTemplate      string            `json:",optional"`
+			BTCTrendAtrPctMax     float64           `json:",optional"`
+			HighBetaSafeTemplate  string            `json:",optional"`
+			HighBetaSafeSymbols   []string          `json:",optional"`
+			HighBetaSafeAtrPct    float64           `json:",optional"`
+			HighBetaDisableAtrPct float64           `json:",optional"`
+		} `json:",optional"`
 	}
 
 	Strategy struct {

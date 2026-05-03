@@ -66,7 +66,7 @@ func (c *OKXClient) GetAccountInfo(ctx context.Context) (*AccountResult, error) 
 	return nil, fmt.Errorf("okx GetAccountInfo not implemented yet")
 }
 
-// SetStopLossTakeProfit 设置止损止盈（未实现）
-func (c *OKXClient) SetStopLossTakeProfit(ctx context.Context, symbol string, positionSide string, quantity float64, stopLossPrice float64, takeProfitPrices []float64) error {
-	return fmt.Errorf("okx SetStopLossTakeProfit not implemented yet")
+// SetStopLossTakeProfit 设置止损止盈（未实现）。
+func (c *OKXClient) SetStopLossTakeProfit(ctx context.Context, symbol string, positionSide string, quantity float64, stopLossPrice float64, takeProfitPrices []float64) (*ProtectionSetupResult, error) {
+	return nil, fmt.Errorf("okx SetStopLossTakeProfit not implemented yet")
 }

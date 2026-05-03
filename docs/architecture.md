@@ -175,7 +175,7 @@
 │  │   ┌──────────────────────────────────────────────────────────────┐     │  │
 │  │   │  多头趋势: 价格 > EMA21 > EMA55                               │     │  │
 │  │   │  空头趋势: 价格 < EMA21 < EMA55                               │     │  │
-│  │   │  震荡: 不交易                                                  │     │  │
+│  │   │  震荡: 切换到震荡交易策略                                      │     │  │
 │  │   └──────────────────────────────────────────────────────────────┘     │  │
 │  │                              │                                         │  │
 │  │                              ▼                                         │  │
@@ -237,6 +237,10 @@
 │  └────────────────────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
+
+补充说明：
+- 当上游路由结果落到 `range` 桶时，运行时不再简单按“震荡不交易”处理，而是切换到独立的震荡交易策略变体。
+- 震荡交易策略的完整设计说明、参数定义和风控细节见 [volatility_strategy_technical_doc.md](file:///Users/bytedance/GolandProjects/exchange-system/docs/volatility_strategy_technical_doc.md)。
 
 ### 2.3 订单执行流 (Order Execution Pipeline)
 
@@ -1126,10 +1130,10 @@ Step 7. 执行策略
    • 已经有接近它的能力，但还不是独立、清晰、可解释的 Top N 引擎
 
 2. 独立 Breakout Worker
-   • 当前更多还是模板和参数差异，还不是真正独立的 breakout worker
+   • 当前更多还是模板和参数差异，还不是真正独立的 breakout worker；策略设计细节见 [breakout_strategy_technical_doc.md](file:///Users/bytedance/GolandProjects/exchange-system/docs/breakout_strategy_technical_doc.md)
 
 3. 独立 MeanReversion Worker
-   • Range 逻辑已经有了，但还没抽成目标架构里的独立均值回归 worker
+   • Range 逻辑已经有了，但还没抽成目标架构里的独立均值回归 worker；策略设计细节见 [volatility_strategy_technical_doc.md](file:///Users/bytedance/GolandProjects/exchange-system/docs/volatility_strategy_technical_doc.md)
 ```
 
 对应当前代码落点:
@@ -1139,8 +1143,8 @@ Step 7. 执行策略
 | [symbolranker](file:///Users/bytedance/GolandProjects/exchange-system/common/symbolranker) | 提供独立 `Rank / TopN` 能力雏形，但还没有成为主链路唯一入口 |
 | [selector.go](file:///Users/bytedance/GolandProjects/exchange-system/app/market/rpc/internal/universepool/selector.go) | 当前最接近 `Symbol Ranker` 的运行接线点，混合了状态判断和排序偏好 |
 | [state.go](file:///Users/bytedance/GolandProjects/exchange-system/app/market/rpc/internal/universepool/state.go) | 承载 `rank_detail` 等结构化字段，是排序结果日志化的基础 |
-| [breakout.go](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/strategy/breakout.go) | 已有 `Breakout` 逻辑雏形，但仍作为 `trend_following` 变体运行 |
-| [range.go](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/strategy/range.go) | 已有 `Range/MeanReversion` 逻辑雏形，但仍作为 `trend_following` 变体运行 |
+| [breakout.go](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/strategy/breakout.go) | 已有 `Breakout` 逻辑雏形，但仍作为 `trend_following` 变体运行；对应策略说明见 [breakout_strategy_technical_doc.md](file:///Users/bytedance/GolandProjects/exchange-system/docs/breakout_strategy_technical_doc.md) |
+| [range.go](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/strategy/range.go) | 已有 `Range/MeanReversion` 逻辑雏形，但仍作为 `trend_following` 变体运行；对应策略说明见 [volatility_strategy_technical_doc.md](file:///Users/bytedance/GolandProjects/exchange-system/docs/volatility_strategy_technical_doc.md) |
 
 还没开始:
 
@@ -1190,14 +1194,389 @@ Step 7. 执行策略
 但距离“自动选币 + 自动选策略 + 自动分仓”的统一动态决策引擎，还差最后一层架构收拢。
 ```
 
-建议优先级:
+### 2.10 开发优先级清单
+
+说明:
 
 ```text
-P1. 先抽出统一 Feature Engine
-P1. 再把 Symbol Ranker 从 UniversePool 中独立
-P2. 统一 Regime Judge
-P2. 把 strategy universe 升级成真正的 Strategy Router
-P3. 最后做统一 Position Allocator
+这一节回答的是：剩下那 10 项未完全实现能力，下一步到底先做什么最划算。
+排序标准不是“概念上最高级”，而是“对当前实盘稳定性、架构收拢和后续扩展最有帮助”。
+```
+
+现在最该做:
+
+```text
+1. Feature Engine
+   • 原因：特征已经很多，但仍分散在 market / strategy 多处；不先统一，后面的 Ranker、Router、Allocator 都会继续重复取数和重复定义
+
+2. Regime Judge
+   • 原因：market 和 strategy 两边各有一套状态判断，已经出现过“上游说 range、下游又按另一套理解”的分裂风险
+
+3. Strategy Router
+   • 原因：当前模板切换已经能用，但还不是完整独立的路由中心；后面继续扩 trend / breakout / range 时，复杂度会持续上升
+
+4. 统一 Position Allocator
+   • 原因：weights 已经真实影响仓位，但还缺独立统一分仓器；这会直接影响实盘的风险一致性和多标的资金分配质量
+
+5. 统一动态决策引擎
+   • 原因：它不是单点功能，而是上面 4 项逐步收拢后的结果；应该边收拢边成型，而不是最后单独补一个壳
+```
+
+可以后做:
+
+```text
+1. Symbol Ranker
+   • 原因：现在已经有 UniversePool + rank_detail + TopN 雏形，短期还能支撑验证；但优先级低于统一特征、统一状态、统一路由和统一分仓
+
+2. 独立 Breakout Worker
+   • 原因：Breakout 已有真实逻辑，短期继续以 strategy variant 方式运行问题不大；更大的收益来自先收拢上层决策结构
+
+3. 独立 MeanReversion Worker
+   • 原因：Range 也已具备真实开仓能力，暂时不独立拆 worker，不影响继续验证和调参
+```
+
+暂时不急:
+
+```text
+1. Orderbook 驱动主决策
+   • 原因：订单簿能力现在更适合作为风险辅助层；如果过早拉进主决策核心，会明显增加复杂度和调参成本
+
+2. 更彻底的多 Worker 架构美化
+   • 原因：在 Feature / Regime / Router / Allocator 还没收拢前，先拆很多独立 worker，收益有限，维护成本反而会上升
+```
+
+如果按实际落地顺序排:
+
+```text
+1. Feature Engine
+2. Regime Judge
+3. Strategy Router
+4. 统一 Position Allocator
+5. 统一动态决策引擎
+6. Symbol Ranker
+7. 独立 Breakout Worker
+8. 独立 MeanReversion Worker
+9. Orderbook 驱动主决策
+```
+
+一句话判断:
+
+```text
+现在最该补的不是再加新策略，而是把“特征、状态、路由、分仓”这四层先收拢成稳定中台。
+```
+
+### 2.10.1 重点能力详细实现方案
+
+这一小节回答的是：
+
+```text
+如果现在就按代码继续推进，
+Regime Judge、Strategy Router、统一 Position Allocator、统一动态决策引擎
+这 4 项到底应该怎么落，
+各自的输入输出是什么，
+当前已经做到哪，
+下一步最小改动应该改哪里。
+```
+
+#### A. Regime Judge
+
+目标:
+
+```text
+把 market 和 strategy 两边对 trend / breakout / range 的底层解释统一成一个公共判断层，
+上层不再各自读原始 K 线细节，而是统一消费结构化 Analysis。
+```
+
+统一输入:
+
+```text
+输入不是原始 Kline，
+而是 Feature Engine 产出的统一特征：
+
+• close
+• ema21 / ema55
+• atr / atr_pct
+• volume
+• updated_at
+• healthy / freshness
+```
+
+统一输出:
+
+```text
+最小输出结构应稳定为：
+
+Analysis {
+  Healthy
+  Fresh
+  RangeMatch
+  BreakoutMatch
+  BullTrendStrict
+  BearTrendStrict
+  BullTrendAligned
+  BearTrendAligned
+  Features
+}
+```
+
+当前代码落点:
+
+```text
+• common/regimejudge/judge.go
+  已经是统一判态核心
+
+• app/strategy/rpc/internal/marketstate/detector.go
+  已开始复用统一 Analysis，再输出 strategy 侧 MarketState Result
+
+• app/market/rpc/internal/universepool/selector.go
+  已在逐步从旧包装方法收拢到 Analysis 视角
+```
+
+最小实现步骤:
+
+```text
+1. 所有上游先统一走 Feature Engine，避免 Regime Judge 自己重复拼特征
+2. market 和 strategy 两边都优先调用 regimejudge.Analyze(...)
+3. 上层只允许依赖 Analysis 或其派生结果，不再直接重复写：
+   close > ema21 > ema55
+   atr_pct > xxx
+   atr_pct < xxx
+4. marketstate.Result 只负责“给上层兼容旧状态枚举”，
+   Analysis 才是底层单一事实来源
+5. 后续新增 breakout/range/trend 细节时，只改 Regime Judge，不改多处上层业务判断
+```
+
+验收标准:
+
+```text
+1. market / strategy 不再各自维护一套趋势、突破、震荡判断
+2. marketstate.Aggregate 优先基于 Analysis.MatchCounts 聚合，而不是只看单一 State
+3. 排日志时，marketstate / universe / weights 的状态解释不会互相打架
+```
+
+#### B. Strategy Router
+
+目标:
+
+```text
+把“某个 symbol 当前该用哪个模板、属于哪个策略桶、为什么这么选”
+从 universe.Selector 里拆成一个显式、可复用、可解释的路由中心。
+```
+
+统一输入:
+
+```text
+Router 输入应只接最小必要上下文：
+
+• symbol
+• MarketAnalysis
+• MarketState
+• 少量兼容字段：close / atr / ema21 / ema55
+• 路由配置：range_template / breakout_template / btc_trend_template 等
+```
+
+统一输出:
+
+```text
+Decision {
+  BaseTemplate
+  Template
+  Bucket
+  Enabled
+  Reason
+}
+```
+
+当前代码落点:
+
+```text
+• app/strategy/rpc/internal/strategyrouter/router.go
+  已经是第一版显式 Router
+
+• app/strategy/rpc/internal/universe/selector.go
+  已开始退化成“健康门禁 + 调用 Router + 输出 DesiredStrategy”
+```
+
+最小实现步骤:
+
+```text
+1. universe.Selector 不再自己散写模板切换 if/else
+2. 所有模板切换都统一由 Router.Route(...) 输出
+3. Router 同时输出：
+   • route_bucket
+   • route_reason
+   • route_template
+4. universe / weights / decision / signal / Kafka 都透传这 3 个字段
+5. 后续新增 high-beta-safe、breakout-core、range-core 时，只扩 Router 规则和配置
+```
+
+验收标准:
+
+```text
+1. 某个币为什么走到 breakout-core，不需要看多处 if/else 才能拼出来
+2. universe 日志直接能看到 route_bucket / route_reason
+3. decision -> signal -> execution -> order/query 继续保留同一套路由解释
+```
+
+#### C. 统一 Position Allocator
+
+目标:
+
+```text
+把“策略桶资金配比 + symbol 权重 + 风险缩放 + 暂停交易”
+收拢成一个单独的统一分仓器，
+让 strategy 不再自己到处拼 position size。
+```
+
+统一输入:
+
+```text
+Allocator 输入至少应包括：
+
+• Aggregate MarketState
+• MatchCounts
+• RegimeAnalyses
+• Universe 输出的 symbol / template / route_bucket / route_reason
+• SymbolScores
+• 风险输入：loss_streak / daily_loss_pct / drawdown_pct
+• 市场脉冲：avg_atr_pct / avg_volume / healthy_symbol_count
+```
+
+统一输出:
+
+```text
+Output {
+  Recommendations[]
+  MatchCounts
+  StrategyMix
+  MarketPaused
+  MarketPauseReason
+  CoolingUntil
+}
+
+Recommendation {
+  symbol
+  template
+  route_bucket
+  route_reason
+  strategy_weight
+  symbol_weight
+  risk_scale
+  position_budget
+}
+```
+
+当前代码落点:
+
+```text
+• app/strategy/rpc/internal/weights/engine.go
+  已是第一版 Position Allocator 主体
+
+• app/strategy/rpc/internal/weights/logger.go
+  已能把 match_counts / strategy_mix / route_bucket / route_reason 写进日志
+
+• TrendFollowingStrategy.applyWeightRecommendation()
+  已开始在真实发单前使用最新预算建议
+```
+
+最小实现步骤:
+
+```text
+1. 统一由 weights.Engine 负责计算策略桶配比
+2. 策略桶配比优先来自 MatchCounts，而不是只看单一 MarketState
+3. symbol 权重优先来自 Router 输出和 RegimeAnalysis，再回退到默认偏好
+4. 风险缩放、连亏保护、市场降温统一在 Allocator 内完成
+5. strategy 实例只消费 Recommendation，不再自己做第二次资金解释
+```
+
+验收标准:
+
+```text
+1. weights/_meta 能解释“为什么这轮是这个桶配比”
+2. weights/{symbol} 能解释“为什么这个币预算是这么多”
+3. signal / decision / execution 下游拿到的是统一预算结果，而不是各自二次计算
+```
+
+#### D. 统一动态决策引擎
+
+目标:
+
+```text
+把下面这 4 层真正串成一条稳定主链路：
+
+Feature Engine
+-> Regime Judge
+-> Strategy Router
+-> Position Allocator
+
+让系统从“多处各算一部分”
+收拢成“统一输入、统一解释、统一日志、统一下游消费”。
+```
+
+推荐主链路:
+
+```text
+1. Feature Engine 产出统一 Features
+2. Regime Judge 产出单币 Analysis
+3. marketstate.Aggregate 产出全局 AggregateResult + MatchCounts
+4. Strategy Router 为每个 symbol 输出 template / bucket / reason
+5. Position Allocator 输出 strategy_mix + recommendation
+6. strategy 实例消费 recommendation，生成 decision / signal
+7. Kafka / execution / order / query 继续透传 route_* 与 signal_reason
+```
+
+当前代码落点:
+
+```text
+最接近当前统一动态决策引擎主链的位置是：
+
+• common/featureengine
+• common/regimejudge
+• app/strategy/rpc/internal/marketstate
+• app/strategy/rpc/internal/strategyrouter
+• app/strategy/rpc/internal/weights
+• app/strategy/rpc/internal/svc/serviceContext.go
+```
+
+为什么说它现在“已经有主干，但还没完全收拢”:
+
+```text
+1. Feature Engine 已经有统一核心，但 market / strategy 仍有少量旧取数字段残留
+2. Regime Judge 已抽公共层，但上层仍保留少量兼容 fallback
+3. Router 已独立，但还只是 strategy 侧路由中心，不是更广义决策中心
+4. Allocator 已经能真实出预算，但还主要依附在 weights.Engine 内
+5. Symbol Ranker 仍与 market UniversePool 部分耦合，尚未完全独立
+```
+
+建议推进顺序:
+
+```text
+第一阶段：
+先保证 Feature / Analysis / Router / Weights 这 4 层日志完全对齐
+
+第二阶段：
+把 Position Allocator 输出变成 strategy 实例唯一预算来源
+
+第三阶段：
+再把 Ranker 从 UniversePool 中独立出来，
+变成 Router 和 Allocator 的共同上游
+```
+
+最终验收标准:
+
+```text
+如果要解释“为什么今天做 BTC，用 breakout-core，给 0.35 预算，并真的发了 OPEN”，
+只需要顺着一条链就能看完：
+
+Features
+-> Analysis
+-> route_reason / route_bucket / route_template
+-> match_counts / strategy_mix
+-> position_budget
+-> decision / signal / Kafka / execution / order
+
+中间不需要再去不同模块拼多套口径，
+这就说明统一动态决策引擎真正成型了。
 ```
 
 ---
@@ -2825,13 +3204,17 @@ Phase 5 当前不仅会单独写 weights jsonl，
 还会把最新一轮权重建议快照附加到 strategy 的本地 signal jsonl 中，
 用于把“建议值”和“真实发出的信号”并排对照。
 
+同时，signal 发往 Kafka 前也会补齐统一路由解释字段，
+让 execution / order / query 下游都能直接拿到同一份 route 视角。
+
 路径:
 app/strategy/rpc/data/signal/{symbol}/{date}.jsonl
 
 注意:
-• 这里新增的是本地 signal 日志字段
-• 当前不会修改 Kafka signal 负载
-• 也不会影响 execution 输入协议
+• 本地 signal jsonl 会带 weights 快照
+• Kafka signal payload 顶层会带 route_bucket / route_reason / route_template
+• signal_reason 结构内部也会带同样的 route 字段
+• execution / order / query 现在都能继续保留这组解释字段
 ```
 
 Phase 5 日志判读标准:
@@ -2862,6 +3245,11 @@ strategy 已接入 Strategy Weight Engine，
 • market_pause_reason
 • market_state
 • template_counts
+• match_counts
+  当前全局 trend / breakout / range 命中面统计
+
+• strategy_mix
+  当前轮最终策略桶配比
 ```
 
 Weights 明细日志关键字段:
@@ -2873,6 +3261,12 @@ app/strategy/rpc/data/signal/weights/{symbol}/{date}.jsonl
 核心字段:
 • template
   当前这个 symbol 对应的模板
+
+• route_bucket
+  当前 symbol 被分到哪个策略桶
+
+• route_reason
+  当前 symbol 为什么会被分到这个桶
 
 • strategy_weight
   当前市场状态下，策略类别获得的基础权重
@@ -2900,6 +3294,8 @@ app/strategy/rpc/data/signal/{symbol}/{date}.jsonl
 
 核心字段:
 • weights.template
+• weights.route_bucket
+• weights.route_reason
 • weights.strategy_weight
 • weights.symbol_weight
 • weights.risk_scale
@@ -2913,6 +3309,420 @@ app/strategy/rpc/data/signal/{symbol}/{date}.jsonl
 
 • signal jsonl 的 weights
   看的是“这条真实信号发出时，当时附带的最新建议值是什么”
+```
+
+统一路由解释链路:
+
+```text
+这条链回答的是：
+“为什么这个 symbol 这一轮会走到这个策略桶、这个模板，并最终发出这条 signal？”
+
+当前统一口径已经收拢成 3 个字段：
+
+1. route_bucket
+   • 含义：最终落到哪个策略桶
+   • 例子：trend / breakout / range
+
+2. route_reason
+   • 含义：为什么会走到这个桶
+   • 例子：market_state_trend / market_state_breakout / market_state_range
+
+3. route_template
+   • 含义：最终落到哪个具体模板
+   • 例子：btc-trend / breakout-core / range-core
+```
+
+四层共享关系:
+
+```text
+1. universe
+   • symbol 明细 jsonl 中有 route_bucket / route_reason
+   • 回答“路由器给这个币做了什么决定”
+
+2. weights
+   • _meta 中有 match_counts / strategy_mix
+   • symbol 明细中有 route_bucket / route_reason / template
+   • 回答“这轮为什么是这个桶配比，以及这个币属于哪个桶”
+
+3. decision / signal
+   • decision extras 中有 route_bucket / route_reason / route_template
+   • signal jsonl 的 weights 快照中有 route_bucket / route_reason
+   • signal_reason 中也有 route_bucket / route_reason / route_template
+   • 回答“这条真实决策/信号是在什么路由上下文里产生的”
+
+4. Kafka / execution / order / query
+   • signal payload 顶层有 route_bucket / route_reason / route_template
+   • signal_reason 内部也保留同样字段
+   • execution 消费后不会丢失，order log 和 query 结果也能继续看到
+```
+
+一眼判读方式:
+
+```text
+如果你要排“为什么这个币这轮是 breakout-core”：
+1. 先看 universe/BTCUSDT 的 route_bucket / route_reason
+2. 再看 weights/_meta 的 match_counts / strategy_mix
+3. 再看 weights/BTCUSDT 的 route_bucket / route_reason / template
+4. 再看 decision/BTCUSDT 的 extras.route_*
+5. 最后看 signal/BTCUSDT 的 weights.route_*、signal_reason.route_*、以及 Kafka signal 顶层 route_*
+
+如果这五层都一致，
+说明当前轮“路由原因 -> 桶配比 -> 模板选择 -> 最终发单”已经共享同一套解释口径。
+```
+
+#### `/strategy/status` 直接看三种状态切换
+
+`/strategy/status` 的 `router` 字段，实际上把“Universe 目标态”和“运行时实际态”放在了一起：
+
+- `template`: Universe 当前轮希望切到的目标模板
+- `route_bucket`: Universe 当前轮希望落到的策略桶
+- `target_reason`: Universe 当前轮给出的统一判态原因
+- `runtime_template`: 当前运行时真正生效的模板
+- `apply_action`: 当前轮实际执行的动作
+- `apply_gate_reason`: 当前轮没有立刻切换时的门禁原因
+- `has_open_position`: 当前是否仍有未平仓位
+
+判态 -> 目标模板 -> 运行时动作对照表：
+
+| 判态结果 | `target_reason` | `route_bucket` | `template` | 常见 `apply_action` | 解释 |
+|---|---|---|---|---|---|
+| 震荡 | `market_state_range` | `range` | `range-core` | `switch` / `enable` / `defer_switch` / `keep` | Universe 希望切到震荡策略 |
+| 突破 | `market_state_breakout` | `breakout` | `breakout-core` | `switch` / `enable` / `defer_switch` / `keep` | Universe 希望切到突破策略 |
+| 趋势 | `market_state_trend` | `trend` | 常见为基础趋势模板，BTC 可能是 `btc-trend` | `switch` / `enable` / `keep` | Universe 希望切到趋势桶 |
+| 非健康，不应启用 | `stale_data` / `dirty_data` / `not_tradable` / `not_final` / `no_snapshot` | 通常回到基础桶 | 通常回到 `base_template` | `disable` / `keep_open_position` / `defer_disable` / `bootstrap_observe` / `noop_absent` | 不是切到别的策略，而是当前轮不允许启用 |
+
+`apply_action` 的直接读法：
+
+| `apply_action` | 含义 | 典型场景 |
+|---|---|---|
+| `keep` | 目标模板与当前模板一致 | 已经在正确状态，不需要切 |
+| `enable` | 当前无实例，直接启用目标模板 | 新进入 `TREND` / `RANGE` / `BREAKOUT` |
+| `switch` | 当前有实例但无持仓，允许切模板 | `TREND -> RANGE`、`RANGE -> BREAKOUT` |
+| `defer_switch` | 已判到新状态，但因持仓未平暂不切 | `has_open_position=true` |
+| `keep_open_position` | 本轮应禁用，但为了保护现有持仓先保留实例 | 数据不健康但仓位还没走完 |
+| `defer_disable` | 本轮应禁用，但仍在最小启用时长窗口内 | `apply_gate_reason=min_enabled_duration` |
+| `defer_enable` | 本轮应启用，但仍在冷却期 | `apply_gate_reason=cooldown` |
+| `disable` | 当前实例已真正关闭 | 无持仓且允许禁用 |
+| `bootstrap_observe` | 冷启动观察，不因 `no_snapshot` 立即判死 | 启动初期尚未收齐快照 |
+| `noop_absent` | 本来就没有实例，因此无需动作 | 目标为禁用且当前未运行 |
+
+一眼判断方法：
+
+```text
+1. 先看 target_reason：这一轮 Universe 判成 TREND / RANGE / BREAKOUT 还是不健康
+2. 再看 template + route_bucket：目标想切到哪个模板、哪个桶
+3. 再看 runtime_template：当前实际跑的是什么
+4. 若 template != runtime_template，再看 apply_action
+5. 若 apply_action 不是 switch / enable，再看 apply_gate_reason 和 has_open_position
+```
+
+真实 `/strategy/status` 响应示例：
+
+```json
+{
+  "strategy_id": "ETHUSDT",
+  "status": "RUNNING",
+  "message": "ok | weight template=range-core bucket=range route_reason=market_state_range budget=0.1800 bucket_budget=0.3500 risk=1.0000 strategy=0.3500 symbol=0.5143 score=1.0268 source=symbol_score paused=false",
+  "last_update": 1777784400123,
+  "allocator": {
+    "template": "range-core",
+    "route_bucket": "range",
+    "route_reason": "market_state_range",
+    "score": 1.0268,
+    "score_source": "symbol_score",
+    "bucket_budget": 0.35,
+    "strategy_weight": 0.35,
+    "symbol_weight": 0.5143,
+    "risk_scale": 1,
+    "position_budget": 0.18,
+    "trading_paused": false,
+    "pause_reason": ""
+  },
+  "router": {
+    "enabled": true,
+    "template": "range-core",
+    "route_bucket": "range",
+    "target_reason": "market_state_range",
+    "base_template": "eth-core",
+    "runtime_enabled": true,
+    "runtime_template": "breakout-core",
+    "apply_action": "defer_switch",
+    "apply_gate_reason": "open_position",
+    "has_strategy": true,
+    "has_open_position": true,
+    "warmup": {
+      "history_len_4h": 300,
+      "history_len_1h": 500,
+      "history_len_15m": 500,
+      "history_len_1m": 1200,
+      "source": "runtime",
+      "status": "warmup_complete",
+      "incomplete_reasons": []
+    }
+  }
+}
+```
+
+上面这段 JSON 的实际含义：
+
+```text
+Universe 当前轮已经判到 RANGE
+目标模板也已经变成 range-core
+但 runtime_template 仍是 breakout-core
+同时 apply_action=defer_switch 且 has_open_position=true
+所以这不是“没判到 RANGE”，而是“已判到 RANGE，但当前持仓还没平，暂不切模板”
+```
+
+对照示例：`BREAKOUT -> switch`
+
+```json
+{
+  "strategy_id": "BTCUSDT",
+  "status": "RUNNING",
+  "message": "ok | weight template=breakout-core bucket=breakout route_reason=market_state_breakout budget=0.2600 bucket_budget=0.4000 risk=1.0000 strategy=0.4000 symbol=0.6500 score=1.1842 source=symbol_score paused=false",
+  "last_update": 1777784700456,
+  "allocator": {
+    "template": "breakout-core",
+    "route_bucket": "breakout",
+    "route_reason": "market_state_breakout",
+    "score": 1.1842,
+    "score_source": "symbol_score",
+    "bucket_budget": 0.4,
+    "strategy_weight": 0.4,
+    "symbol_weight": 0.65,
+    "risk_scale": 1,
+    "position_budget": 0.26,
+    "trading_paused": false,
+    "pause_reason": ""
+  },
+  "router": {
+    "enabled": true,
+    "template": "breakout-core",
+    "route_bucket": "breakout",
+    "target_reason": "market_state_breakout",
+    "base_template": "btc-core",
+    "runtime_enabled": true,
+    "runtime_template": "breakout-core",
+    "apply_action": "switch",
+    "apply_gate_reason": "",
+    "has_strategy": true,
+    "has_open_position": false,
+    "warmup": {
+      "history_len_4h": 300,
+      "history_len_1h": 500,
+      "history_len_15m": 500,
+      "history_len_1m": 1200,
+      "source": "runtime",
+      "status": "warmup_complete",
+      "incomplete_reasons": []
+    }
+  }
+}
+```
+
+上面这段 JSON 的实际含义：
+
+```text
+Universe 当前轮已经判到 BREAKOUT
+目标模板变成 breakout-core
+当前没有持仓阻挡，apply_action=switch
+所以这一轮已经真的把运行时模板切到了 breakout-core
+这类场景里 template 与 runtime_template 最终会对齐
+```
+
+对照示例：`disable -> keep_open_position`
+
+```json
+{
+  "strategy_id": "BNBUSDT",
+  "status": "RUNNING",
+  "message": "ok | weight template=range-core bucket=range route_reason=market_state_range budget=0.1200 bucket_budget=0.3000 risk=1.0000 strategy=0.3000 symbol=0.4000 score=0.9860 source=symbol_score paused=false",
+  "last_update": 1777785300789,
+  "allocator": {
+    "template": "range-core",
+    "route_bucket": "range",
+    "route_reason": "market_state_range",
+    "score": 0.986,
+    "score_source": "symbol_score",
+    "bucket_budget": 0.3,
+    "strategy_weight": 0.3,
+    "symbol_weight": 0.4,
+    "risk_scale": 1,
+    "position_budget": 0.12,
+    "trading_paused": false,
+    "pause_reason": ""
+  },
+  "router": {
+    "enabled": false,
+    "template": "bnb-core",
+    "route_bucket": "trend",
+    "target_reason": "stale_data",
+    "base_template": "bnb-core",
+    "runtime_enabled": true,
+    "runtime_template": "range-core",
+    "apply_action": "keep_open_position",
+    "apply_gate_reason": "open_position",
+    "has_strategy": true,
+    "has_open_position": true,
+    "warmup": {
+      "history_len_4h": 300,
+      "history_len_1h": 500,
+      "history_len_15m": 500,
+      "history_len_1m": 1200,
+      "source": "runtime",
+      "status": "warmup_complete",
+      "incomplete_reasons": []
+    }
+  }
+}
+```
+
+上面这段 JSON 的实际含义：
+
+```text
+Universe 当前轮认为这个 symbol 数据不健康，因此目标态是 disabled
+所以 enabled=false，target_reason=stale_data
+按目标态，本轮本来应该停掉策略实例
+但当前仍有未平仓位，apply_action=keep_open_position
+所以 runtime_enabled 仍然是 true，运行时模板也暂时保留在 range-core
+这类场景说明系统优先保护已有仓位，而不是立即把实例硬停掉
+```
+
+对照示例：`disable -> defer_disable`
+
+```json
+{
+  "strategy_id": "SOLUSDT",
+  "status": "RUNNING",
+  "message": "ok | weight template=breakout-core bucket=breakout route_reason=market_state_breakout budget=0.1600 bucket_budget=0.3000 risk=1.0000 strategy=0.3000 symbol=0.5333 score=1.0410 source=symbol_score paused=false",
+  "last_update": 1777785600912,
+  "allocator": {
+    "template": "breakout-core",
+    "route_bucket": "breakout",
+    "route_reason": "market_state_breakout",
+    "score": 1.041,
+    "score_source": "symbol_score",
+    "bucket_budget": 0.3,
+    "strategy_weight": 0.3,
+    "symbol_weight": 0.5333,
+    "risk_scale": 1,
+    "position_budget": 0.16,
+    "trading_paused": false,
+    "pause_reason": ""
+  },
+  "router": {
+    "enabled": false,
+    "template": "sol-core",
+    "route_bucket": "trend",
+    "target_reason": "not_final",
+    "base_template": "sol-core",
+    "runtime_enabled": true,
+    "runtime_template": "breakout-core",
+    "apply_action": "defer_disable",
+    "apply_gate_reason": "min_enabled_duration",
+    "has_strategy": true,
+    "has_open_position": false,
+    "warmup": {
+      "history_len_4h": 300,
+      "history_len_1h": 500,
+      "history_len_15m": 500,
+      "history_len_1m": 1200,
+      "source": "runtime",
+      "status": "warmup_complete",
+      "incomplete_reasons": []
+    }
+  }
+}
+```
+
+上面这段 JSON 的实际含义：
+
+```text
+Universe 当前轮认为这个 symbol 暂时不该启用，因此 enabled=false
+而且当前已经没有持仓，不是 open_position 在挡
+但它刚被启用不久，还处于最小启用时长窗口内
+所以 apply_action=defer_disable，apply_gate_reason=min_enabled_duration
+这类场景说明系统不是不想关，而是为了避免过于频繁地开关策略，先延迟禁用
+```
+
+对照示例：`enable -> defer_enable`
+
+```json
+{
+  "strategy_id": "XRPUSDT",
+  "status": "STOPPED",
+  "message": "not running | weight template=range-core bucket=range route_reason=market_state_range budget=0.1400 bucket_budget=0.2800 risk=1.0000 strategy=0.2800 symbol=0.5000 score=0.9985 source=symbol_score paused=false",
+  "last_update": 1777785901045,
+  "allocator": {
+    "template": "range-core",
+    "route_bucket": "range",
+    "route_reason": "market_state_range",
+    "score": 0.9985,
+    "score_source": "symbol_score",
+    "bucket_budget": 0.28,
+    "strategy_weight": 0.28,
+    "symbol_weight": 0.5,
+    "risk_scale": 1,
+    "position_budget": 0.14,
+    "trading_paused": false,
+    "pause_reason": ""
+  },
+  "router": {
+    "enabled": true,
+    "template": "range-core",
+    "route_bucket": "range",
+    "target_reason": "market_state_range",
+    "base_template": "xrp-core",
+    "runtime_enabled": false,
+    "runtime_template": "xrp-core",
+    "apply_action": "defer_enable",
+    "apply_gate_reason": "cooldown",
+    "has_strategy": false,
+    "has_open_position": false,
+    "warmup": {
+      "history_len_4h": 300,
+      "history_len_1h": 500,
+      "history_len_15m": 500,
+      "history_len_1m": 1200,
+      "source": "cache",
+      "status": "warmup_complete",
+      "incomplete_reasons": []
+    }
+  }
+}
+```
+
+上面这段 JSON 的实际含义：
+
+```text
+Universe 当前轮已经想把这个 symbol 启回 range-core
+所以 enabled=true，target_reason=market_state_range
+但当前 runtime 仍未启用，而且 has_strategy=false
+原因不是没判到，而是它刚刚被关闭过，还在冷却期里
+所以 apply_action=defer_enable，apply_gate_reason=cooldown
+这类场景说明系统已经允许重新交易，但会先等冷却窗口结束再真正启用
+```
+
+#### `/strategy/status` 线上值班 Checklist
+
+前面的内容用于完整理解切换逻辑；线上排查时可直接看这一节。
+
+| 看到的字段组合 | 直接结论 | 下一眼看什么 |
+|---|---|---|
+| `apply_action=defer_switch` + `has_open_position=true` | 已判到新模板，但被持仓挡住，暂不切换 | 看 `template` 和 `runtime_template` 是否不同 |
+| `apply_action=switch` | 已真正切到目标模板 | 看 `runtime_template` 是否已与 `template` 对齐 |
+| `apply_action=keep_open_position` + `enabled=false` + `has_open_position=true` | 目标态已禁用，但为了保仓先不关实例 | 看 `target_reason` 是什么不健康原因 |
+| `apply_action=defer_disable` + `apply_gate_reason=min_enabled_duration` | 想禁用，但仍在最小启用时长窗口内 | 看 `enabled=false` 是否已成立、`has_open_position` 是否为 false |
+| `apply_action=defer_enable` + `apply_gate_reason=cooldown` | 想启用，但冷却期还没结束 | 看 `enabled=true`、`runtime_enabled=false`、`has_strategy=false` |
+
+最短判断口诀：
+
+```text
+先看 target_reason：Universe 这一轮想干什么
+再看 template：目标模板是什么
+再看 runtime_template：当前实际模板是什么
+再看 apply_action：这轮真的做了什么
+最后看 has_open_position / apply_gate_reason：为什么没按目标态立刻执行
 ```
 
 终端关键日志:
@@ -2939,9 +3749,11 @@ app/strategy/rpc/data/signal/{symbol}/{date}.jsonl
 • weights/BTCUSDT 中 position_budget > 0
 • signal/BTCUSDT 中同样出现 weights.position_budget
 • signal/BTCUSDT 的 weights.template 与 universe 当前 template 一致
+• signal/BTCUSDT 的 weights.route_reason 与 universe 当前 reason 一致
 
 说明 Phase 5 不只是单独输出建议，
-而是已经开始能和真实 signal 做并排对照。
+而是已经开始能和真实 signal 做并排对照，
+并且路由解释也已经贯穿到真实发单链路。
 ```
 
 正常与 Phase 4 / Phase 2 对齐:
@@ -2949,11 +3761,12 @@ app/strategy/rpc/data/signal/{symbol}/{date}.jsonl
 ```text
 如果同时看到：
 • marketstate/_meta 中 market state 偏 trend_up / trend_down
-• universe/BTCUSDT 中 reason=market_state_trend
+• universe/BTCUSDT 中 route_reason=market_state_trend
 • weights/_meta 中 market_state=trend_up 或 trend_down
+• weights/_meta 中 strategy_mix 对 trend 桶明显更高
 • weights/BTCUSDT 中 template=btc-trend
 
-说明 Phase 4 -> Phase 2 -> Phase 5 这条链已经开始对齐。
+说明 Phase 4 -> Router -> Phase 5 这条链已经开始对齐。
 ```
 
 风险压缩生效:
@@ -2988,6 +3801,8 @@ app/strategy/rpc/data/signal/{symbol}/{date}.jsonl
 recommendation_count > 0：说明 Phase 5 已在输出
 market_state 与 marketstate/_meta 对齐：说明上游状态已接通
 template_counts 与 universe 对齐：说明模板输入已接通
+match_counts / strategy_mix 可解释：说明桶配比来源已接通
+route_reason 在 universe / weights / signal 一致：说明路由解释已接通
 risk_scale 下降 / market_paused=true：说明风险控制开始介入
 position_budget > 0：说明权重建议已经可用于后续仓位预算
 signal jsonl 出现 weights：说明建议值已开始贴近真实信号
@@ -3010,6 +3825,9 @@ sed -n '1,20p' app/strategy/rpc/data/signal/BTCUSDT/$(date -u +%F).jsonl
 # 对照看 BTC 的 marketstate 和 universe
 sed -n '1,20p' app/strategy/rpc/data/signal/marketstate/BTCUSDT/$(date -u +%F).jsonl
 sed -n '1,20p' app/strategy/rpc/data/signal/universe/BTCUSDT/$(date -u +%F).jsonl
+
+# 如果要确认路由解释是否贯穿到真实 signal，可直接 grep route 字段
+grep '"route_' app/strategy/rpc/data/signal/BTCUSDT/$(date -u +%F).jsonl | tail -n 5
 ```
 
 排查顺序:
@@ -3227,6 +4045,64 @@ K线日志:
 订单日志:
   路径: data/futures/{type}/{symbol}/{date}.jsonl
   类型: all_orders / positions
+
+订单查询聚合:
+  Gateway接口:
+  - GET /all-orders?symbol=ETHUSDT
+    用途: 查看原始订单快照，保留 execution 推断后的 action_type
+    关键动作: OPEN_LONG / OPEN_SHORT / CLOSE_LONG / CLOSE_SHORT / PARTIAL_CLOSE_LONG / PARTIAL_CLOSE_SHORT
+    可读字段: action_label
+
+  - GET /position-cycles?symbol=ETHUSDT
+    用途: 按 position_cycle_id 聚合开仓、部分止盈、最终平仓，直接查看一轮持仓生命周期
+    关键状态: OPEN / PARTIALLY_CLOSED / CLOSED
+    可读字段:
+      position_side_label: 多头 / 空头
+      cycle_status_label: 持仓中 / 部分平仓 / 已平仓
+      close_progress: 已平数量 / 开仓数量 / 剩余数量
+      partial_close_order_count: 部分平仓次数
+      final_close_order_count: 最终平仓次数
+      exit_action_summary: 已部分平仓N次 / 部分止盈N次后最终平仓 / 直接平仓
+
+  说明:
+  - all_orders 保留逐笔订单视角，适合对照 execution / exchange 原始委托
+  - position_cycles 保留持仓周期视角，适合看分批止盈后剩余仓位和最终离场结果
+
+  示例: GET /all-orders?symbol=ETHUSDT
+  {
+    "items": [
+      {
+        "order_id": 20002,
+        "symbol": "ETHUSDT",
+        "action_type": "PARTIAL_CLOSE_LONG",
+        "action_label": "部分平多",
+        "position_cycle_id": "ETHUSDT-LONG-20260503T120000-0001",
+        "executed_qty": "0.10",
+        "avg_price": "2460.0",
+        "reason": "split tp1 partial close"
+      }
+    ]
+  }
+
+  示例: GET /position-cycles?symbol=ETHUSDT
+  {
+    "items": [
+      {
+        "position_cycle_id": "ETHUSDT-LONG-20260503T120000-0001",
+        "position_side": "LONG",
+        "position_side_label": "多头",
+        "cycle_status": "CLOSED",
+        "cycle_status_label": "已平仓",
+        "opened_qty": "0.25",
+        "closed_qty": "0.25",
+        "remaining_qty": "0",
+        "close_progress": "已平0.25 / 0.25，剩余0",
+        "partial_close_order_count": 1,
+        "final_close_order_count": 1,
+        "exit_action_summary": "部分止盈1次后最终平仓"
+      }
+    ]
+  }
 ```
 
 ### 6.2 值班排错速查表
@@ -3350,7 +4226,16 @@ market 输入
 | 第二眼看 | `app/order/rpc/internal/kafka/consumer.go`、`internal/svc/serviceContext.go`、`data/futures` |
 | 最可能根因 | `order` consumer 没消费到，或 Binance 查询失败 |
 
-#### 13. Kafka 报 i/o timeout
+#### 13. position_cycles 显示 PARTIALLY_CLOSED
+
+| 项 | 内容 |
+|----|------|
+| 现象 | `GET /position-cycles` 里 `cycle_status=PARTIALLY_CLOSED`，但用户以为应该已经全平 |
+| 第一眼看 | `partial_close_order_count`、`final_close_order_count`、`remaining_qty`、`close_progress` |
+| 第二眼看 | `GET /all-orders` 里同一个 `position_cycle_id` 是否只有 `PARTIAL_CLOSE_LONG/SHORT`，还没有最终 `CLOSE_LONG/SHORT` |
+| 最可能根因 | 这是正常分批止盈状态，表示已经发生部分减仓，但剩余仓位还在；只有当最终平仓订单落地后，cycle 才会变成 `CLOSED` |
+
+#### 14. Kafka 报 i/o timeout
 
 | 项 | 内容 |
 |----|------|
@@ -3359,7 +4244,7 @@ market 输入
 | 第二眼看 | Kafka broker 地址和本地网络状态 |
 | 最可能根因 | 本地 Kafka 短暂抖动；若后面自动恢复，一般不是业务故障 |
 
-#### 14. worker_gc 出现
+#### 15. worker_gc 出现
 
 | 项 | 内容 |
 |----|------|
@@ -3368,7 +4253,7 @@ market 输入
 | 第二眼看 | `internal/aggregator/kline_aggregator.go` 和 `WorkerGC` 配置 |
 | 最可能根因 | 对应 symbol 超过 `30m` 没有新数据，worker 被空闲回收，残桶被强制刷出 |
 
-#### 15. incomplete_bucket 出现
+#### 16. incomplete_bucket 出现
 
 | 项 | 内容 |
 |----|------|
@@ -3376,6 +4261,28 @@ market 输入
 | 第一眼看 | 对应周期 K线的 `openTime` |
 | 第二眼看 | 把该周期应有的 `1m` 一根一根对出来 |
 | 最可能根因 | bucket 期望的 `1m` 数量不够，常见于启动晚了或中间缺分钟 |
+
+### 6.2.1 分批止盈联调验收清单
+
+按下面顺序验收最快：
+
+1. 看 `strategy` 信号日志
+   预期：先出现 `OPEN`，命中 `TP1` 后出现 `PARTIAL_CLOSE`，最终离场再出现 `CLOSE`
+
+2. 看 `execution` 订单日志
+   预期：`PARTIAL_CLOSE` 的 `quantity` 是请求减仓量，不会被放大成全平仓位
+
+3. 看 `GET /all-orders?symbol=...`
+   预期：同一个 `position_cycle_id` 下，按时间先后能看到 `OPEN_LONG/SHORT`、`PARTIAL_CLOSE_LONG/SHORT`、`CLOSE_LONG/SHORT`
+
+4. 看 `GET /position-cycles?symbol=...`
+   预期：
+   - 部分止盈后：`cycle_status=PARTIALLY_CLOSED`
+   - 同时可见：`partial_close_order_count > 0`
+   - 同时可见：`remaining_qty > 0`
+   - 最终平仓后：`cycle_status=CLOSED` 且 `final_close_order_count > 0`
+
+如果第 1 步已经有 `PARTIAL_CLOSE`，但第 3、4 步没有对应结果，优先排查 `order` consumer、execution 订单日志落盘，以及 query 请求的 `symbol` 和时间范围是否一致。
 
 ### 6.3 常用命令速查
 

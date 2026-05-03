@@ -3,6 +3,7 @@ package universepool
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -24,7 +25,7 @@ type symbolLogEntry struct {
 	GlobalState            string               `json:"global_state,omitempty"`
 	Reason                 string               `json:"reason,omitempty"`
 	ReasonZh               string               `json:"reason_zh,omitempty"`
-	Score                  float64              `json:"score,omitempty"`
+	Score                  fixedDecimal6        `json:"score,omitempty"`
 	Subscribed             bool                 `json:"subscribed"`
 	Desired                bool                 `json:"desired"`
 	Template               string               `json:"template,omitempty"`
@@ -37,6 +38,14 @@ type symbolLogEntry struct {
 	LastIncompleteReason   string               `json:"last_incomplete_reason,omitempty"`
 	LastIncompleteReasonZh string               `json:"last_incomplete_reason_zh,omitempty"`
 	StateVote              *StateVoteDetail     `json:"state_vote,omitempty"`
+}
+
+// fixedDecimal6 以 6 位小数输出数值，便于日志直接观察 score 的细微变化。
+type fixedDecimal6 float64
+
+// MarshalJSON 自定义数值序列化，保持 JSON number 形态同时固定保留 6 位小数。
+func (v fixedDecimal6) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf("%.6f", float64(v))), nil
 }
 
 type metaLogEntry struct {
@@ -109,7 +118,7 @@ func (l *jsonlLogger) WriteSelectorDecision(now time.Time, state SymbolRuntimeSt
 		GlobalState:            globalState,
 		Reason:                 decision.Reason,
 		ReasonZh:               reasonTextZH(decision.Reason),
-		Score:                  decision.Score,
+		Score:                  fixedDecimal6(decision.Score),
 		Subscribed:             state.Subscribed,
 		Desired:                decision.Desired,
 		Template:               decision.Template,

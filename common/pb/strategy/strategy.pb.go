@@ -28,14 +28,21 @@ const (
 // Signal 包含"可执行"信息：方向、数量、止损止盈、信号类型
 // 不包含：原始K线数据、中间指标计算过程
 type SignalReason struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	Summary          string                 `protobuf:"bytes,1,opt,name=summary,proto3" json:"summary,omitempty"`                                           // 兼容旧链路的摘要描述
-	Phase            string                 `protobuf:"bytes,2,opt,name=phase,proto3" json:"phase,omitempty"`                                               // OPEN_ENTRY / CLOSE_EXIT
-	TrendContext     string                 `protobuf:"bytes,3,opt,name=trend_context,json=trendContext,proto3" json:"trend_context,omitempty"`             // 大级别趋势背景
-	SetupContext     string                 `protobuf:"bytes,4,opt,name=setup_context,json=setupContext,proto3" json:"setup_context,omitempty"`             // 入场/出场触发背景
-	PathContext      string                 `protobuf:"bytes,5,opt,name=path_context,json=pathContext,proto3" json:"path_context,omitempty"`                // 收割路径或盘口路径背景
-	ExecutionContext string                 `protobuf:"bytes,6,opt,name=execution_context,json=executionContext,proto3" json:"execution_context,omitempty"` // 止损止盈、仓位、确认条件等执行信息
-	Tags             []string               `protobuf:"bytes,7,rep,name=tags,proto3" json:"tags,omitempty"`                                                 // 标签，如 ["15m", "trend_following", "long"]
+	state            protoimpl.MessageState   `protogen:"open.v1"`
+	Summary          string                   `protobuf:"bytes,1,opt,name=summary,proto3" json:"summary,omitempty"`                                           // 兼容旧链路的摘要描述
+	Phase            string                   `protobuf:"bytes,2,opt,name=phase,proto3" json:"phase,omitempty"`                                               // OPEN_ENTRY / CLOSE_EXIT
+	TrendContext     string                   `protobuf:"bytes,3,opt,name=trend_context,json=trendContext,proto3" json:"trend_context,omitempty"`             // 大级别趋势背景
+	SetupContext     string                   `protobuf:"bytes,4,opt,name=setup_context,json=setupContext,proto3" json:"setup_context,omitempty"`             // 入场/出场触发背景
+	PathContext      string                   `protobuf:"bytes,5,opt,name=path_context,json=pathContext,proto3" json:"path_context,omitempty"`                // 收割路径或盘口路径背景
+	ExecutionContext string                   `protobuf:"bytes,6,opt,name=execution_context,json=executionContext,proto3" json:"execution_context,omitempty"` // 止损止盈、仓位、确认条件等执行信息
+	Tags             []string                 `protobuf:"bytes,7,rep,name=tags,proto3" json:"tags,omitempty"`                                                 // 标签，如 ["15m", "trend_following", "long"]
+	RouteBucket      string                   `protobuf:"bytes,8,opt,name=route_bucket,json=routeBucket,proto3" json:"route_bucket,omitempty"`                // 上游路由器产出的统一策略桶
+	RouteReason      string                   `protobuf:"bytes,9,opt,name=route_reason,json=routeReason,proto3" json:"route_reason,omitempty"`                // 上游路由器产出的统一路由原因
+	RouteTemplate    string                   `protobuf:"bytes,10,opt,name=route_template,json=routeTemplate,proto3" json:"route_template,omitempty"`         // 上游路由器最终选中的模板
+	Allocator        *PositionAllocatorStatus `protobuf:"bytes,11,opt,name=allocator,proto3" json:"allocator,omitempty"`                                      // 发出信号时对应的 allocator 快照
+	Range            *RangeSignalReason       `protobuf:"bytes,12,opt,name=range,proto3" json:"range,omitempty"`                                              // 震荡策略的结构化判定摘要，便于前端直接展示
+	ExitReasonKind   string                   `protobuf:"bytes,13,opt,name=exit_reason_kind,json=exitReasonKind,proto3" json:"exit_reason_kind,omitempty"`    // 结构化出场原因分类，如 partial_take_profit / break_even_stop / rsi_take_profit
+	ExitReasonLabel  string                   `protobuf:"bytes,14,opt,name=exit_reason_label,json=exitReasonLabel,proto3" json:"exit_reason_label,omitempty"` // 出场原因中文标签，如 分批止盈 / 保本止损 / RSI止盈
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -119,6 +126,147 @@ func (x *SignalReason) GetTags() []string {
 	return nil
 }
 
+func (x *SignalReason) GetRouteBucket() string {
+	if x != nil {
+		return x.RouteBucket
+	}
+	return ""
+}
+
+func (x *SignalReason) GetRouteReason() string {
+	if x != nil {
+		return x.RouteReason
+	}
+	return ""
+}
+
+func (x *SignalReason) GetRouteTemplate() string {
+	if x != nil {
+		return x.RouteTemplate
+	}
+	return ""
+}
+
+func (x *SignalReason) GetAllocator() *PositionAllocatorStatus {
+	if x != nil {
+		return x.Allocator
+	}
+	return nil
+}
+
+func (x *SignalReason) GetRange() *RangeSignalReason {
+	if x != nil {
+		return x.Range
+	}
+	return nil
+}
+
+func (x *SignalReason) GetExitReasonKind() string {
+	if x != nil {
+		return x.ExitReasonKind
+	}
+	return ""
+}
+
+func (x *SignalReason) GetExitReasonLabel() string {
+	if x != nil {
+		return x.ExitReasonLabel
+	}
+	return ""
+}
+
+type RangeSignalReason struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	H1RangeOk      bool                   `protobuf:"varint,1,opt,name=h1_range_ok,json=h1RangeOk,proto3" json:"h1_range_ok,omitempty"`                  // 1H 是否满足震荡前提
+	H1AdxOk        bool                   `protobuf:"varint,2,opt,name=h1_adx_ok,json=h1AdxOk,proto3" json:"h1_adx_ok,omitempty"`                        // 1H ADX 是否低于阈值
+	H1BollWidthOk  bool                   `protobuf:"varint,3,opt,name=h1_boll_width_ok,json=h1BollWidthOk,proto3" json:"h1_boll_width_ok,omitempty"`    // 1H Boll 带宽是否足够收窄
+	M15TouchLower  bool                   `protobuf:"varint,4,opt,name=m15_touch_lower,json=m15TouchLower,proto3" json:"m15_touch_lower,omitempty"`      // 15M 是否触及下轨
+	M15RsiTurnUp   bool                   `protobuf:"varint,5,opt,name=m15_rsi_turn_up,json=m15RsiTurnUp,proto3" json:"m15_rsi_turn_up,omitempty"`       // 15M RSI 是否拐头向上
+	M15TouchUpper  bool                   `protobuf:"varint,6,opt,name=m15_touch_upper,json=m15TouchUpper,proto3" json:"m15_touch_upper,omitempty"`      // 15M 是否触及上轨
+	M15RsiTurnDown bool                   `protobuf:"varint,7,opt,name=m15_rsi_turn_down,json=m15RsiTurnDown,proto3" json:"m15_rsi_turn_down,omitempty"` // 15M RSI 是否拐头向下
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *RangeSignalReason) Reset() {
+	*x = RangeSignalReason{}
+	mi := &file_strategy_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RangeSignalReason) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RangeSignalReason) ProtoMessage() {}
+
+func (x *RangeSignalReason) ProtoReflect() protoreflect.Message {
+	mi := &file_strategy_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RangeSignalReason.ProtoReflect.Descriptor instead.
+func (*RangeSignalReason) Descriptor() ([]byte, []int) {
+	return file_strategy_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *RangeSignalReason) GetH1RangeOk() bool {
+	if x != nil {
+		return x.H1RangeOk
+	}
+	return false
+}
+
+func (x *RangeSignalReason) GetH1AdxOk() bool {
+	if x != nil {
+		return x.H1AdxOk
+	}
+	return false
+}
+
+func (x *RangeSignalReason) GetH1BollWidthOk() bool {
+	if x != nil {
+		return x.H1BollWidthOk
+	}
+	return false
+}
+
+func (x *RangeSignalReason) GetM15TouchLower() bool {
+	if x != nil {
+		return x.M15TouchLower
+	}
+	return false
+}
+
+func (x *RangeSignalReason) GetM15RsiTurnUp() bool {
+	if x != nil {
+		return x.M15RsiTurnUp
+	}
+	return false
+}
+
+func (x *RangeSignalReason) GetM15TouchUpper() bool {
+	if x != nil {
+		return x.M15TouchUpper
+	}
+	return false
+}
+
+func (x *RangeSignalReason) GetM15RsiTurnDown() bool {
+	if x != nil {
+		return x.M15RsiTurnDown
+	}
+	return false
+}
+
 type Signal struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	StrategyId  string                 `protobuf:"bytes,1,opt,name=strategy_id,json=strategyId,proto3" json:"strategy_id,omitempty"`             // 策略ID，如 "trend-following-BTCUSDT"
@@ -144,7 +292,7 @@ type Signal struct {
 
 func (x *Signal) Reset() {
 	*x = Signal{}
-	mi := &file_strategy_proto_msgTypes[1]
+	mi := &file_strategy_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -156,7 +304,7 @@ func (x *Signal) String() string {
 func (*Signal) ProtoMessage() {}
 
 func (x *Signal) ProtoReflect() protoreflect.Message {
-	mi := &file_strategy_proto_msgTypes[1]
+	mi := &file_strategy_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -169,7 +317,7 @@ func (x *Signal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Signal.ProtoReflect.Descriptor instead.
 func (*Signal) Descriptor() ([]byte, []int) {
-	return file_strategy_proto_rawDescGZIP(), []int{1}
+	return file_strategy_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *Signal) GetStrategyId() string {
@@ -297,7 +445,7 @@ type StrategyConfig struct {
 
 func (x *StrategyConfig) Reset() {
 	*x = StrategyConfig{}
-	mi := &file_strategy_proto_msgTypes[2]
+	mi := &file_strategy_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -309,7 +457,7 @@ func (x *StrategyConfig) String() string {
 func (*StrategyConfig) ProtoMessage() {}
 
 func (x *StrategyConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_strategy_proto_msgTypes[2]
+	mi := &file_strategy_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -322,7 +470,7 @@ func (x *StrategyConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StrategyConfig.ProtoReflect.Descriptor instead.
 func (*StrategyConfig) Descriptor() ([]byte, []int) {
-	return file_strategy_proto_rawDescGZIP(), []int{2}
+	return file_strategy_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *StrategyConfig) GetSymbol() string {
@@ -354,19 +502,585 @@ func (x *StrategyConfig) GetEnabled() bool {
 }
 
 // 策略状态
-type StrategyStatus struct {
+type PositionAllocatorStatus struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Template       string                 `protobuf:"bytes,1,opt,name=template,proto3" json:"template,omitempty"`                                      // 当前 symbol 最终使用的策略模板
+	RouteBucket    string                 `protobuf:"bytes,2,opt,name=route_bucket,json=routeBucket,proto3" json:"route_bucket,omitempty"`             // 当前 symbol 对应的统一策略桶
+	RouteReason    string                 `protobuf:"bytes,3,opt,name=route_reason,json=routeReason,proto3" json:"route_reason,omitempty"`             // 当前 symbol 对应的统一路由原因
+	Score          float64                `protobuf:"fixed64,4,opt,name=score,proto3" json:"score,omitempty"`                                          // 当前 symbol 预算分配使用的最终 score
+	ScoreSource    string                 `protobuf:"bytes,5,opt,name=score_source,json=scoreSource,proto3" json:"score_source,omitempty"`             // score 的来源，如 symbol_score / regime_analysis
+	BucketBudget   float64                `protobuf:"fixed64,6,opt,name=bucket_budget,json=bucketBudget,proto3" json:"bucket_budget,omitempty"`        // 当前策略桶的总预算
+	StrategyWeight float64                `protobuf:"fixed64,7,opt,name=strategy_weight,json=strategyWeight,proto3" json:"strategy_weight,omitempty"`  // 当前策略桶在本轮 allocator 中的配比
+	SymbolWeight   float64                `protobuf:"fixed64,8,opt,name=symbol_weight,json=symbolWeight,proto3" json:"symbol_weight,omitempty"`        // 当前 symbol 在桶内的配比
+	RiskScale      float64                `protobuf:"fixed64,9,opt,name=risk_scale,json=riskScale,proto3" json:"risk_scale,omitempty"`                 // 当前全局风险缩放系数
+	PositionBudget float64                `protobuf:"fixed64,10,opt,name=position_budget,json=positionBudget,proto3" json:"position_budget,omitempty"` // 当前 symbol 的最终仓位预算
+	TradingPaused  bool                   `protobuf:"varint,11,opt,name=trading_paused,json=tradingPaused,proto3" json:"trading_paused,omitempty"`     // 当前轮是否被 allocator 暂停交易
+	PauseReason    string                 `protobuf:"bytes,12,opt,name=pause_reason,json=pauseReason,proto3" json:"pause_reason,omitempty"`            // allocator 暂停原因
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *PositionAllocatorStatus) Reset() {
+	*x = PositionAllocatorStatus{}
+	mi := &file_strategy_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PositionAllocatorStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PositionAllocatorStatus) ProtoMessage() {}
+
+func (x *PositionAllocatorStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_strategy_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PositionAllocatorStatus.ProtoReflect.Descriptor instead.
+func (*PositionAllocatorStatus) Descriptor() ([]byte, []int) {
+	return file_strategy_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *PositionAllocatorStatus) GetTemplate() string {
+	if x != nil {
+		return x.Template
+	}
+	return ""
+}
+
+func (x *PositionAllocatorStatus) GetRouteBucket() string {
+	if x != nil {
+		return x.RouteBucket
+	}
+	return ""
+}
+
+func (x *PositionAllocatorStatus) GetRouteReason() string {
+	if x != nil {
+		return x.RouteReason
+	}
+	return ""
+}
+
+func (x *PositionAllocatorStatus) GetScore() float64 {
+	if x != nil {
+		return x.Score
+	}
+	return 0
+}
+
+func (x *PositionAllocatorStatus) GetScoreSource() string {
+	if x != nil {
+		return x.ScoreSource
+	}
+	return ""
+}
+
+func (x *PositionAllocatorStatus) GetBucketBudget() float64 {
+	if x != nil {
+		return x.BucketBudget
+	}
+	return 0
+}
+
+func (x *PositionAllocatorStatus) GetStrategyWeight() float64 {
+	if x != nil {
+		return x.StrategyWeight
+	}
+	return 0
+}
+
+func (x *PositionAllocatorStatus) GetSymbolWeight() float64 {
+	if x != nil {
+		return x.SymbolWeight
+	}
+	return 0
+}
+
+func (x *PositionAllocatorStatus) GetRiskScale() float64 {
+	if x != nil {
+		return x.RiskScale
+	}
+	return 0
+}
+
+func (x *PositionAllocatorStatus) GetPositionBudget() float64 {
+	if x != nil {
+		return x.PositionBudget
+	}
+	return 0
+}
+
+func (x *PositionAllocatorStatus) GetTradingPaused() bool {
+	if x != nil {
+		return x.TradingPaused
+	}
+	return false
+}
+
+func (x *PositionAllocatorStatus) GetPauseReason() string {
+	if x != nil {
+		return x.PauseReason
+	}
+	return ""
+}
+
+type RegimeFrameStatus struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	StrategyId    string                 `protobuf:"bytes,1,opt,name=strategy_id,json=strategyId,proto3" json:"strategy_id,omitempty"`
-	Status        string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"` // RUNNING, STOPPED, ERROR
-	Message       string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
-	LastUpdate    int64                  `protobuf:"varint,4,opt,name=last_update,json=lastUpdate,proto3" json:"last_update,omitempty"`
+	Interval      string                 `protobuf:"bytes,1,opt,name=interval,proto3" json:"interval,omitempty"`                          // 周期，如 1h / 15m
+	State         string                 `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`                                // 该周期当前识别出的状态
+	Reason        string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`                              // 该周期 marketstate 原始原因
+	RouteReason   string                 `protobuf:"bytes,4,opt,name=route_reason,json=routeReason,proto3" json:"route_reason,omitempty"` // 该周期映射后的统一路由原因
+	Confidence    float64                `protobuf:"fixed64,5,opt,name=confidence,proto3" json:"confidence,omitempty"`                    // 该周期判态置信度
+	LastUpdate    int64                  `protobuf:"varint,6,opt,name=last_update,json=lastUpdate,proto3" json:"last_update,omitempty"`   // 该周期最近一次更新时间
+	Healthy       bool                   `protobuf:"varint,7,opt,name=healthy,proto3" json:"healthy,omitempty"`                           // 该周期特征是否健康
+	Fresh         bool                   `protobuf:"varint,8,opt,name=fresh,proto3" json:"fresh,omitempty"`                               // 该周期特征是否在 freshness window 内
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegimeFrameStatus) Reset() {
+	*x = RegimeFrameStatus{}
+	mi := &file_strategy_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegimeFrameStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegimeFrameStatus) ProtoMessage() {}
+
+func (x *RegimeFrameStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_strategy_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegimeFrameStatus.ProtoReflect.Descriptor instead.
+func (*RegimeFrameStatus) Descriptor() ([]byte, []int) {
+	return file_strategy_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *RegimeFrameStatus) GetInterval() string {
+	if x != nil {
+		return x.Interval
+	}
+	return ""
+}
+
+func (x *RegimeFrameStatus) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *RegimeFrameStatus) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *RegimeFrameStatus) GetRouteReason() string {
+	if x != nil {
+		return x.RouteReason
+	}
+	return ""
+}
+
+func (x *RegimeFrameStatus) GetConfidence() float64 {
+	if x != nil {
+		return x.Confidence
+	}
+	return 0
+}
+
+func (x *RegimeFrameStatus) GetLastUpdate() int64 {
+	if x != nil {
+		return x.LastUpdate
+	}
+	return 0
+}
+
+func (x *RegimeFrameStatus) GetHealthy() bool {
+	if x != nil {
+		return x.Healthy
+	}
+	return false
+}
+
+func (x *RegimeFrameStatus) GetFresh() bool {
+	if x != nil {
+		return x.Fresh
+	}
+	return false
+}
+
+type RegimeFusionStatus struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	H1            *RegimeFrameStatus     `protobuf:"bytes,1,opt,name=h1,proto3" json:"h1,omitempty"`                                              // 1H 主状态
+	M15           *RegimeFrameStatus     `protobuf:"bytes,2,opt,name=m15,proto3" json:"m15,omitempty"`                                            // 15M 辅助状态
+	FusedState    string                 `protobuf:"bytes,3,opt,name=fused_state,json=fusedState,proto3" json:"fused_state,omitempty"`            // 加权融合后的最终状态
+	FusedReason   string                 `protobuf:"bytes,4,opt,name=fused_reason,json=fusedReason,proto3" json:"fused_reason,omitempty"`         // 融合原因，如 timeframes_aligned / h1_primary_dominant
+	FusedScore    float64                `protobuf:"fixed64,5,opt,name=fused_score,json=fusedScore,proto3" json:"fused_score,omitempty"`          // 融合得分
+	PrimaryWeight float64                `protobuf:"fixed64,6,opt,name=primary_weight,json=primaryWeight,proto3" json:"primary_weight,omitempty"` // 主状态权重，当前默认 0.7
+	ConfirmWeight float64                `protobuf:"fixed64,7,opt,name=confirm_weight,json=confirmWeight,proto3" json:"confirm_weight,omitempty"` // 辅助状态权重，当前默认 0.3
+	LastUpdate    int64                  `protobuf:"varint,8,opt,name=last_update,json=lastUpdate,proto3" json:"last_update,omitempty"`           // 融合结果更新时间
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegimeFusionStatus) Reset() {
+	*x = RegimeFusionStatus{}
+	mi := &file_strategy_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegimeFusionStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegimeFusionStatus) ProtoMessage() {}
+
+func (x *RegimeFusionStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_strategy_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegimeFusionStatus.ProtoReflect.Descriptor instead.
+func (*RegimeFusionStatus) Descriptor() ([]byte, []int) {
+	return file_strategy_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *RegimeFusionStatus) GetH1() *RegimeFrameStatus {
+	if x != nil {
+		return x.H1
+	}
+	return nil
+}
+
+func (x *RegimeFusionStatus) GetM15() *RegimeFrameStatus {
+	if x != nil {
+		return x.M15
+	}
+	return nil
+}
+
+func (x *RegimeFusionStatus) GetFusedState() string {
+	if x != nil {
+		return x.FusedState
+	}
+	return ""
+}
+
+func (x *RegimeFusionStatus) GetFusedReason() string {
+	if x != nil {
+		return x.FusedReason
+	}
+	return ""
+}
+
+func (x *RegimeFusionStatus) GetFusedScore() float64 {
+	if x != nil {
+		return x.FusedScore
+	}
+	return 0
+}
+
+func (x *RegimeFusionStatus) GetPrimaryWeight() float64 {
+	if x != nil {
+		return x.PrimaryWeight
+	}
+	return 0
+}
+
+func (x *RegimeFusionStatus) GetConfirmWeight() float64 {
+	if x != nil {
+		return x.ConfirmWeight
+	}
+	return 0
+}
+
+func (x *RegimeFusionStatus) GetLastUpdate() int64 {
+	if x != nil {
+		return x.LastUpdate
+	}
+	return 0
+}
+
+type StrategyWarmupStatus struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	HistoryLen_4H     int32                  `protobuf:"varint,1,opt,name=history_len_4h,json=historyLen4h,proto3" json:"history_len_4h,omitempty"`             // 当前 4H 历史缓存长度
+	HistoryLen_1H     int32                  `protobuf:"varint,2,opt,name=history_len_1h,json=historyLen1h,proto3" json:"history_len_1h,omitempty"`             // 当前 1H 历史缓存长度
+	HistoryLen_15M    int32                  `protobuf:"varint,3,opt,name=history_len_15m,json=historyLen15m,proto3" json:"history_len_15m,omitempty"`          // 当前 15M 历史缓存长度
+	HistoryLen_1M     int32                  `protobuf:"varint,4,opt,name=history_len_1m,json=historyLen1m,proto3" json:"history_len_1m,omitempty"`             // 当前 1M 历史缓存长度
+	Source            string                 `protobuf:"bytes,5,opt,name=source,proto3" json:"source,omitempty"`                                                // 长度来源：runtime / cache / empty
+	Status            string                 `protobuf:"bytes,6,opt,name=status,proto3" json:"status,omitempty"`                                                // warmup_complete / warmup_incomplete，直接表示当前恢复是否完整
+	IncompleteReasons []string               `protobuf:"bytes,7,rep,name=incomplete_reasons,json=incompleteReasons,proto3" json:"incomplete_reasons,omitempty"` // 当恢复不完整时列出缺项，如 insufficient_1h_history
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *StrategyWarmupStatus) Reset() {
+	*x = StrategyWarmupStatus{}
+	mi := &file_strategy_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StrategyWarmupStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StrategyWarmupStatus) ProtoMessage() {}
+
+func (x *StrategyWarmupStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_strategy_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StrategyWarmupStatus.ProtoReflect.Descriptor instead.
+func (*StrategyWarmupStatus) Descriptor() ([]byte, []int) {
+	return file_strategy_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *StrategyWarmupStatus) GetHistoryLen_4H() int32 {
+	if x != nil {
+		return x.HistoryLen_4H
+	}
+	return 0
+}
+
+func (x *StrategyWarmupStatus) GetHistoryLen_1H() int32 {
+	if x != nil {
+		return x.HistoryLen_1H
+	}
+	return 0
+}
+
+func (x *StrategyWarmupStatus) GetHistoryLen_15M() int32 {
+	if x != nil {
+		return x.HistoryLen_15M
+	}
+	return 0
+}
+
+func (x *StrategyWarmupStatus) GetHistoryLen_1M() int32 {
+	if x != nil {
+		return x.HistoryLen_1M
+	}
+	return 0
+}
+
+func (x *StrategyWarmupStatus) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *StrategyWarmupStatus) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *StrategyWarmupStatus) GetIncompleteReasons() []string {
+	if x != nil {
+		return x.IncompleteReasons
+	}
+	return nil
+}
+
+type StrategyRouteRuntimeStatus struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Enabled         bool                   `protobuf:"varint,1,opt,name=enabled,proto3" json:"enabled,omitempty"`                                           // Universe 当前轮目标是否允许启用该策略
+	Template        string                 `protobuf:"bytes,2,opt,name=template,proto3" json:"template,omitempty"`                                          // Universe 当前轮目标模板
+	RouteBucket     string                 `protobuf:"bytes,3,opt,name=route_bucket,json=routeBucket,proto3" json:"route_bucket,omitempty"`                 // Universe 当前轮目标策略桶
+	TargetReason    string                 `protobuf:"bytes,4,opt,name=target_reason,json=targetReason,proto3" json:"target_reason,omitempty"`              // Universe 当前轮目标原因，可能来自路由、健康门禁或保护规则
+	BaseTemplate    string                 `protobuf:"bytes,5,opt,name=base_template,json=baseTemplate,proto3" json:"base_template,omitempty"`              // Universe 当前轮路由前的基础模板
+	RuntimeEnabled  bool                   `protobuf:"varint,6,opt,name=runtime_enabled,json=runtimeEnabled,proto3" json:"runtime_enabled,omitempty"`       // Universe 应用后当前实际是否保持启用
+	RuntimeTemplate string                 `protobuf:"bytes,7,opt,name=runtime_template,json=runtimeTemplate,proto3" json:"runtime_template,omitempty"`     // Universe 应用后当前实际模板
+	ApplyAction     string                 `protobuf:"bytes,8,opt,name=apply_action,json=applyAction,proto3" json:"apply_action,omitempty"`                 // 当前轮 Universe 对该 symbol 执行的动作
+	ApplyGateReason string                 `protobuf:"bytes,9,opt,name=apply_gate_reason,json=applyGateReason,proto3" json:"apply_gate_reason,omitempty"`   // 当前实际状态与目标态不一致时的运行时门禁原因
+	HasStrategy     bool                   `protobuf:"varint,10,opt,name=has_strategy,json=hasStrategy,proto3" json:"has_strategy,omitempty"`               // 当前运行时是否存在策略实例
+	HasOpenPosition bool                   `protobuf:"varint,11,opt,name=has_open_position,json=hasOpenPosition,proto3" json:"has_open_position,omitempty"` // 当前是否仍持有未平仓位
+	RegimeFusion    *RegimeFusionStatus    `protobuf:"bytes,12,opt,name=regime_fusion,json=regimeFusion,proto3" json:"regime_fusion,omitempty"`             // Universe 最近一轮 1H/15M 多周期融合判态
+	Warmup          *StrategyWarmupStatus  `protobuf:"bytes,13,opt,name=warmup,proto3" json:"warmup,omitempty"`                                             // 当前实例或缓存中的多周期历史长度，便于判断冷启动恢复是否完整
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *StrategyRouteRuntimeStatus) Reset() {
+	*x = StrategyRouteRuntimeStatus{}
+	mi := &file_strategy_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StrategyRouteRuntimeStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StrategyRouteRuntimeStatus) ProtoMessage() {}
+
+func (x *StrategyRouteRuntimeStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_strategy_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StrategyRouteRuntimeStatus.ProtoReflect.Descriptor instead.
+func (*StrategyRouteRuntimeStatus) Descriptor() ([]byte, []int) {
+	return file_strategy_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *StrategyRouteRuntimeStatus) GetEnabled() bool {
+	if x != nil {
+		return x.Enabled
+	}
+	return false
+}
+
+func (x *StrategyRouteRuntimeStatus) GetTemplate() string {
+	if x != nil {
+		return x.Template
+	}
+	return ""
+}
+
+func (x *StrategyRouteRuntimeStatus) GetRouteBucket() string {
+	if x != nil {
+		return x.RouteBucket
+	}
+	return ""
+}
+
+func (x *StrategyRouteRuntimeStatus) GetTargetReason() string {
+	if x != nil {
+		return x.TargetReason
+	}
+	return ""
+}
+
+func (x *StrategyRouteRuntimeStatus) GetBaseTemplate() string {
+	if x != nil {
+		return x.BaseTemplate
+	}
+	return ""
+}
+
+func (x *StrategyRouteRuntimeStatus) GetRuntimeEnabled() bool {
+	if x != nil {
+		return x.RuntimeEnabled
+	}
+	return false
+}
+
+func (x *StrategyRouteRuntimeStatus) GetRuntimeTemplate() string {
+	if x != nil {
+		return x.RuntimeTemplate
+	}
+	return ""
+}
+
+func (x *StrategyRouteRuntimeStatus) GetApplyAction() string {
+	if x != nil {
+		return x.ApplyAction
+	}
+	return ""
+}
+
+func (x *StrategyRouteRuntimeStatus) GetApplyGateReason() string {
+	if x != nil {
+		return x.ApplyGateReason
+	}
+	return ""
+}
+
+func (x *StrategyRouteRuntimeStatus) GetHasStrategy() bool {
+	if x != nil {
+		return x.HasStrategy
+	}
+	return false
+}
+
+func (x *StrategyRouteRuntimeStatus) GetHasOpenPosition() bool {
+	if x != nil {
+		return x.HasOpenPosition
+	}
+	return false
+}
+
+func (x *StrategyRouteRuntimeStatus) GetRegimeFusion() *RegimeFusionStatus {
+	if x != nil {
+		return x.RegimeFusion
+	}
+	return nil
+}
+
+func (x *StrategyRouteRuntimeStatus) GetWarmup() *StrategyWarmupStatus {
+	if x != nil {
+		return x.Warmup
+	}
+	return nil
+}
+
+type StrategyStatus struct {
+	state         protoimpl.MessageState      `protogen:"open.v1"`
+	StrategyId    string                      `protobuf:"bytes,1,opt,name=strategy_id,json=strategyId,proto3" json:"strategy_id,omitempty"`
+	Status        string                      `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"` // RUNNING, STOPPED, ERROR
+	Message       string                      `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	LastUpdate    int64                       `protobuf:"varint,4,opt,name=last_update,json=lastUpdate,proto3" json:"last_update,omitempty"`
+	Allocator     *PositionAllocatorStatus    `protobuf:"bytes,5,opt,name=allocator,proto3" json:"allocator,omitempty"` // 结构化 allocator 视角，便于外部直接消费
+	Router        *StrategyRouteRuntimeStatus `protobuf:"bytes,6,opt,name=router,proto3" json:"router,omitempty"`       // Universe 当前轮路由与运行时目标视角
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StrategyStatus) Reset() {
 	*x = StrategyStatus{}
-	mi := &file_strategy_proto_msgTypes[3]
+	mi := &file_strategy_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -378,7 +1092,7 @@ func (x *StrategyStatus) String() string {
 func (*StrategyStatus) ProtoMessage() {}
 
 func (x *StrategyStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_strategy_proto_msgTypes[3]
+	mi := &file_strategy_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -391,7 +1105,7 @@ func (x *StrategyStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StrategyStatus.ProtoReflect.Descriptor instead.
 func (*StrategyStatus) Descriptor() ([]byte, []int) {
-	return file_strategy_proto_rawDescGZIP(), []int{3}
+	return file_strategy_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *StrategyStatus) GetStrategyId() string {
@@ -422,6 +1136,20 @@ func (x *StrategyStatus) GetLastUpdate() int64 {
 	return 0
 }
 
+func (x *StrategyStatus) GetAllocator() *PositionAllocatorStatus {
+	if x != nil {
+		return x.Allocator
+	}
+	return nil
+}
+
+func (x *StrategyStatus) GetRouter() *StrategyRouteRuntimeStatus {
+	if x != nil {
+		return x.Router
+	}
+	return nil
+}
+
 type StrategyRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	StrategyId    string                 `protobuf:"bytes,1,opt,name=strategy_id,json=strategyId,proto3" json:"strategy_id,omitempty"`
@@ -431,7 +1159,7 @@ type StrategyRequest struct {
 
 func (x *StrategyRequest) Reset() {
 	*x = StrategyRequest{}
-	mi := &file_strategy_proto_msgTypes[4]
+	mi := &file_strategy_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -443,7 +1171,7 @@ func (x *StrategyRequest) String() string {
 func (*StrategyRequest) ProtoMessage() {}
 
 func (x *StrategyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_strategy_proto_msgTypes[4]
+	mi := &file_strategy_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -456,7 +1184,7 @@ func (x *StrategyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StrategyRequest.ProtoReflect.Descriptor instead.
 func (*StrategyRequest) Descriptor() ([]byte, []int) {
-	return file_strategy_proto_rawDescGZIP(), []int{4}
+	return file_strategy_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *StrategyRequest) GetStrategyId() string {
@@ -470,7 +1198,7 @@ var File_strategy_proto protoreflect.FileDescriptor
 
 const file_strategy_proto_rawDesc = "" +
 	"\n" +
-	"\x0estrategy.proto\x12\bstrategy\"\xec\x01\n" +
+	"\x0estrategy.proto\x12\bstrategy\"\xa3\x04\n" +
 	"\fSignalReason\x12\x18\n" +
 	"\asummary\x18\x01 \x01(\tR\asummary\x12\x14\n" +
 	"\x05phase\x18\x02 \x01(\tR\x05phase\x12#\n" +
@@ -478,7 +1206,23 @@ const file_strategy_proto_rawDesc = "" +
 	"\rsetup_context\x18\x04 \x01(\tR\fsetupContext\x12!\n" +
 	"\fpath_context\x18\x05 \x01(\tR\vpathContext\x12+\n" +
 	"\x11execution_context\x18\x06 \x01(\tR\x10executionContext\x12\x12\n" +
-	"\x04tags\x18\a \x03(\tR\x04tags\"\xce\x04\n" +
+	"\x04tags\x18\a \x03(\tR\x04tags\x12!\n" +
+	"\froute_bucket\x18\b \x01(\tR\vrouteBucket\x12!\n" +
+	"\froute_reason\x18\t \x01(\tR\vrouteReason\x12%\n" +
+	"\x0eroute_template\x18\n" +
+	" \x01(\tR\rrouteTemplate\x12?\n" +
+	"\tallocator\x18\v \x01(\v2!.strategy.PositionAllocatorStatusR\tallocator\x121\n" +
+	"\x05range\x18\f \x01(\v2\x1b.strategy.RangeSignalReasonR\x05range\x12(\n" +
+	"\x10exit_reason_kind\x18\r \x01(\tR\x0eexitReasonKind\x12*\n" +
+	"\x11exit_reason_label\x18\x0e \x01(\tR\x0fexitReasonLabel\"\x9a\x02\n" +
+	"\x11RangeSignalReason\x12\x1e\n" +
+	"\vh1_range_ok\x18\x01 \x01(\bR\th1RangeOk\x12\x1a\n" +
+	"\th1_adx_ok\x18\x02 \x01(\bR\ah1AdxOk\x12'\n" +
+	"\x10h1_boll_width_ok\x18\x03 \x01(\bR\rh1BollWidthOk\x12&\n" +
+	"\x0fm15_touch_lower\x18\x04 \x01(\bR\rm15TouchLower\x12%\n" +
+	"\x0fm15_rsi_turn_up\x18\x05 \x01(\bR\fm15RsiTurnUp\x12&\n" +
+	"\x0fm15_touch_upper\x18\x06 \x01(\bR\rm15TouchUpper\x12)\n" +
+	"\x11m15_rsi_turn_down\x18\a \x01(\bR\x0em15RsiTurnDown\"\xce\x04\n" +
 	"\x06Signal\x12\x1f\n" +
 	"\vstrategy_id\x18\x01 \x01(\tR\n" +
 	"strategyId\x12\x16\n" +
@@ -515,14 +1259,78 @@ const file_strategy_proto_rawDesc = "" +
 	"\aenabled\x18\x04 \x01(\bR\aenabled\x1a=\n" +
 	"\x0fParametersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x01R\x05value:\x028\x01\"\x84\x01\n" +
+	"\x05value\x18\x02 \x01(\x01R\x05value:\x028\x01\"\xb9\x03\n" +
+	"\x17PositionAllocatorStatus\x12\x1a\n" +
+	"\btemplate\x18\x01 \x01(\tR\btemplate\x12!\n" +
+	"\froute_bucket\x18\x02 \x01(\tR\vrouteBucket\x12!\n" +
+	"\froute_reason\x18\x03 \x01(\tR\vrouteReason\x12\x14\n" +
+	"\x05score\x18\x04 \x01(\x01R\x05score\x12!\n" +
+	"\fscore_source\x18\x05 \x01(\tR\vscoreSource\x12#\n" +
+	"\rbucket_budget\x18\x06 \x01(\x01R\fbucketBudget\x12'\n" +
+	"\x0fstrategy_weight\x18\a \x01(\x01R\x0estrategyWeight\x12#\n" +
+	"\rsymbol_weight\x18\b \x01(\x01R\fsymbolWeight\x12\x1d\n" +
+	"\n" +
+	"risk_scale\x18\t \x01(\x01R\triskScale\x12'\n" +
+	"\x0fposition_budget\x18\n" +
+	" \x01(\x01R\x0epositionBudget\x12%\n" +
+	"\x0etrading_paused\x18\v \x01(\bR\rtradingPaused\x12!\n" +
+	"\fpause_reason\x18\f \x01(\tR\vpauseReason\"\xf1\x01\n" +
+	"\x11RegimeFrameStatus\x12\x1a\n" +
+	"\binterval\x18\x01 \x01(\tR\binterval\x12\x14\n" +
+	"\x05state\x18\x02 \x01(\tR\x05state\x12\x16\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\x12!\n" +
+	"\froute_reason\x18\x04 \x01(\tR\vrouteReason\x12\x1e\n" +
+	"\n" +
+	"confidence\x18\x05 \x01(\x01R\n" +
+	"confidence\x12\x1f\n" +
+	"\vlast_update\x18\x06 \x01(\x03R\n" +
+	"lastUpdate\x12\x18\n" +
+	"\ahealthy\x18\a \x01(\bR\ahealthy\x12\x14\n" +
+	"\x05fresh\x18\b \x01(\bR\x05fresh\"\xc4\x02\n" +
+	"\x12RegimeFusionStatus\x12+\n" +
+	"\x02h1\x18\x01 \x01(\v2\x1b.strategy.RegimeFrameStatusR\x02h1\x12-\n" +
+	"\x03m15\x18\x02 \x01(\v2\x1b.strategy.RegimeFrameStatusR\x03m15\x12\x1f\n" +
+	"\vfused_state\x18\x03 \x01(\tR\n" +
+	"fusedState\x12!\n" +
+	"\ffused_reason\x18\x04 \x01(\tR\vfusedReason\x12\x1f\n" +
+	"\vfused_score\x18\x05 \x01(\x01R\n" +
+	"fusedScore\x12%\n" +
+	"\x0eprimary_weight\x18\x06 \x01(\x01R\rprimaryWeight\x12%\n" +
+	"\x0econfirm_weight\x18\a \x01(\x01R\rconfirmWeight\x12\x1f\n" +
+	"\vlast_update\x18\b \x01(\x03R\n" +
+	"lastUpdate\"\x8f\x02\n" +
+	"\x14StrategyWarmupStatus\x12$\n" +
+	"\x0ehistory_len_4h\x18\x01 \x01(\x05R\fhistoryLen4h\x12$\n" +
+	"\x0ehistory_len_1h\x18\x02 \x01(\x05R\fhistoryLen1h\x12&\n" +
+	"\x0fhistory_len_15m\x18\x03 \x01(\x05R\rhistoryLen15m\x12$\n" +
+	"\x0ehistory_len_1m\x18\x04 \x01(\x05R\fhistoryLen1m\x12\x16\n" +
+	"\x06source\x18\x05 \x01(\tR\x06source\x12\x16\n" +
+	"\x06status\x18\x06 \x01(\tR\x06status\x12-\n" +
+	"\x12incomplete_reasons\x18\a \x03(\tR\x11incompleteReasons\"\xac\x04\n" +
+	"\x1aStrategyRouteRuntimeStatus\x12\x18\n" +
+	"\aenabled\x18\x01 \x01(\bR\aenabled\x12\x1a\n" +
+	"\btemplate\x18\x02 \x01(\tR\btemplate\x12!\n" +
+	"\froute_bucket\x18\x03 \x01(\tR\vrouteBucket\x12#\n" +
+	"\rtarget_reason\x18\x04 \x01(\tR\ftargetReason\x12#\n" +
+	"\rbase_template\x18\x05 \x01(\tR\fbaseTemplate\x12'\n" +
+	"\x0fruntime_enabled\x18\x06 \x01(\bR\x0eruntimeEnabled\x12)\n" +
+	"\x10runtime_template\x18\a \x01(\tR\x0fruntimeTemplate\x12!\n" +
+	"\fapply_action\x18\b \x01(\tR\vapplyAction\x12*\n" +
+	"\x11apply_gate_reason\x18\t \x01(\tR\x0fapplyGateReason\x12!\n" +
+	"\fhas_strategy\x18\n" +
+	" \x01(\bR\vhasStrategy\x12*\n" +
+	"\x11has_open_position\x18\v \x01(\bR\x0fhasOpenPosition\x12A\n" +
+	"\rregime_fusion\x18\f \x01(\v2\x1c.strategy.RegimeFusionStatusR\fregimeFusion\x126\n" +
+	"\x06warmup\x18\r \x01(\v2\x1e.strategy.StrategyWarmupStatusR\x06warmup\"\x83\x02\n" +
 	"\x0eStrategyStatus\x12\x1f\n" +
 	"\vstrategy_id\x18\x01 \x01(\tR\n" +
 	"strategyId\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\tR\x06status\x12\x18\n" +
 	"\amessage\x18\x03 \x01(\tR\amessage\x12\x1f\n" +
 	"\vlast_update\x18\x04 \x01(\x03R\n" +
-	"lastUpdate\"2\n" +
+	"lastUpdate\x12?\n" +
+	"\tallocator\x18\x05 \x01(\v2!.strategy.PositionAllocatorStatusR\tallocator\x12<\n" +
+	"\x06router\x18\x06 \x01(\v2$.strategy.StrategyRouteRuntimeStatusR\x06router\"2\n" +
 	"\x0fStrategyRequest\x12\x1f\n" +
 	"\vstrategy_id\x18\x01 \x01(\tR\n" +
 	"strategyId2\xad\x02\n" +
@@ -544,33 +1352,47 @@ func file_strategy_proto_rawDescGZIP() []byte {
 	return file_strategy_proto_rawDescData
 }
 
-var file_strategy_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_strategy_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_strategy_proto_goTypes = []any{
-	(*SignalReason)(nil),    // 0: strategy.SignalReason
-	(*Signal)(nil),          // 1: strategy.Signal
-	(*StrategyConfig)(nil),  // 2: strategy.StrategyConfig
-	(*StrategyStatus)(nil),  // 3: strategy.StrategyStatus
-	(*StrategyRequest)(nil), // 4: strategy.StrategyRequest
-	nil,                     // 5: strategy.Signal.IndicatorsEntry
-	nil,                     // 6: strategy.StrategyConfig.ParametersEntry
+	(*SignalReason)(nil),               // 0: strategy.SignalReason
+	(*RangeSignalReason)(nil),          // 1: strategy.RangeSignalReason
+	(*Signal)(nil),                     // 2: strategy.Signal
+	(*StrategyConfig)(nil),             // 3: strategy.StrategyConfig
+	(*PositionAllocatorStatus)(nil),    // 4: strategy.PositionAllocatorStatus
+	(*RegimeFrameStatus)(nil),          // 5: strategy.RegimeFrameStatus
+	(*RegimeFusionStatus)(nil),         // 6: strategy.RegimeFusionStatus
+	(*StrategyWarmupStatus)(nil),       // 7: strategy.StrategyWarmupStatus
+	(*StrategyRouteRuntimeStatus)(nil), // 8: strategy.StrategyRouteRuntimeStatus
+	(*StrategyStatus)(nil),             // 9: strategy.StrategyStatus
+	(*StrategyRequest)(nil),            // 10: strategy.StrategyRequest
+	nil,                                // 11: strategy.Signal.IndicatorsEntry
+	nil,                                // 12: strategy.StrategyConfig.ParametersEntry
 }
 var file_strategy_proto_depIdxs = []int32{
-	5, // 0: strategy.Signal.indicators:type_name -> strategy.Signal.IndicatorsEntry
-	0, // 1: strategy.Signal.signal_reason:type_name -> strategy.SignalReason
-	6, // 2: strategy.StrategyConfig.parameters:type_name -> strategy.StrategyConfig.ParametersEntry
-	2, // 3: strategy.StrategyService.StartStrategy:input_type -> strategy.StrategyConfig
-	4, // 4: strategy.StrategyService.StopStrategy:input_type -> strategy.StrategyRequest
-	4, // 5: strategy.StrategyService.GetStrategyStatus:input_type -> strategy.StrategyRequest
-	4, // 6: strategy.StrategyService.StreamSignals:input_type -> strategy.StrategyRequest
-	3, // 7: strategy.StrategyService.StartStrategy:output_type -> strategy.StrategyStatus
-	3, // 8: strategy.StrategyService.StopStrategy:output_type -> strategy.StrategyStatus
-	3, // 9: strategy.StrategyService.GetStrategyStatus:output_type -> strategy.StrategyStatus
-	1, // 10: strategy.StrategyService.StreamSignals:output_type -> strategy.Signal
-	7, // [7:11] is the sub-list for method output_type
-	3, // [3:7] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	4,  // 0: strategy.SignalReason.allocator:type_name -> strategy.PositionAllocatorStatus
+	1,  // 1: strategy.SignalReason.range:type_name -> strategy.RangeSignalReason
+	11, // 2: strategy.Signal.indicators:type_name -> strategy.Signal.IndicatorsEntry
+	0,  // 3: strategy.Signal.signal_reason:type_name -> strategy.SignalReason
+	12, // 4: strategy.StrategyConfig.parameters:type_name -> strategy.StrategyConfig.ParametersEntry
+	5,  // 5: strategy.RegimeFusionStatus.h1:type_name -> strategy.RegimeFrameStatus
+	5,  // 6: strategy.RegimeFusionStatus.m15:type_name -> strategy.RegimeFrameStatus
+	6,  // 7: strategy.StrategyRouteRuntimeStatus.regime_fusion:type_name -> strategy.RegimeFusionStatus
+	7,  // 8: strategy.StrategyRouteRuntimeStatus.warmup:type_name -> strategy.StrategyWarmupStatus
+	4,  // 9: strategy.StrategyStatus.allocator:type_name -> strategy.PositionAllocatorStatus
+	8,  // 10: strategy.StrategyStatus.router:type_name -> strategy.StrategyRouteRuntimeStatus
+	3,  // 11: strategy.StrategyService.StartStrategy:input_type -> strategy.StrategyConfig
+	10, // 12: strategy.StrategyService.StopStrategy:input_type -> strategy.StrategyRequest
+	10, // 13: strategy.StrategyService.GetStrategyStatus:input_type -> strategy.StrategyRequest
+	10, // 14: strategy.StrategyService.StreamSignals:input_type -> strategy.StrategyRequest
+	9,  // 15: strategy.StrategyService.StartStrategy:output_type -> strategy.StrategyStatus
+	9,  // 16: strategy.StrategyService.StopStrategy:output_type -> strategy.StrategyStatus
+	9,  // 17: strategy.StrategyService.GetStrategyStatus:output_type -> strategy.StrategyStatus
+	2,  // 18: strategy.StrategyService.StreamSignals:output_type -> strategy.Signal
+	15, // [15:19] is the sub-list for method output_type
+	11, // [11:15] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_strategy_proto_init() }
@@ -584,7 +1406,7 @@ func file_strategy_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_strategy_proto_rawDesc), len(file_strategy_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

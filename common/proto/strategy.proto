@@ -20,6 +20,23 @@ message SignalReason {
   string path_context = 5;      // 收割路径或盘口路径背景
   string execution_context = 6; // 止损止盈、仓位、确认条件等执行信息
   repeated string tags = 7;     // 标签，如 ["15m", "trend_following", "long"]
+  string route_bucket = 8;      // 上游路由器产出的统一策略桶
+  string route_reason = 9;      // 上游路由器产出的统一路由原因
+  string route_template = 10;   // 上游路由器最终选中的模板
+  PositionAllocatorStatus allocator = 11; // 发出信号时对应的 allocator 快照
+  RangeSignalReason range = 12; // 震荡策略的结构化判定摘要，便于前端直接展示
+  string exit_reason_kind = 13; // 结构化出场原因分类，如 partial_take_profit / break_even_stop / rsi_take_profit
+  string exit_reason_label = 14; // 出场原因中文标签，如 分批止盈 / 保本止损 / RSI止盈
+}
+
+message RangeSignalReason {
+  bool h1_range_ok = 1;         // 1H 是否满足震荡前提
+  bool h1_adx_ok = 2;           // 1H ADX 是否低于阈值
+  bool h1_boll_width_ok = 3;    // 1H Boll 带宽是否足够收窄
+  bool m15_touch_lower = 4;     // 15M 是否触及下轨
+  bool m15_rsi_turn_up = 5;     // 15M RSI 是否拐头向上
+  bool m15_touch_upper = 6;     // 15M 是否触及上轨
+  bool m15_rsi_turn_down = 7;   // 15M RSI 是否拐头向下
 }
 
 message Signal {
@@ -55,11 +72,76 @@ message StrategyConfig {
 }
 
 // 策略状态
+message PositionAllocatorStatus {
+  string template = 1;          // 当前 symbol 最终使用的策略模板
+  string route_bucket = 2;      // 当前 symbol 对应的统一策略桶
+  string route_reason = 3;      // 当前 symbol 对应的统一路由原因
+  double score = 4;             // 当前 symbol 预算分配使用的最终 score
+  string score_source = 5;      // score 的来源，如 symbol_score / regime_analysis
+  double bucket_budget = 6;     // 当前策略桶的总预算
+  double strategy_weight = 7;   // 当前策略桶在本轮 allocator 中的配比
+  double symbol_weight = 8;     // 当前 symbol 在桶内的配比
+  double risk_scale = 9;        // 当前全局风险缩放系数
+  double position_budget = 10;  // 当前 symbol 的最终仓位预算
+  bool trading_paused = 11;     // 当前轮是否被 allocator 暂停交易
+  string pause_reason = 12;     // allocator 暂停原因
+}
+
+message RegimeFrameStatus {
+  string interval = 1;          // 周期，如 1h / 15m
+  string state = 2;             // 该周期当前识别出的状态
+  string reason = 3;            // 该周期 marketstate 原始原因
+  string route_reason = 4;      // 该周期映射后的统一路由原因
+  double confidence = 5;        // 该周期判态置信度
+  int64 last_update = 6;        // 该周期最近一次更新时间
+  bool healthy = 7;             // 该周期特征是否健康
+  bool fresh = 8;               // 该周期特征是否在 freshness window 内
+}
+
+message RegimeFusionStatus {
+  RegimeFrameStatus h1 = 1;     // 1H 主状态
+  RegimeFrameStatus m15 = 2;    // 15M 辅助状态
+  string fused_state = 3;       // 加权融合后的最终状态
+  string fused_reason = 4;      // 融合原因，如 timeframes_aligned / h1_primary_dominant
+  double fused_score = 5;       // 融合得分
+  double primary_weight = 6;    // 主状态权重，当前默认 0.7
+  double confirm_weight = 7;    // 辅助状态权重，当前默认 0.3
+  int64 last_update = 8;        // 融合结果更新时间
+}
+
+message StrategyWarmupStatus {
+  int32 history_len_4h = 1;     // 当前 4H 历史缓存长度
+  int32 history_len_1h = 2;     // 当前 1H 历史缓存长度
+  int32 history_len_15m = 3;    // 当前 15M 历史缓存长度
+  int32 history_len_1m = 4;     // 当前 1M 历史缓存长度
+  string source = 5;            // 长度来源：runtime / cache / empty
+  string status = 6;            // warmup_complete / warmup_incomplete，直接表示当前恢复是否完整
+  repeated string incomplete_reasons = 7; // 当恢复不完整时列出缺项，如 insufficient_1h_history
+}
+
+message StrategyRouteRuntimeStatus {
+  bool enabled = 1;             // Universe 当前轮目标是否允许启用该策略
+  string template = 2;          // Universe 当前轮目标模板
+  string route_bucket = 3;      // Universe 当前轮目标策略桶
+  string target_reason = 4;     // Universe 当前轮目标原因，可能来自路由、健康门禁或保护规则
+  string base_template = 5;     // Universe 当前轮路由前的基础模板
+  bool runtime_enabled = 6;     // Universe 应用后当前实际是否保持启用
+  string runtime_template = 7;  // Universe 应用后当前实际模板
+  string apply_action = 8;      // 当前轮 Universe 对该 symbol 执行的动作
+  string apply_gate_reason = 9; // 当前实际状态与目标态不一致时的运行时门禁原因
+  bool has_strategy = 10;       // 当前运行时是否存在策略实例
+  bool has_open_position = 11;  // 当前是否仍持有未平仓位
+  RegimeFusionStatus regime_fusion = 12; // Universe 最近一轮 1H/15M 多周期融合判态
+  StrategyWarmupStatus warmup = 13; // 当前实例或缓存中的多周期历史长度，便于判断冷启动恢复是否完整
+}
+
 message StrategyStatus {
   string strategy_id = 1;
   string status = 2; // RUNNING, STOPPED, ERROR
   string message = 3;
   int64 last_update = 4;
+  PositionAllocatorStatus allocator = 5; // 结构化 allocator 视角，便于外部直接消费
+  StrategyRouteRuntimeStatus router = 6; // Universe 当前轮路由与运行时目标视角
 }
 
 service StrategyService {

@@ -63,6 +63,15 @@ func TestJSONLLoggerWriteSelectorDecisionIncludesReasonZh(t *testing.T) {
 	if strings.Contains(lines[0], `\u003e`) {
 		t.Fatalf("raw log line still contains escaped >: %s", lines[0])
 	}
+	if !strings.Contains(lines[0], `"score":0.550000`) {
+		t.Fatalf("raw log line score = %s, want fixed 6 decimal places", lines[0])
+	}
+	if !strings.Contains(lines[0], `"atr_pct":"0.000390"`) {
+		t.Fatalf("raw log line atr_pct = %s, want fixed 6 decimal places", lines[0])
+	}
+	if !strings.Contains(lines[0], `ATR 命中 range 阈值，按 breakout>range>trend 顺序优先判为 range`) {
+		t.Fatalf("raw log line still contains escaped classified_reason_zh: %s", lines[0])
+	}
 
 	var entry map[string]any
 	if err := json.Unmarshal([]byte(lines[0]), &entry); err != nil {
@@ -96,15 +105,18 @@ func TestJSONLLoggerWriteSelectorDecisionIncludesReasonZh(t *testing.T) {
 	if got := stateVote["trend_match"]; got != true {
 		t.Fatalf("state_vote.trend_match = %v, want true", got)
 	}
+	if got := stateVote["atr_pct"]; got != "0.000390" {
+		t.Fatalf("state_vote.atr_pct = %v, want 0.000390", got)
+	}
 	rankDetail, ok := stateVote["rank_detail"].(map[string]any)
 	if !ok {
 		t.Fatalf("state_vote.rank_detail = %T, want map", stateVote["rank_detail"])
 	}
-	if got := rankDetail["base_score"]; got != 0.82 {
-		t.Fatalf("state_vote.rank_detail.base_score = %v, want 0.82", got)
+	if got := rankDetail["base_score"]; got != "0.8200" {
+		t.Fatalf("state_vote.rank_detail.base_score = %v, want 0.8200", got)
 	}
-	if got := rankDetail["volatility_score"]; got != 0.9 {
-		t.Fatalf("state_vote.rank_detail.volatility_score = %v, want 0.9", got)
+	if got := rankDetail["volatility_score"]; got != "0.9000" {
+		t.Fatalf("state_vote.rank_detail.volatility_score = %v, want 0.9000", got)
 	}
 }
 
@@ -124,6 +136,7 @@ func TestJSONLLoggerWriteMetaIncludesRankDetail(t *testing.T) {
 				ClassifiedReason: "trend_match",
 				Fresh:            true,
 				Healthy:          true,
+				AtrPct:           0.001234567,
 				RankDetail: &RankDetail{
 					BaseScore:       0.88,
 					TrendScore:      1,
@@ -143,6 +156,9 @@ func TestJSONLLoggerWriteMetaIncludesRankDetail(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("log lines = %d, want 1", len(lines))
 	}
+	if !strings.Contains(lines[0], `"atr_pct":"0.001235"`) {
+		t.Fatalf("raw meta log line atr_pct = %s, want fixed 6 decimal places", lines[0])
+	}
 
 	var entry map[string]any
 	if err := json.Unmarshal([]byte(lines[0]), &entry); err != nil {
@@ -160,7 +176,10 @@ func TestJSONLLoggerWriteMetaIncludesRankDetail(t *testing.T) {
 	if !ok {
 		t.Fatalf("state_votes.BNBUSDT.rank_detail = %T, want map", bnbVote["rank_detail"])
 	}
-	if got := rankDetail["base_score"]; got != 0.88 {
-		t.Fatalf("state_votes.BNBUSDT.rank_detail.base_score = %v, want 0.88", got)
+	if got := bnbVote["atr_pct"]; got != "0.001235" {
+		t.Fatalf("state_votes.BNBUSDT.atr_pct = %v, want 0.001235", got)
+	}
+	if got := rankDetail["base_score"]; got != "0.8800" {
+		t.Fatalf("state_votes.BNBUSDT.rank_detail.base_score = %v, want 0.8800", got)
 	}
 }

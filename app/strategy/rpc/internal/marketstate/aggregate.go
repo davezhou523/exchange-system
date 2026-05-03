@@ -1,22 +1,29 @@
 package marketstate
 
-import "time"
+import (
+	"time"
 
-// Aggregate 把多个 symbol 的状态识别结果聚合成一轮全局市场状态。
-func Aggregate(now time.Time, results map[string]Result) AggregateResult {
+	"exchange-system/common/regimejudge"
+)
+
+// Aggregate 基于统一 Analysis 命中面和对外 Result 共同聚合一轮全局市场状态。
+func Aggregate(now time.Time, analyses map[string]regimejudge.Analysis, results map[string]Result) AggregateResult {
 	out := AggregateResult{
 		State:       MarketStateUnknown,
 		Reason:      "no_results",
 		UpdatedAt:   now.UTC(),
 		StateCounts: make(map[string]int),
+		MatchCounts: make(map[string]int),
 	}
-	if len(results) == 0 {
+	if len(results) == 0 && len(analyses) == 0 {
 		return out
 	}
 
-	counts := make(map[MarketState]int)
+	stateCounts := make(map[MarketState]int)
+	matchCounts := make(map[MarketState]int)
 	confidenceSums := make(map[MarketState]float64)
-	dominantSymbols := make(map[MarketState][]string)
+	stateSymbols := make(map[MarketState][]string)
+	matchSymbols := make(map[MarketState][]string)
 
 	for symbol, result := range results {
 		state := result.State
@@ -28,14 +35,62 @@ func Aggregate(now time.Time, results map[string]Result) AggregateResult {
 			out.UnknownCount++
 			continue
 		}
-		out.HealthyCount++
-		counts[state]++
+		stateCounts[state]++
 		confidenceSums[state] += result.Confidence
-		dominantSymbols[state] = append(dominantSymbols[state], symbol)
+		stateSymbols[state] = append(stateSymbols[state], symbol)
 	}
 
+	for symbol, analysis := range analyses {
+		if !analysis.Healthy || !analysis.Fresh {
+			continue
+		}
+		out.HealthyCount++
+		if analysis.BreakoutMatch {
+			matchCounts[MarketStateBreakout]++
+			matchSymbols[MarketStateBreakout] = append(matchSymbols[MarketStateBreakout], symbol)
+		}
+		if analysis.RangeMatch {
+			matchCounts[MarketStateRange]++
+			matchSymbols[MarketStateRange] = append(matchSymbols[MarketStateRange], symbol)
+		}
+		if analysis.BullTrendStrict {
+			matchCounts[MarketStateTrendUp]++
+			matchSymbols[MarketStateTrendUp] = append(matchSymbols[MarketStateTrendUp], symbol)
+		}
+		if analysis.BearTrendStrict {
+			matchCounts[MarketStateTrendDown]++
+			matchSymbols[MarketStateTrendDown] = append(matchSymbols[MarketStateTrendDown], symbol)
+		}
+	}
+	for state, count := range matchCounts {
+		out.MatchCounts[string(state)] = count
+	}
+
+	bestState, bestMatchCount, bestConfidenceSum := selectDominantState(matchCounts, stateCounts, confidenceSums)
+	if bestState == MarketStateUnknown || (bestMatchCount == 0 && len(results) == 0) {
+		out.Reason = "all_unknown"
+		return out
+	}
+
+	out.State = bestState
+	if stateCounts[bestState] > 0 {
+		out.Confidence = bestConfidenceSum / float64(stateCounts[bestState])
+	}
+	if bestMatchCount > 0 {
+		out.Reason = "dominant_match_surface"
+		out.DominantSymbols = matchSymbols[bestState]
+		return out
+	}
+	out.Reason = "dominant_state"
+	out.DominantSymbols = stateSymbols[bestState]
+	return out
+}
+
+// selectDominantState 按命中面数量、对外状态数量和置信度和依次选择本轮主导状态。
+func selectDominantState(matchCounts, stateCounts map[MarketState]int, confidenceSums map[MarketState]float64) (MarketState, int, float64) {
 	bestState := MarketStateUnknown
-	bestCount := 0
+	bestMatchCount := 0
+	bestStateCount := 0
 	bestConfidenceSum := 0.0
 	for _, candidate := range []MarketState{
 		MarketStateTrendUp,
@@ -43,22 +98,17 @@ func Aggregate(now time.Time, results map[string]Result) AggregateResult {
 		MarketStateBreakout,
 		MarketStateRange,
 	} {
-		count := counts[candidate]
+		matchCount := matchCounts[candidate]
+		stateCount := stateCounts[candidate]
 		confidenceSum := confidenceSums[candidate]
-		if count > bestCount || (count == bestCount && confidenceSum > bestConfidenceSum) {
+		if matchCount > bestMatchCount ||
+			(matchCount == bestMatchCount && stateCount > bestStateCount) ||
+			(matchCount == bestMatchCount && stateCount == bestStateCount && confidenceSum > bestConfidenceSum) {
 			bestState = candidate
-			bestCount = count
+			bestMatchCount = matchCount
+			bestStateCount = stateCount
 			bestConfidenceSum = confidenceSum
 		}
 	}
-	if bestState == MarketStateUnknown || bestCount == 0 {
-		out.Reason = "all_unknown"
-		return out
-	}
-
-	out.State = bestState
-	out.Confidence = bestConfidenceSum / float64(bestCount)
-	out.Reason = "dominant_state"
-	out.DominantSymbols = dominantSymbols[bestState]
-	return out
+	return bestState, bestMatchCount, bestConfidenceSum
 }

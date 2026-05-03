@@ -1,6 +1,7 @@
 package universepool
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -85,7 +86,7 @@ type RankDetail struct {
 // MarshalJSON 自定义序列化，统一保留4位小数。
 func (r *RankDetail) MarshalJSON() ([]byte, error) {
 	type alias RankDetail
-	return json.Marshal(&struct {
+	return marshalJSONNoEscape(&struct {
 		*alias
 		BaseScore       string `json:"base_score"`
 		TrendScore      string `json:"trend_score"`
@@ -126,10 +127,10 @@ type StateVoteDetail struct {
 	RankDetail         *RankDetail `json:"rank_detail,omitempty"`
 }
 
-// MarshalJSON 自定义序列化，统一保留4位小数。
-func (s *StateVoteDetail) MarshalJSON() ([]byte, error) {
+// MarshalJSON 自定义序列化，确保 map value 场景也按固定精度输出，避免日志退回默认浮点格式。
+func (s StateVoteDetail) MarshalJSON() ([]byte, error) {
 	type alias StateVoteDetail
-	return json.Marshal(&struct {
+	return marshalJSONNoEscape(&struct {
 		*alias
 		LastPrice         string `json:"last_price"`
 		Ema21             string `json:"ema21"`
@@ -138,14 +139,25 @@ func (s *StateVoteDetail) MarshalJSON() ([]byte, error) {
 		RangeAtrPctMax    string `json:"range_atr_pct_max"`
 		BreakoutAtrPctMin string `json:"breakout_atr_pct_min"`
 	}{
-		alias:             (*alias)(s),
+		alias:             (*alias)(&s),
 		LastPrice:         fmt.Sprintf("%.4f", s.LastPrice),
 		Ema21:             fmt.Sprintf("%.4f", s.Ema21),
 		Ema55:             fmt.Sprintf("%.4f", s.Ema55),
-		AtrPct:            fmt.Sprintf("%.4f", s.AtrPct),
+		AtrPct:            fmt.Sprintf("%.6f", s.AtrPct),
 		RangeAtrPctMax:    fmt.Sprintf("%.4f", s.RangeAtrPctMax),
 		BreakoutAtrPctMin: fmt.Sprintf("%.4f", s.BreakoutAtrPctMin),
 	})
+}
+
+// marshalJSONNoEscape 统一关闭 HTML 转义，避免日志里的 > 被编码成 \u003e 影响排查可读性。
+func marshalJSONNoEscape(v interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 // DesiredUniverseSymbol 表示某个交易对在当前轮评估中的目标状态。

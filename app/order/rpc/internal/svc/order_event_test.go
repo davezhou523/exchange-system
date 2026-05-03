@@ -100,9 +100,24 @@ func TestHandleOrderEventRefreshesSnapshotsAndKeepsQueryConsistent(t *testing.T)
 		RiskReward:      2.0,
 		Reason:          "trend aligned open",
 		SignalReason: &signalReasonJSON{
-			Summary: "open long",
-			Phase:   "OPEN_ENTRY",
-			Tags:    []string{"15m", "trend_following", "long"},
+			Summary:       "open long",
+			Phase:         "OPEN_ENTRY",
+			RouteBucket:   "trend",
+			RouteReason:   "market_state_trend",
+			RouteTemplate: "eth-trend",
+			Tags:          []string{"15m", "trend_following", "long"},
+			Allocator: &positionAllocatorStatusJSON{
+				Template:       "eth-trend",
+				RouteBucket:    "trend",
+				RouteReason:    "market_state_trend",
+				Score:          1.1,
+				ScoreSource:    "symbol_score",
+				BucketBudget:   0.6,
+				StrategyWeight: 0.6,
+				SymbolWeight:   0.5,
+				RiskScale:      1,
+				PositionBudget: 0.3,
+			},
 		},
 		TransactTime: openTime,
 	}); err != nil {
@@ -143,6 +158,13 @@ func TestHandleOrderEventRefreshesSnapshotsAndKeepsQueryConsistent(t *testing.T)
 	}
 	if len(openOrders) != 1 {
 		t.Fatalf("expected 1 order after open event, got %d", len(openOrders))
+	}
+	_, _, _, _, _, _, _, _, _, _, _, _, _, _, signalReason, _ := svcCtx.AllOrderHarvestPathFields(openOrders[0])
+	if signalReason == nil || signalReason.GetAllocator() == nil {
+		t.Fatalf("expected signal_reason allocator in open order, got %+v", signalReason)
+	}
+	if signalReason.GetAllocator().GetPositionBudget() != 0.3 {
+		t.Fatalf("unexpected signal_reason allocator position_budget: %v", signalReason.GetAllocator().GetPositionBudget())
 	}
 
 	state.setPositions([]map[string]string{{
@@ -229,6 +251,202 @@ func TestHandleOrderEventRefreshesSnapshotsAndKeepsQueryConsistent(t *testing.T)
 	}
 	if !strings.Contains(string(allOrdersContent), "\"action_type\":\"OPEN_LONG\"") {
 		t.Fatalf("all_orders snapshot should contain OPEN_LONG, got %s", string(allOrdersContent))
+	}
+}
+
+// TestHandleOrderEventKeepsPartialCloseSnapshotsReadable 验证部分平仓事件会保留仓位快照，并在 all_orders 中落成 PARTIAL_CLOSE_LONG。
+func TestHandleOrderEventKeepsPartialCloseSnapshotsReadable(t *testing.T) {
+	state := &testAccountState{}
+	state.setPositions([]map[string]string{{
+		"symbol":           "ETHUSDT",
+		"positionAmt":      "0.25",
+		"entryPrice":       "2449.8",
+		"markPrice":        "2451.2",
+		"unrealizedProfit": "0.35",
+		"liquidationPrice": "2100.0",
+		"leverage":         "7",
+		"marginType":       "cross",
+	}})
+
+	server := newMockOrderEventBinanceServer(state)
+	defer server.Close()
+
+	rootDir := t.TempDir()
+	execLogDir := filepath.Join(rootDir, "execution-order")
+	dataDir := filepath.Join(rootDir, "order-data")
+
+	cfg := ordercfg.Config{}
+	cfg.Binance.BaseURL = server.URL
+	cfg.DataDir = dataDir
+	cfg.ExecutionOrderLogDir = execLogDir
+
+	svcCtx, err := NewServiceContext(cfg)
+	if err != nil {
+		t.Fatalf("new service context failed: %v", err)
+	}
+	defer func() {
+		_ = svcCtx.Close()
+	}()
+
+	openTime := time.Now().UTC().Add(-3 * time.Minute).UnixMilli()
+	partialCloseTime := time.Now().UTC().Add(-2 * time.Minute).UnixMilli()
+	closeTime := time.Now().UTC().Add(-1 * time.Minute).UnixMilli()
+	positionsPath := filepath.Join(dataDir, "positions", "ETHUSDT", time.Now().UTC().Format("2006-01-02")+".jsonl")
+	allOrdersPath := filepath.Join(dataDir, "all_orders", "ETHUSDT", time.Now().UTC().Format("2006-01-02")+".jsonl")
+
+	if err := writeSvcExecutionOrderLog(execLogDir, executionOrderLogEntry{
+		Timestamp:    time.UnixMilli(openTime).UTC().Format(time.RFC3339),
+		SignalType:   "OPEN",
+		StrategyID:   "range-ETHUSDT",
+		Symbol:       "ETHUSDT",
+		OrderID:      "20001",
+		ClientID:     "cid-open-20001",
+		Side:         "BUY",
+		PositionSide: "LONG",
+		Type:         "MARKET",
+		Status:       "FILLED",
+		Quantity:     0.25,
+		ExecutedQty:  0.25,
+		AvgPrice:     2449.8,
+		Reason:       "range open",
+		TransactTime: openTime,
+	}); err != nil {
+		t.Fatalf("write open execution log failed: %v", err)
+	}
+	if err := svcCtx.handleOrderEvent(&orderkafka.OrderEvent{
+		OrderID:      "20001",
+		ClientID:     "cid-open-20001",
+		Symbol:       "ETHUSDT",
+		Status:       "FILLED",
+		SignalType:   "OPEN",
+		Side:         "BUY",
+		PositionSide: "LONG",
+		Quantity:     0.25,
+		AvgPrice:     2449.8,
+		Timestamp:    openTime,
+		StrategyID:   "range-ETHUSDT",
+	}); err != nil {
+		t.Fatalf("handle open event failed: %v", err)
+	}
+
+	state.setPositions([]map[string]string{{
+		"symbol":           "ETHUSDT",
+		"positionAmt":      "0.15",
+		"entryPrice":       "2449.8",
+		"markPrice":        "2460.2",
+		"unrealizedProfit": "1.56",
+		"liquidationPrice": "2100.0",
+		"leverage":         "7",
+		"marginType":       "cross",
+	}})
+	if err := writeSvcExecutionOrderLog(execLogDir, executionOrderLogEntry{
+		Timestamp:    time.UnixMilli(partialCloseTime).UTC().Format(time.RFC3339),
+		SignalType:   "PARTIAL_CLOSE",
+		StrategyID:   "range-ETHUSDT",
+		Symbol:       "ETHUSDT",
+		OrderID:      "20002",
+		ClientID:     "cid-partial-20002",
+		Side:         "SELL",
+		PositionSide: "LONG",
+		Type:         "MARKET",
+		Status:       "FILLED",
+		Quantity:     0.10,
+		ExecutedQty:  0.10,
+		AvgPrice:     2460.0,
+		Reason:       "split tp1 partial close",
+		TransactTime: partialCloseTime,
+	}); err != nil {
+		t.Fatalf("write partial close execution log failed: %v", err)
+	}
+	if err := svcCtx.handleOrderEvent(&orderkafka.OrderEvent{
+		OrderID:      "20002",
+		ClientID:     "cid-partial-20002",
+		Symbol:       "ETHUSDT",
+		Status:       "FILLED",
+		SignalType:   "PARTIAL_CLOSE",
+		Side:         "SELL",
+		PositionSide: "LONG",
+		Quantity:     0.10,
+		AvgPrice:     2460.0,
+		Timestamp:    partialCloseTime,
+		StrategyID:   "range-ETHUSDT",
+	}); err != nil {
+		t.Fatalf("handle partial close event failed: %v", err)
+	}
+
+	positionsContent, err := os.ReadFile(positionsPath)
+	if err != nil {
+		t.Fatalf("read positions snapshot after partial close failed: %v", err)
+	}
+	if !strings.Contains(string(positionsContent), "\"position_amt\":\"0.150\"") {
+		t.Fatalf("positions snapshot should keep remaining qty after partial close, got %s", string(positionsContent))
+	}
+
+	allOrdersContent, err := os.ReadFile(allOrdersPath)
+	if err != nil {
+		t.Fatalf("read all_orders snapshot after partial close failed: %v", err)
+	}
+	if !strings.Contains(string(allOrdersContent), "\"action_type\":\"PARTIAL_CLOSE_LONG\"") {
+		t.Fatalf("all_orders snapshot should contain PARTIAL_CLOSE_LONG after partial close, got %s", string(allOrdersContent))
+	}
+
+	state.setPositions([]map[string]string{{
+		"symbol":           "ETHUSDT",
+		"positionAmt":      "0",
+		"entryPrice":       "0",
+		"markPrice":        "0",
+		"unrealizedProfit": "0",
+		"liquidationPrice": "0",
+		"leverage":         "7",
+		"marginType":       "cross",
+	}})
+	if err := writeSvcExecutionOrderLog(execLogDir, executionOrderLogEntry{
+		Timestamp:    time.UnixMilli(closeTime).UTC().Format(time.RFC3339),
+		SignalType:   "CLOSE",
+		StrategyID:   "range-ETHUSDT",
+		Symbol:       "ETHUSDT",
+		OrderID:      "20003",
+		ClientID:     "cid-close-20003",
+		Side:         "SELL",
+		PositionSide: "LONG",
+		Type:         "MARKET",
+		Status:       "FILLED",
+		Quantity:     0.15,
+		ExecutedQty:  0.15,
+		AvgPrice:     2465.0,
+		Reason:       "final close",
+		TransactTime: closeTime,
+	}); err != nil {
+		t.Fatalf("write close execution log failed: %v", err)
+	}
+	if err := svcCtx.handleOrderEvent(&orderkafka.OrderEvent{
+		OrderID:      "20003",
+		ClientID:     "cid-close-20003",
+		Symbol:       "ETHUSDT",
+		Status:       "FILLED",
+		SignalType:   "CLOSE",
+		Side:         "SELL",
+		PositionSide: "LONG",
+		Quantity:     0.15,
+		AvgPrice:     2465.0,
+		Timestamp:    closeTime,
+		StrategyID:   "range-ETHUSDT",
+	}); err != nil {
+		t.Fatalf("handle close event failed: %v", err)
+	}
+
+	if _, err := os.Stat(positionsPath); !os.IsNotExist(err) {
+		t.Fatalf("expected positions snapshot removed after final close, got err=%v", err)
+	}
+	allOrdersContent, err = os.ReadFile(allOrdersPath)
+	if err != nil {
+		t.Fatalf("read final all_orders snapshot failed: %v", err)
+	}
+	if !strings.Contains(string(allOrdersContent), "\"action_type\":\"PARTIAL_CLOSE_LONG\"") {
+		t.Fatalf("final all_orders snapshot should keep PARTIAL_CLOSE_LONG, got %s", string(allOrdersContent))
+	}
+	if !strings.Contains(string(allOrdersContent), "\"action_type\":\"CLOSE_LONG\"") {
+		t.Fatalf("final all_orders snapshot should contain CLOSE_LONG, got %s", string(allOrdersContent))
 	}
 }
 

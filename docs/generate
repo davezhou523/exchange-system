@@ -1,27 +1,93 @@
-goctl rpc protoc /Users/bytedance/GolandProjects/exchange-system/common/proto/market.proto \
-  --proto_path=/Users/bytedance/GolandProjects/exchange-system/common/proto \
-  --go_out=/Users/bytedance/GolandProjects/exchange-system/common/pb \
-  --go-grpc_out=/Users/bytedance/GolandProjects/exchange-system/common/pb \
-  --zrpc_out=/Users/bytedance/GolandProjects/exchange-system/app/market/rpc \
-  --style=goZero
+#!/usr/bin/env bash
+set -euo pipefail
 
- goctl rpc protoc /Users/bytedance/GolandProjects/exchange-system/common/proto/execution.proto \
-   --proto_path=/Users/bytedance/GolandProjects/exchange-system/common/proto \
-   --go_out=/Users/bytedance/GolandProjects/exchange-system/common/pb \
-   --go-grpc_out=/Users/bytedance/GolandProjects/exchange-system/common/pb \
-   --zrpc_out=/Users/bytedance/GolandProjects/exchange-system/app/execution/rpc \
-   --style=goZero
+# 统一生成 proto 相关代码。
+# 规则：
+# 1. 当 proto 的 go_package 是完整模块导入路径时，必须同时：
+#    - 把 go_out / go-grpc_out 指向仓库根目录
+#    - 传入 --go_opt=module=exchange-system 和 --go-grpc_opt=module=exchange-system
+#    否则 protoc 会把完整 go_package 再拼到输出目录里，生成出 exchange-system/common/pb/... 这类错误嵌套路径。
+# 2. 只有像 execution.proto 这种使用相对 go_package（如 ./execution）的 proto，才应该把输出目录直接指到目标子目录。
 
- goctl rpc protoc /Users/bytedance/GolandProjects/exchange-system/common/proto/strategy.proto \
-   --proto_path=/Users/bytedance/GolandProjects/exchange-system/common/proto \
-   --go_out=/Users/bytedance/GolandProjects/exchange-system/common/pb \
-   --go-grpc_out=/Users/bytedance/GolandProjects/exchange-system/common/pb \
-   --zrpc_out=/Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc \
-   --style=goZero
+REPO_ROOT="/Users/bytedance/GolandProjects/exchange-system"
+PROTO_DIR="$REPO_ROOT/common/proto"
+MODULE_NAME="exchange-system"
 
- goctl rpc protoc /Users/bytedance/GolandProjects/exchange-system/common/proto/order.proto \
-   --proto_path=/Users/bytedance/GolandProjects/exchange-system/common/proto \
-   --go_out=/Users/bytedance/GolandProjects/exchange-system \
-   --go-grpc_out=/Users/bytedance/GolandProjects/exchange-system \
-   --zrpc_out=/Users/bytedance/GolandProjects/exchange-system/app/order/rpc \
-   --style=goZero
+# gen_rpc_module 用于 go_package 为模块导入路径的 proto，保证生成路径相对模块根目录落盘。
+gen_rpc_module() {
+  local proto_file="$1"
+  local pkg_name="$2"
+  local zrpc_out="$3"
+
+  goctl rpc protoc "$PROTO_DIR/$proto_file" \
+    --proto_path="$PROTO_DIR" \
+    --go_out="$REPO_ROOT" \
+    --go_opt="module=$MODULE_NAME" \
+    --go-grpc_out="$REPO_ROOT" \
+    --go-grpc_opt="module=$MODULE_NAME" \
+    --zrpc_out="$zrpc_out" \
+    --style=goZero
+
+  sanitize_module_generation "$pkg_name" "$zrpc_out"
+}
+
+# gen_rpc_relative 用于 go_package 为相对路径的 proto，直接输出到目标目录。
+gen_rpc_relative() {
+  local proto_file="$1"
+  local go_out="$2"
+  local zrpc_out="$3"
+
+  goctl rpc protoc "$PROTO_DIR/$proto_file" \
+    --proto_path="$PROTO_DIR" \
+    --go_out="$go_out" \
+    --go-grpc_out="$go_out" \
+    --zrpc_out="$zrpc_out" \
+    --style=goZero
+}
+
+# sanitize_module_generation 修正 goctl 仍可能遗留的嵌套 pb 路径，并统一回写生成 import。
+sanitize_module_generation() {
+  local pkg_name="$1"
+  local zrpc_out="$2"
+  local nested_dir="$REPO_ROOT/common/pb/$MODULE_NAME/common/pb/$pkg_name"
+  local canonical_dir="$REPO_ROOT/common/pb/$pkg_name"
+  local bad_import="$MODULE_NAME/common/pb/$MODULE_NAME/common/pb/$pkg_name"
+  local good_import="$MODULE_NAME/common/pb/$pkg_name"
+
+  if [[ -d "$nested_dir" ]]; then
+    mkdir -p "$canonical_dir"
+    if find "$nested_dir" -maxdepth 1 -name '*.go' | grep -q .; then
+      cp "$nested_dir"/*.go "$canonical_dir"/
+    fi
+  fi
+
+  python3 - "$zrpc_out" "$bad_import" "$good_import" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+bad_import = sys.argv[2]
+good_import = sys.argv[3]
+
+for path in root.rglob("*.go"):
+    content = path.read_text()
+    if bad_import not in content:
+        continue
+    path.write_text(content.replace(bad_import, good_import))
+PY
+}
+
+# market.proto 的 go_package = exchange-system/common/pb/market，需要 module 约束和收尾修正。
+gen_rpc_module "market.proto" "market" "$REPO_ROOT/app/market/rpc"
+
+# execution.proto 的 go_package = ./execution，输出目录直接落到 common/pb。
+gen_rpc_relative "execution.proto" "$REPO_ROOT/common/pb" "$REPO_ROOT/app/execution/rpc"
+
+# strategy.proto 的 go_package = exchange-system/common/pb/strategy，需要 module 约束和收尾修正。
+gen_rpc_module "strategy.proto" "strategy" "$REPO_ROOT/app/strategy/rpc"
+
+# order.proto 的 go_package = exchange-system/common/pb/order，需要 module 约束和收尾修正。
+gen_rpc_module "order.proto" "order" "$REPO_ROOT/app/order/rpc"
+
+# 清理 goctl 误生成的嵌套目录，避免后续 import 搜索再次命中错误包。
+rm -rf "$REPO_ROOT/common/pb/$MODULE_NAME"

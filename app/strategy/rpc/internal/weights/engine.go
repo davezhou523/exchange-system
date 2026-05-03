@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"exchange-system/app/strategy/rpc/internal/marketstate"
+	"exchange-system/common/regimejudge"
 )
 
 type strategyBucket string
@@ -53,6 +54,11 @@ type marketPulse struct {
 	AvgAtrPct          float64
 	AvgVolume          float64
 	HealthySymbolCount int
+}
+
+type scoreDecision struct {
+	Value  float64
+	Source string
 }
 
 // NewEngine 创建一个带保守默认值的权重引擎。
@@ -117,7 +123,8 @@ func (e *DefaultEngine) Evaluate(now time.Time, in Inputs) Output {
 		in.UpdatedAt = now.UTC()
 	}
 	riskScale, paused, pauseReason, coolingUntil, atrSpikeRatio, volumeSpikeRatio := e.computeRiskScale(now, in)
-	recommendations := e.allocateBudgets(in, riskScale, paused, pauseReason)
+	strategyWeights := e.strategyWeightsForAggregate(in.MarketState)
+	recommendations := e.allocateBudgets(in, strategyWeights, riskScale, paused, pauseReason)
 	return Output{
 		Recommendations:   recommendations,
 		MarketPaused:      paused,
@@ -125,6 +132,10 @@ func (e *DefaultEngine) Evaluate(now time.Time, in Inputs) Output {
 		CoolingUntil:      coolingUntil,
 		AtrSpikeRatio:     atrSpikeRatio,
 		VolumeSpikeRatio:  volumeSpikeRatio,
+		MatchCounts:       cloneMatchCounts(in.MarketState.MatchCounts),
+		StrategyMix:       strategyMixForLog(strategyWeights),
+		BucketBudgets:     bucketBudgetsForLog(strategyWeights, riskScale),
+		BucketSymbolCount: bucketSymbolCountForLog(recommendations),
 		UpdatedAt:         in.UpdatedAt.UTC(),
 	}
 }
@@ -157,23 +168,18 @@ func (e *DefaultEngine) computeRiskScale(now time.Time, in Inputs) (float64, boo
 }
 
 // allocateBudgets 按“策略权重 * symbol 权重 * 风险因子”生成每个交易对的仓位预算。
-func (e *DefaultEngine) allocateBudgets(in Inputs, riskScale float64, paused bool, pauseReason string) []Recommendation {
+func (e *DefaultEngine) allocateBudgets(in Inputs, strategyWeights map[strategyBucket]float64, riskScale float64, paused bool, pauseReason string) []Recommendation {
 	symbols := append([]string(nil), in.Symbols...)
 	sort.Strings(symbols)
 
-	scoreBySymbol := make(map[string]float64, len(symbols))
+	scoreBySymbol := make(map[string]scoreDecision, len(symbols))
 	symbolsByBucket := make(map[strategyBucket][]string)
 	for _, symbol := range symbols {
-		score := in.SymbolScores[symbol]
-		if score <= 0 {
-			score = 1
-		}
-		scoreBySymbol[symbol] = score
-		bucket := classifyStrategyBucket(in.Templates[symbol])
+		scoreBySymbol[symbol] = resolveScoreDecision(in, symbol)
+		bucket := bucketForSymbol(in, symbol)
 		symbolsByBucket[bucket] = append(symbolsByBucket[bucket], symbol)
 	}
 
-	strategyWeights := e.strategyWeightsForState(in.MarketState.State)
 	symbolWeights := make(map[string]float64, len(symbols))
 	for bucket, items := range symbolsByBucket {
 		weights := e.symbolWeightsForBucket(in.MarketState.State, bucket, items, scoreBySymbol)
@@ -184,15 +190,21 @@ func (e *DefaultEngine) allocateBudgets(in Inputs, riskScale float64, paused boo
 
 	out := make([]Recommendation, 0, len(symbols))
 	for _, symbol := range symbols {
-		bucket := classifyStrategyBucket(in.Templates[symbol])
+		bucket := bucketForSymbol(in, symbol)
 		strategyWeight := strategyWeights[bucket]
 		symbolWeight := symbolWeights[symbol]
+		score := scoreBySymbol[symbol]
 		if symbolWeight <= 0 {
 			symbolWeight = 1
 		}
 		rec := Recommendation{
 			Symbol:         symbol,
 			Template:       in.Templates[symbol],
+			Bucket:         string(bucket),
+			RouteReason:    in.RouteReasons[symbol],
+			Score:          score.Value,
+			ScoreSource:    score.Source,
+			BucketBudget:   strategyWeight * riskScale,
 			StrategyWeight: strategyWeight,
 			SymbolWeight:   symbolWeight,
 			RiskScale:      riskScale,
@@ -203,6 +215,50 @@ func (e *DefaultEngine) allocateBudgets(in Inputs, riskScale float64, paused boo
 		out = append(out, rec)
 	}
 	return out
+}
+
+// bucketForSymbol 优先使用上游路由器显式给出的策略桶，避免 weights 再次从模板名反推。
+func bucketForSymbol(in Inputs, symbol string) strategyBucket {
+	if bucket, ok := parseStrategyBucket(in.StrategyBuckets[symbol]); ok {
+		return bucket
+	}
+	return classifyStrategyBucket(in.Templates[symbol])
+}
+
+// scoreFromAnalysis 把统一 Regime Judge 结果转换成权重层可复用的最小 symbol score。
+func scoreFromAnalysis(analysis regimejudge.Analysis) float64 {
+	if !analysis.Healthy || !analysis.Fresh {
+		return 0
+	}
+	switch {
+	case analysis.BreakoutMatch:
+		return 1.15
+	case analysis.BullTrendStrict || analysis.BearTrendStrict:
+		return 1.10
+	case analysis.RangeMatch:
+		return 1.05
+	default:
+		return 1
+	}
+}
+
+// resolveScoreDecision 为某个 symbol 生成当前轮预算分配使用的 score 与其来源。
+func resolveScoreDecision(in Inputs, symbol string) scoreDecision {
+	if score := in.SymbolScores[symbol]; score > 0 {
+		return scoreDecision{Value: score, Source: "symbol_score"}
+	}
+	if score := scoreFromAnalysis(in.RegimeAnalyses[symbol]); score > 0 {
+		return scoreDecision{Value: score, Source: "regime_analysis"}
+	}
+	return scoreDecision{Value: 1, Source: "default"}
+}
+
+// strategyWeightsForAggregate 根据命中面强弱返回当前轮的策略桶资金配比；若无命中面则回退到单一市场状态。
+func (e *DefaultEngine) strategyWeightsForAggregate(aggregate marketstate.AggregateResult) map[strategyBucket]float64 {
+	if weights := strategyWeightsFromMatchCounts(aggregate.MatchCounts); len(weights) > 0 {
+		return weights
+	}
+	return e.strategyWeightsForState(aggregate.State)
 }
 
 // strategyWeightsForState 根据市场状态返回当前轮的策略桶资金配比。
@@ -221,8 +277,63 @@ func (e *DefaultEngine) strategyWeightsForState(state marketstate.MarketState) m
 	}
 }
 
+// strategyWeightsFromMatchCounts 把聚合后的命中面强度直接映射为策略桶配比。
+func strategyWeightsFromMatchCounts(matchCounts map[string]int) map[strategyBucket]float64 {
+	if len(matchCounts) == 0 {
+		return nil
+	}
+	trendMatches := matchCounts[string(marketstate.MarketStateTrendUp)] + matchCounts[string(marketstate.MarketStateTrendDown)]
+	breakoutMatches := matchCounts[string(marketstate.MarketStateBreakout)]
+	rangeMatches := matchCounts[string(marketstate.MarketStateRange)]
+	total := trendMatches + breakoutMatches + rangeMatches
+	if total <= 0 {
+		return nil
+	}
+	out := make(map[strategyBucket]float64, 3)
+	if trendMatches > 0 {
+		out[strategyBucketTrend] = float64(trendMatches) / float64(total)
+	}
+	if breakoutMatches > 0 {
+		out[strategyBucketBreakout] = float64(breakoutMatches) / float64(total)
+	}
+	if rangeMatches > 0 {
+		out[strategyBucketRange] = float64(rangeMatches) / float64(total)
+	}
+	return out
+}
+
+// strategyMixForLog 把内部策略桶配比转换成日志友好的字符串键结构。
+func strategyMixForLog(in map[strategyBucket]float64) map[string]float64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(in))
+	for bucket, weight := range in {
+		if weight <= 0 {
+			continue
+		}
+		out[string(bucket)] = weight
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// cloneMatchCounts 复制聚合命中面统计，避免输出侧意外共享上游 map。
+func cloneMatchCounts(in map[string]int) map[string]int {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(in))
+	for state, count := range in {
+		out[state] = count
+	}
+	return out
+}
+
 // symbolWeightsForBucket 返回某个策略桶内部各交易对的资金占比。
-func (e *DefaultEngine) symbolWeightsForBucket(state marketstate.MarketState, bucket strategyBucket, symbols []string, scores map[string]float64) map[string]float64 {
+func (e *DefaultEngine) symbolWeightsForBucket(state marketstate.MarketState, bucket strategyBucket, symbols []string, scores map[string]scoreDecision) map[string]float64 {
 	if len(symbols) == 0 {
 		return nil
 	}
@@ -280,11 +391,11 @@ func normalizeFixedSymbolWeights(symbols []string, fixed map[string]float64) map
 }
 
 // normalizeScoreWeights 按 score 在同一个策略桶内归一化资金占比。
-func normalizeScoreWeights(symbols []string, scores map[string]float64) map[string]float64 {
+func normalizeScoreWeights(symbols []string, scores map[string]scoreDecision) map[string]float64 {
 	total := 0.0
 	out := make(map[string]float64, len(symbols))
 	for _, symbol := range symbols {
-		score := scores[symbol]
+		score := scores[symbol].Value
 		if score <= 0 {
 			score = 1
 		}
@@ -299,6 +410,43 @@ func normalizeScoreWeights(symbols []string, scores map[string]float64) map[stri
 	}
 	for symbol, score := range out {
 		out[symbol] = score / total
+	}
+	return out
+}
+
+// bucketBudgetsForLog 返回每个策略桶当前轮的总预算，便于从 Allocator 视角直接观察桶级资金分配。
+func bucketBudgetsForLog(strategyWeights map[strategyBucket]float64, riskScale float64) map[string]float64 {
+	if len(strategyWeights) == 0 || riskScale <= 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(strategyWeights))
+	for bucket, weight := range strategyWeights {
+		budget := weight * riskScale
+		if budget <= 0 {
+			continue
+		}
+		out[string(bucket)] = budget
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// bucketSymbolCountForLog 返回每个策略桶当前轮覆盖的 symbol 数量。
+func bucketSymbolCountForLog(recs []Recommendation) map[string]int {
+	if len(recs) == 0 {
+		return nil
+	}
+	out := make(map[string]int)
+	for _, rec := range recs {
+		if rec.Bucket == "" {
+			continue
+		}
+		out[rec.Bucket]++
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

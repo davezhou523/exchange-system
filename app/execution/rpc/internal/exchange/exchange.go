@@ -76,6 +76,25 @@ type OrderResult struct {
 	Slippage         float64 // 滑点（模拟撮合用）
 }
 
+// ProtectionLegResult 描述单条保护腿的下发结果。
+type ProtectionLegResult struct {
+	Requested     bool    // 是否请求下发该保护腿
+	Status        string  // success / failed / skipped
+	TriggerPrice  float64 // 触发价
+	Reason        string  // 成功说明或失败原因
+	OrderID       string  // 交易所返回的保护单ID
+	ClientOrderID string  // 交易所返回的客户端保护单ID
+}
+
+// ProtectionSetupResult 描述整组保护单的下发结果。
+type ProtectionSetupResult struct {
+	Requested  bool                 // 是否请求了任一保护腿
+	Status     string               // success / partial_success / failed / skipped
+	Reason     string               // 整体结果说明
+	StopLoss   *ProtectionLegResult // 止损腿结果
+	TakeProfit *ProtectionLegResult // 止盈腿结果
+}
+
 // CancelOrderParam 取消订单参数
 type CancelOrderParam struct {
 	Symbol        string // 交易对
@@ -145,7 +164,7 @@ type Exchange interface {
 	GetAccountInfo(ctx context.Context) (*AccountResult, error)
 
 	// SetStopLossTakeProfit 设置止损止盈
-	SetStopLossTakeProfit(ctx context.Context, symbol string, positionSide string, quantity float64, stopLossPrice float64, takeProfitPrices []float64) error
+	SetStopLossTakeProfit(ctx context.Context, symbol string, positionSide string, quantity float64, stopLossPrice float64, takeProfitPrices []float64) (*ProtectionSetupResult, error)
 
 	// Name 返回交易所名称
 	Name() string

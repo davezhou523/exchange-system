@@ -70,6 +70,7 @@ type OrderLifecycleInfo struct {
 }
 
 type executionOrderMeta struct {
+	SignalType                  string
 	HarvestPathProbability      float64
 	HarvestPathRuleProbability  float64
 	HarvestPathLSTMProbability  float64
@@ -85,6 +86,7 @@ type executionOrderMeta struct {
 	HarvestPathMarketPrice      float64
 	Reason                      string
 	SignalReason                *orderpb.SignalReason
+	Protection                  *orderpb.ProtectionStatus
 }
 
 // NewServiceContext 创建 Order 服务上下文
@@ -274,6 +276,9 @@ func (s *ServiceContext) GetAllOrders(ctx context.Context, symbol string, startT
 	startTime = normalizeAllOrdersStartTime(startTime)
 	log.Printf("[Order服务] GetAllOrders 请求 | baseURL=%s symbol=%s startTime=%d(%s) endTime=%d(%s) limit=%d",
 		s.Config.Binance.BaseURL, symbol, startTime, formatMillis(startTime), endTime, formatMillis(endTime), limit)
+	if _, err := s.readExecutionOrderLogs(symbol, startTime, endTime); err != nil {
+		log.Printf("[Order服务] 预取 execution 订单日志失败 | symbol=%s err=%v", symbol, err)
+	}
 	orders, apiErr := s.client.GetAllOrders(ctx, symbol, startTime, endTime, limit)
 	if trades, tradeErr := s.GetUserTrades(ctx, symbol, startTime, endTime, maxInt(limit, 1000)); tradeErr == nil {
 		s.cacheTradeFeeSummaries(symbol, trades)
@@ -381,7 +386,7 @@ func (s *ServiceContext) writeJSONL(category, symbol string, items interface{}) 
 			}
 		}
 	case []binance.AllOrder:
-		lifecycleMap := BuildOrderLifecycleMap(v)
+		lifecycleMap := s.BuildOrderLifecycleMap(v)
 		for _, item := range v {
 			entry := s.toAllOrderJSONLEntry(item, lifecycleMap[item.OrderID])
 			if err := enc.Encode(entry); err != nil {
@@ -437,84 +442,86 @@ func (s *ServiceContext) categoryJSONLPath(category, symbol string) string {
 }
 
 type executionOrderLogEntry struct {
-	Timestamp                   string            `json:"timestamp"`
-	SignalType                  string            `json:"signal_type"`
-	StrategyID                  string            `json:"strategy_id"`
-	Symbol                      string            `json:"symbol"`
-	OrderID                     string            `json:"order_id"`
-	ClientID                    string            `json:"client_id"`
-	Side                        string            `json:"side"`
-	PositionSide                string            `json:"position_side"`
-	Type                        string            `json:"type"`
-	Status                      string            `json:"status"`
-	Quantity                    float64           `json:"quantity"`
-	ExecutedQty                 float64           `json:"executed_qty"`
-	AvgPrice                    float64           `json:"avg_price"`
-	Commission                  float64           `json:"commission"`
-	CommissionAsset             string            `json:"commission_asset"`
-	Slippage                    float64           `json:"slippage"`
-	StopLoss                    float64           `json:"stop_loss"`
-	Atr                         float64           `json:"atr"`
-	RiskReward                  float64           `json:"risk_reward"`
-	Reason                      string            `json:"reason"`
-	SignalReason                *signalReasonJSON `json:"signal_reason,omitempty"`
-	TransactTime                int64             `json:"transact_time"`
-	HarvestPathProbability      float64           `json:"harvest_path_probability"`
-	HarvestPathRuleProbability  float64           `json:"harvest_path_rule_probability"`
-	HarvestPathLSTMProbability  float64           `json:"harvest_path_lstm_probability"`
-	HarvestPathBookProbability  float64           `json:"harvest_path_book_probability,omitempty"`
-	HarvestPathBookSummary      string            `json:"harvest_path_book_summary,omitempty"`
-	HarvestPathVolatilityRegime string            `json:"harvest_path_volatility_regime,omitempty"`
-	HarvestPathThresholdSource  string            `json:"harvest_path_threshold_source,omitempty"`
-	HarvestPathAppliedThreshold float64           `json:"harvest_path_applied_threshold,omitempty"`
-	HarvestPathAction           string            `json:"harvest_path_action"`
-	HarvestPathRiskLevel        string            `json:"harvest_path_risk_level"`
-	HarvestPathTargetSide       string            `json:"harvest_path_target_side"`
-	HarvestPathReferencePrice   float64           `json:"harvest_path_reference_price"`
-	HarvestPathMarketPrice      float64           `json:"harvest_path_market_price"`
+	Timestamp                   string                `json:"timestamp"`
+	SignalType                  string                `json:"signal_type"`
+	StrategyID                  string                `json:"strategy_id"`
+	Symbol                      string                `json:"symbol"`
+	OrderID                     string                `json:"order_id"`
+	ClientID                    string                `json:"client_id"`
+	Side                        string                `json:"side"`
+	PositionSide                string                `json:"position_side"`
+	Type                        string                `json:"type"`
+	Status                      string                `json:"status"`
+	Quantity                    float64               `json:"quantity"`
+	ExecutedQty                 float64               `json:"executed_qty"`
+	AvgPrice                    float64               `json:"avg_price"`
+	Commission                  float64               `json:"commission"`
+	CommissionAsset             string                `json:"commission_asset"`
+	Slippage                    float64               `json:"slippage"`
+	StopLoss                    float64               `json:"stop_loss"`
+	Atr                         float64               `json:"atr"`
+	RiskReward                  float64               `json:"risk_reward"`
+	Reason                      string                `json:"reason"`
+	SignalReason                *signalReasonJSON     `json:"signal_reason,omitempty"`
+	Protection                  *protectionStatusJSON `json:"protection,omitempty"`
+	TransactTime                int64                 `json:"-"`
+	HarvestPathProbability      float64               `json:"harvest_path_probability"`
+	HarvestPathRuleProbability  float64               `json:"harvest_path_rule_probability"`
+	HarvestPathLSTMProbability  float64               `json:"harvest_path_lstm_probability"`
+	HarvestPathBookProbability  float64               `json:"harvest_path_book_probability,omitempty"`
+	HarvestPathBookSummary      string                `json:"harvest_path_book_summary,omitempty"`
+	HarvestPathVolatilityRegime string                `json:"harvest_path_volatility_regime,omitempty"`
+	HarvestPathThresholdSource  string                `json:"harvest_path_threshold_source,omitempty"`
+	HarvestPathAppliedThreshold float64               `json:"harvest_path_applied_threshold,omitempty"`
+	HarvestPathAction           string                `json:"harvest_path_action"`
+	HarvestPathRiskLevel        string                `json:"harvest_path_risk_level"`
+	HarvestPathTargetSide       string                `json:"harvest_path_target_side"`
+	HarvestPathReferencePrice   float64               `json:"harvest_path_reference_price"`
+	HarvestPathMarketPrice      float64               `json:"harvest_path_market_price"`
 }
 
 type allOrderJSONLEntry struct {
-	Time                        string            `json:"time"`
-	TimeLocal                   string            `json:"time_local"`
-	OrderID                     int64             `json:"order_id"`
-	Symbol                      string            `json:"symbol"`
-	Status                      string            `json:"status"`
-	Side                        string            `json:"side"`
-	PositionSide                string            `json:"position_side"`
-	Type                        string            `json:"type"`
-	OrigQty                     string            `json:"orig_qty"`
-	ExecutedQty                 string            `json:"executed_qty"`
-	BaseQty                     string            `json:"base_qty"`
-	QuoteQty                    string            `json:"quote_qty"`
-	AvgPrice                    string            `json:"avg_price"`
-	Price                       string            `json:"price"`
-	StopPrice                   string            `json:"stop_price"`
-	ClientOrderID               string            `json:"client_order_id"`
-	EstimatedFee                string            `json:"estimated_fee"`
-	ActualFee                   string            `json:"actual_fee"`
-	ActualFeeAsset              string            `json:"actual_fee_asset"`
-	ActionType                  string            `json:"action_type"`
-	PositionCycleID             string            `json:"position_cycle_id"`
-	HarvestPathProbability      string            `json:"harvest_path_probability,omitempty"`
-	HarvestPathRuleProbability  string            `json:"harvest_path_rule_probability,omitempty"`
-	HarvestPathLSTMProbability  string            `json:"harvest_path_lstm_probability,omitempty"`
-	HarvestPathBookProbability  string            `json:"harvest_path_book_probability,omitempty"`
-	HarvestPathBookSummary      string            `json:"harvest_path_book_summary,omitempty"`
-	HarvestPathVolatilityRegime string            `json:"harvest_path_volatility_regime,omitempty"`
-	HarvestPathThresholdSource  string            `json:"harvest_path_threshold_source,omitempty"`
-	HarvestPathAppliedThreshold string            `json:"harvest_path_applied_threshold,omitempty"`
-	HarvestPathAction           string            `json:"harvest_path_action,omitempty"`
-	HarvestPathRiskLevel        string            `json:"harvest_path_risk_level,omitempty"`
-	HarvestPathTargetSide       string            `json:"harvest_path_target_side,omitempty"`
-	HarvestPathReferencePrice   string            `json:"harvest_path_reference_price,omitempty"`
-	HarvestPathMarketPrice      string            `json:"harvest_path_market_price,omitempty"`
-	Reason                      string            `json:"reason,omitempty"`
-	SignalReason                *signalReasonJSON `json:"signal_reason,omitempty"`
-	ReduceOnly                  bool              `json:"reduce_only"`
-	ClosePosition               bool              `json:"close_position"`
-	UpdateTime                  string            `json:"update_time"`
-	TimeInForce                 string            `json:"time_in_force"`
+	Time                        string                `json:"time"`
+	TimeLocal                   string                `json:"time_local"`
+	OrderID                     int64                 `json:"order_id"`
+	Symbol                      string                `json:"symbol"`
+	Status                      string                `json:"status"`
+	Side                        string                `json:"side"`
+	PositionSide                string                `json:"position_side"`
+	Type                        string                `json:"type"`
+	OrigQty                     string                `json:"orig_qty"`
+	ExecutedQty                 string                `json:"executed_qty"`
+	BaseQty                     string                `json:"base_qty"`
+	QuoteQty                    string                `json:"quote_qty"`
+	AvgPrice                    string                `json:"avg_price"`
+	Price                       string                `json:"price"`
+	StopPrice                   string                `json:"stop_price"`
+	ClientOrderID               string                `json:"client_order_id"`
+	EstimatedFee                string                `json:"estimated_fee"`
+	ActualFee                   string                `json:"actual_fee"`
+	ActualFeeAsset              string                `json:"actual_fee_asset"`
+	ActionType                  string                `json:"action_type"`
+	PositionCycleID             string                `json:"position_cycle_id"`
+	HarvestPathProbability      string                `json:"harvest_path_probability,omitempty"`
+	HarvestPathRuleProbability  string                `json:"harvest_path_rule_probability,omitempty"`
+	HarvestPathLSTMProbability  string                `json:"harvest_path_lstm_probability,omitempty"`
+	HarvestPathBookProbability  string                `json:"harvest_path_book_probability,omitempty"`
+	HarvestPathBookSummary      string                `json:"harvest_path_book_summary,omitempty"`
+	HarvestPathVolatilityRegime string                `json:"harvest_path_volatility_regime,omitempty"`
+	HarvestPathThresholdSource  string                `json:"harvest_path_threshold_source,omitempty"`
+	HarvestPathAppliedThreshold string                `json:"harvest_path_applied_threshold,omitempty"`
+	HarvestPathAction           string                `json:"harvest_path_action,omitempty"`
+	HarvestPathRiskLevel        string                `json:"harvest_path_risk_level,omitempty"`
+	HarvestPathTargetSide       string                `json:"harvest_path_target_side,omitempty"`
+	HarvestPathReferencePrice   string                `json:"harvest_path_reference_price,omitempty"`
+	HarvestPathMarketPrice      string                `json:"harvest_path_market_price,omitempty"`
+	Reason                      string                `json:"reason,omitempty"`
+	SignalReason                *signalReasonJSON     `json:"signal_reason,omitempty"`
+	Protection                  *protectionStatusJSON `json:"protection,omitempty"`
+	ReduceOnly                  bool                  `json:"reduce_only"`
+	ClosePosition               bool                  `json:"close_position"`
+	UpdateTime                  string                `json:"update_time"`
+	TimeInForce                 string                `json:"time_in_force"`
 }
 
 type positionJSONLEntry struct {
@@ -534,13 +541,62 @@ type positionJSONLEntry struct {
 }
 
 type signalReasonJSON struct {
-	Summary          string   `json:"summary,omitempty"`
-	Phase            string   `json:"phase,omitempty"`
-	TrendContext     string   `json:"trend_context,omitempty"`
-	SetupContext     string   `json:"setup_context,omitempty"`
-	PathContext      string   `json:"path_context,omitempty"`
-	ExecutionContext string   `json:"execution_context,omitempty"`
-	Tags             []string `json:"tags,omitempty"`
+	Summary          string                       `json:"summary,omitempty"`
+	Phase            string                       `json:"phase,omitempty"`
+	TrendContext     string                       `json:"trend_context,omitempty"`
+	SetupContext     string                       `json:"setup_context,omitempty"`
+	PathContext      string                       `json:"path_context,omitempty"`
+	ExecutionContext string                       `json:"execution_context,omitempty"`
+	ExitReasonKind   string                       `json:"exit_reason_kind,omitempty"`
+	ExitReasonLabel  string                       `json:"exit_reason_label,omitempty"`
+	Tags             []string                     `json:"tags,omitempty"`
+	RouteBucket      string                       `json:"route_bucket,omitempty"`
+	RouteReason      string                       `json:"route_reason,omitempty"`
+	RouteTemplate    string                       `json:"route_template,omitempty"`
+	Allocator        *positionAllocatorStatusJSON `json:"allocator,omitempty"`
+	Range            *rangeSignalReasonJSON       `json:"range,omitempty"`
+}
+
+type rangeSignalReasonJSON struct {
+	H1RangeOK      bool `json:"h1_range_ok"`
+	H1AdxOK        bool `json:"h1_adx_ok"`
+	H1BollWidthOK  bool `json:"h1_boll_width_ok"`
+	M15TouchLower  bool `json:"m15_touch_lower"`
+	M15RsiTurnUp   bool `json:"m15_rsi_turn_up"`
+	M15TouchUpper  bool `json:"m15_touch_upper"`
+	M15RsiTurnDown bool `json:"m15_rsi_turn_down"`
+}
+
+type positionAllocatorStatusJSON struct {
+	Template       string  `json:"template,omitempty"`
+	RouteBucket    string  `json:"route_bucket,omitempty"`
+	RouteReason    string  `json:"route_reason,omitempty"`
+	Score          float64 `json:"score,omitempty"`
+	ScoreSource    string  `json:"score_source,omitempty"`
+	BucketBudget   float64 `json:"bucket_budget,omitempty"`
+	StrategyWeight float64 `json:"strategy_weight"`
+	SymbolWeight   float64 `json:"symbol_weight"`
+	RiskScale      float64 `json:"risk_scale"`
+	PositionBudget float64 `json:"position_budget"`
+	TradingPaused  bool    `json:"trading_paused"`
+	PauseReason    string  `json:"pause_reason,omitempty"`
+}
+
+type protectionStatusJSON struct {
+	Requested  bool                     `json:"requested"`
+	Status     string                   `json:"status,omitempty"`
+	Reason     string                   `json:"reason,omitempty"`
+	StopLoss   *protectionLegStatusJSON `json:"stop_loss,omitempty"`
+	TakeProfit *protectionLegStatusJSON `json:"take_profit,omitempty"`
+}
+
+type protectionLegStatusJSON struct {
+	Requested     bool    `json:"requested"`
+	Status        string  `json:"status,omitempty"`
+	TriggerPrice  float64 `json:"trigger_price,omitempty"`
+	Reason        string  `json:"reason,omitempty"`
+	OrderID       string  `json:"order_id,omitempty"`
+	ClientOrderID string  `json:"client_order_id,omitempty"`
 }
 
 type userTradeJSONLEntry struct {
@@ -562,6 +618,61 @@ type userTradeJSONLEntry struct {
 	TimeLocal       string `json:"time_local"`
 	Buyer           bool   `json:"buyer"`
 	Maker           bool   `json:"maker"`
+}
+
+// UnmarshalJSON 兼容 execution 订单日志里字符串和毫秒时间戳两种 transact_time 表达。
+func (e *executionOrderLogEntry) UnmarshalJSON(data []byte) error {
+	type alias executionOrderLogEntry
+	aux := &struct {
+		TransactTime any `json:"transact_time"`
+		*alias
+	}{
+		alias: (*alias)(e),
+	}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	e.TransactTime = parseExecutionTransactTime(aux.TransactTime, e.Timestamp)
+	return nil
+}
+
+// parseExecutionTransactTime 将 execution 订单日志里的成交时间统一转换为毫秒时间戳。
+func parseExecutionTransactTime(raw any, fallbackTimestamp string) int64 {
+	switch v := raw.(type) {
+	case float64:
+		return int64(v)
+	case string:
+		return parseExecutionTransactTimeString(v, fallbackTimestamp)
+	default:
+		return parseExecutionTransactTimeString("", fallbackTimestamp)
+	}
+}
+
+// parseExecutionTransactTimeString 解析 execution 日志中的字符串成交时间。
+func parseExecutionTransactTimeString(raw string, fallbackTimestamp string) int64 {
+	raw = strings.TrimSpace(raw)
+	if raw != "" {
+		if millis, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			return millis
+		}
+		layouts := []string{
+			"2006-01-02 15:04:05",
+			time.RFC3339,
+			"2006-01-02T15:04:05.000Z",
+		}
+		for _, layout := range layouts {
+			if ts, err := time.Parse(layout, raw); err == nil {
+				return ts.UTC().UnixMilli()
+			}
+		}
+	}
+	if ts, err := time.Parse(time.RFC3339, strings.TrimSpace(fallbackTimestamp)); err == nil {
+		return ts.UTC().UnixMilli()
+	}
+	if ts, err := time.Parse("2006-01-02T15:04:05.000Z", strings.TrimSpace(fallbackTimestamp)); err == nil {
+		return ts.UTC().UnixMilli()
+	}
+	return 0
 }
 
 func (s *ServiceContext) readSimulatedAllOrders(symbol string, startTime, endTime int64) ([]binance.AllOrder, error) {
@@ -689,6 +800,7 @@ func (s *ServiceContext) cacheExecutionOrderMeta(symbol string, entries []execut
 	byClient := make(map[string]executionOrderMeta)
 	for _, entry := range entries {
 		meta := executionOrderMeta{
+			SignalType:                  strings.ToUpper(strings.TrimSpace(entry.SignalType)),
 			HarvestPathProbability:      entry.HarvestPathProbability,
 			HarvestPathRuleProbability:  entry.HarvestPathRuleProbability,
 			HarvestPathLSTMProbability:  entry.HarvestPathLSTMProbability,
@@ -704,6 +816,7 @@ func (s *ServiceContext) cacheExecutionOrderMeta(symbol string, entries []execut
 			HarvestPathMarketPrice:      entry.HarvestPathMarketPrice,
 			Reason:                      strings.TrimSpace(entry.Reason),
 			SignalReason:                signalReasonJSONToPB(entry.SignalReason),
+			Protection:                  protectionStatusJSONToPB(entry.Protection),
 		}
 		if orderID := stableID(entry.OrderID); orderID > 0 {
 			byOrder[orderID] = meta
@@ -868,6 +981,7 @@ func (s *ServiceContext) toAllOrderJSONLEntry(item binance.AllOrder, lifecycle O
 		HarvestPathMarketPrice:      formatOptionalFloatWithPrecision(harvestPathMeta.HarvestPathMarketPrice, pricePrecision),
 		Reason:                      harvestPathMeta.Reason,
 		SignalReason:                signalReasonPBToJSON(harvestPathMeta.SignalReason),
+		Protection:                  protectionStatusPBToJSON(harvestPathMeta.Protection),
 		ReduceOnly:                  item.ReduceOnly,
 		ClosePosition:               item.ClosePosition,
 		UpdateTime:                  formatOrderTime(item.UpdateTime),
@@ -1055,7 +1169,8 @@ func (s *ServiceContext) AllOrderLifecycleFields(order binance.AllOrder, lifecyc
 	return info.ActionType, info.PositionCycleID
 }
 
-func (s *ServiceContext) AllOrderHarvestPathFields(order binance.AllOrder) (string, string, string, string, string, string, string, string, string, string, string, string, string, string, *orderpb.SignalReason) {
+// AllOrderHarvestPathFields 汇总 execution 日志沉淀的解释字段，供 order query 统一输出。
+func (s *ServiceContext) AllOrderHarvestPathFields(order binance.AllOrder) (string, string, string, string, string, string, string, string, string, string, string, string, string, string, *orderpb.SignalReason, *orderpb.ProtectionStatus) {
 	meta := s.allOrderHarvestPathMeta(order)
 	pricePrecision, _ := s.symbolPrecisions(order.Symbol)
 	return formatOptionalFloatWithPrecision(meta.HarvestPathProbability, 4),
@@ -1072,7 +1187,8 @@ func (s *ServiceContext) AllOrderHarvestPathFields(order binance.AllOrder) (stri
 		formatOptionalFloatWithPrecision(meta.HarvestPathReferencePrice, pricePrecision),
 		formatOptionalFloatWithPrecision(meta.HarvestPathMarketPrice, pricePrecision),
 		meta.Reason,
-		cloneSignalReasonPB(meta.SignalReason)
+		cloneSignalReasonPB(meta.SignalReason),
+		cloneProtectionStatusPB(meta.Protection)
 }
 
 func signalReasonJSONToPB(v *signalReasonJSON) *orderpb.SignalReason {
@@ -1086,11 +1202,18 @@ func signalReasonJSONToPB(v *signalReasonJSON) *orderpb.SignalReason {
 		SetupContext:     strings.TrimSpace(v.SetupContext),
 		PathContext:      strings.TrimSpace(v.PathContext),
 		ExecutionContext: strings.TrimSpace(v.ExecutionContext),
+		ExitReasonKind:   strings.TrimSpace(v.ExitReasonKind),
+		ExitReasonLabel:  strings.TrimSpace(v.ExitReasonLabel),
+		RouteBucket:      strings.TrimSpace(v.RouteBucket),
+		RouteReason:      strings.TrimSpace(v.RouteReason),
+		RouteTemplate:    strings.TrimSpace(v.RouteTemplate),
+		Allocator:        allocatorStatusJSONToPB(v.Allocator),
+		Range:            rangeSignalReasonJSONToPB(v.Range),
 	}
 	if len(v.Tags) > 0 {
 		out.Tags = append([]string(nil), v.Tags...)
 	}
-	if out.Summary == "" && out.Phase == "" && out.TrendContext == "" && out.SetupContext == "" && out.PathContext == "" && out.ExecutionContext == "" && len(out.Tags) == 0 {
+	if out.Summary == "" && out.Phase == "" && out.TrendContext == "" && out.SetupContext == "" && out.PathContext == "" && out.ExecutionContext == "" && out.ExitReasonKind == "" && out.ExitReasonLabel == "" && out.RouteBucket == "" && out.RouteReason == "" && out.RouteTemplate == "" && len(out.Tags) == 0 && out.GetAllocator() == nil && out.GetRange() == nil {
 		return nil
 	}
 	return out
@@ -1107,11 +1230,18 @@ func signalReasonPBToJSON(v *orderpb.SignalReason) *signalReasonJSON {
 		SetupContext:     strings.TrimSpace(v.GetSetupContext()),
 		PathContext:      strings.TrimSpace(v.GetPathContext()),
 		ExecutionContext: strings.TrimSpace(v.GetExecutionContext()),
+		ExitReasonKind:   strings.TrimSpace(v.GetExitReasonKind()),
+		ExitReasonLabel:  strings.TrimSpace(v.GetExitReasonLabel()),
+		RouteBucket:      strings.TrimSpace(v.GetRouteBucket()),
+		RouteReason:      strings.TrimSpace(v.GetRouteReason()),
+		RouteTemplate:    strings.TrimSpace(v.GetRouteTemplate()),
+		Allocator:        allocatorStatusPBToJSON(v.GetAllocator()),
+		Range:            rangeSignalReasonPBToJSON(v.GetRange()),
 	}
 	if tags := v.GetTags(); len(tags) > 0 {
 		out.Tags = append([]string(nil), tags...)
 	}
-	if out.Summary == "" && out.Phase == "" && out.TrendContext == "" && out.SetupContext == "" && out.PathContext == "" && out.ExecutionContext == "" && len(out.Tags) == 0 {
+	if out.Summary == "" && out.Phase == "" && out.TrendContext == "" && out.SetupContext == "" && out.PathContext == "" && out.ExecutionContext == "" && out.ExitReasonKind == "" && out.ExitReasonLabel == "" && out.RouteBucket == "" && out.RouteReason == "" && out.RouteTemplate == "" && len(out.Tags) == 0 && out.Allocator == nil && out.Range == nil {
 		return nil
 	}
 	return out
@@ -1128,7 +1258,244 @@ func cloneSignalReasonPB(v *orderpb.SignalReason) *orderpb.SignalReason {
 		SetupContext:     v.GetSetupContext(),
 		PathContext:      v.GetPathContext(),
 		ExecutionContext: v.GetExecutionContext(),
+		ExitReasonKind:   v.GetExitReasonKind(),
+		ExitReasonLabel:  v.GetExitReasonLabel(),
 		Tags:             append([]string(nil), v.GetTags()...),
+		RouteBucket:      v.GetRouteBucket(),
+		RouteReason:      v.GetRouteReason(),
+		RouteTemplate:    v.GetRouteTemplate(),
+		Allocator:        cloneAllocatorStatusPB(v.GetAllocator()),
+		Range:            cloneRangeSignalReasonPB(v.GetRange()),
+	}
+}
+
+// rangeSignalReasonJSONToPB 将订单日志中的 range 摘要 JSON 转换为 protobuf。
+func rangeSignalReasonJSONToPB(v *rangeSignalReasonJSON) *orderpb.RangeSignalReason {
+	if v == nil {
+		return nil
+	}
+	out := &orderpb.RangeSignalReason{
+		H1RangeOk:      v.H1RangeOK,
+		H1AdxOk:        v.H1AdxOK,
+		H1BollWidthOk:  v.H1BollWidthOK,
+		M15TouchLower:  v.M15TouchLower,
+		M15RsiTurnUp:   v.M15RsiTurnUp,
+		M15TouchUpper:  v.M15TouchUpper,
+		M15RsiTurnDown: v.M15RsiTurnDown,
+	}
+	if !out.GetH1RangeOk() && !out.GetH1AdxOk() && !out.GetH1BollWidthOk() && !out.GetM15TouchLower() && !out.GetM15RsiTurnUp() && !out.GetM15TouchUpper() && !out.GetM15RsiTurnDown() {
+		return nil
+	}
+	return out
+}
+
+// rangeSignalReasonPBToJSON 将 protobuf range 摘要转换为订单日志 JSON 结构。
+func rangeSignalReasonPBToJSON(v *orderpb.RangeSignalReason) *rangeSignalReasonJSON {
+	if v == nil {
+		return nil
+	}
+	out := &rangeSignalReasonJSON{
+		H1RangeOK:      v.GetH1RangeOk(),
+		H1AdxOK:        v.GetH1AdxOk(),
+		H1BollWidthOK:  v.GetH1BollWidthOk(),
+		M15TouchLower:  v.GetM15TouchLower(),
+		M15RsiTurnUp:   v.GetM15RsiTurnUp(),
+		M15TouchUpper:  v.GetM15TouchUpper(),
+		M15RsiTurnDown: v.GetM15RsiTurnDown(),
+	}
+	if !out.H1RangeOK && !out.H1AdxOK && !out.H1BollWidthOK && !out.M15TouchLower && !out.M15RsiTurnUp && !out.M15TouchUpper && !out.M15RsiTurnDown {
+		return nil
+	}
+	return out
+}
+
+// cloneRangeSignalReasonPB 复制 range 摘要，避免外部共享同一实例。
+func cloneRangeSignalReasonPB(v *orderpb.RangeSignalReason) *orderpb.RangeSignalReason {
+	if v == nil {
+		return nil
+	}
+	return &orderpb.RangeSignalReason{
+		H1RangeOk:      v.GetH1RangeOk(),
+		H1AdxOk:        v.GetH1AdxOk(),
+		H1BollWidthOk:  v.GetH1BollWidthOk(),
+		M15TouchLower:  v.GetM15TouchLower(),
+		M15RsiTurnUp:   v.GetM15RsiTurnUp(),
+		M15TouchUpper:  v.GetM15TouchUpper(),
+		M15RsiTurnDown: v.GetM15RsiTurnDown(),
+	}
+}
+
+// protectionStatusJSONToPB 将订单日志中的 protection JSON 快照转换为 protobuf。
+func protectionStatusJSONToPB(v *protectionStatusJSON) *orderpb.ProtectionStatus {
+	if v == nil {
+		return nil
+	}
+	out := &orderpb.ProtectionStatus{
+		Requested:  v.Requested,
+		Status:     strings.TrimSpace(v.Status),
+		Reason:     strings.TrimSpace(v.Reason),
+		StopLoss:   protectionLegStatusJSONToPB(v.StopLoss),
+		TakeProfit: protectionLegStatusJSONToPB(v.TakeProfit),
+	}
+	if !out.Requested && out.Status == "" && out.Reason == "" && out.GetStopLoss() == nil && out.GetTakeProfit() == nil {
+		return nil
+	}
+	return out
+}
+
+// protectionLegStatusJSONToPB 将单条 protection 腿的 JSON 快照转换为 protobuf。
+func protectionLegStatusJSONToPB(v *protectionLegStatusJSON) *orderpb.ProtectionLegStatus {
+	if v == nil {
+		return nil
+	}
+	out := &orderpb.ProtectionLegStatus{
+		Requested:     v.Requested,
+		Status:        strings.TrimSpace(v.Status),
+		TriggerPrice:  v.TriggerPrice,
+		Reason:        strings.TrimSpace(v.Reason),
+		OrderId:       strings.TrimSpace(v.OrderID),
+		ClientOrderId: strings.TrimSpace(v.ClientOrderID),
+	}
+	if !out.Requested && out.Status == "" && out.TriggerPrice == 0 && out.Reason == "" && out.OrderId == "" && out.ClientOrderId == "" {
+		return nil
+	}
+	return out
+}
+
+// protectionStatusPBToJSON 将 protobuf protection 快照转换为订单日志 JSON 结构。
+func protectionStatusPBToJSON(v *orderpb.ProtectionStatus) *protectionStatusJSON {
+	if v == nil {
+		return nil
+	}
+	out := &protectionStatusJSON{
+		Requested:  v.GetRequested(),
+		Status:     strings.TrimSpace(v.GetStatus()),
+		Reason:     strings.TrimSpace(v.GetReason()),
+		StopLoss:   protectionLegStatusPBToJSON(v.GetStopLoss()),
+		TakeProfit: protectionLegStatusPBToJSON(v.GetTakeProfit()),
+	}
+	if !out.Requested && out.Status == "" && out.Reason == "" && out.StopLoss == nil && out.TakeProfit == nil {
+		return nil
+	}
+	return out
+}
+
+// protectionLegStatusPBToJSON 将 protobuf protection 腿快照转换为订单日志 JSON 结构。
+func protectionLegStatusPBToJSON(v *orderpb.ProtectionLegStatus) *protectionLegStatusJSON {
+	if v == nil {
+		return nil
+	}
+	out := &protectionLegStatusJSON{
+		Requested:     v.GetRequested(),
+		Status:        strings.TrimSpace(v.GetStatus()),
+		TriggerPrice:  v.GetTriggerPrice(),
+		Reason:        strings.TrimSpace(v.GetReason()),
+		OrderID:       strings.TrimSpace(v.GetOrderId()),
+		ClientOrderID: strings.TrimSpace(v.GetClientOrderId()),
+	}
+	if !out.Requested && out.Status == "" && out.TriggerPrice == 0 && out.Reason == "" && out.OrderID == "" && out.ClientOrderID == "" {
+		return nil
+	}
+	return out
+}
+
+// cloneProtectionStatusPB 复制 protection 快照，避免调用方共享原对象。
+func cloneProtectionStatusPB(v *orderpb.ProtectionStatus) *orderpb.ProtectionStatus {
+	if v == nil {
+		return nil
+	}
+	return &orderpb.ProtectionStatus{
+		Requested:  v.GetRequested(),
+		Status:     v.GetStatus(),
+		Reason:     v.GetReason(),
+		StopLoss:   cloneProtectionLegStatusPB(v.GetStopLoss()),
+		TakeProfit: cloneProtectionLegStatusPB(v.GetTakeProfit()),
+	}
+}
+
+// cloneProtectionLegStatusPB 复制单条 protection 腿快照，避免调用方共享原对象。
+func cloneProtectionLegStatusPB(v *orderpb.ProtectionLegStatus) *orderpb.ProtectionLegStatus {
+	if v == nil {
+		return nil
+	}
+	return &orderpb.ProtectionLegStatus{
+		Requested:     v.GetRequested(),
+		Status:        v.GetStatus(),
+		TriggerPrice:  v.GetTriggerPrice(),
+		Reason:        v.GetReason(),
+		OrderId:       v.GetOrderId(),
+		ClientOrderId: v.GetClientOrderId(),
+	}
+}
+
+// allocatorStatusJSONToPB 将订单日志中的 allocator JSON 快照转换为 protobuf。
+func allocatorStatusJSONToPB(v *positionAllocatorStatusJSON) *orderpb.PositionAllocatorStatus {
+	if v == nil {
+		return nil
+	}
+	out := &orderpb.PositionAllocatorStatus{
+		Template:       strings.TrimSpace(v.Template),
+		RouteBucket:    strings.TrimSpace(v.RouteBucket),
+		RouteReason:    strings.TrimSpace(v.RouteReason),
+		Score:          v.Score,
+		ScoreSource:    strings.TrimSpace(v.ScoreSource),
+		BucketBudget:   v.BucketBudget,
+		StrategyWeight: v.StrategyWeight,
+		SymbolWeight:   v.SymbolWeight,
+		RiskScale:      v.RiskScale,
+		PositionBudget: v.PositionBudget,
+		TradingPaused:  v.TradingPaused,
+		PauseReason:    strings.TrimSpace(v.PauseReason),
+	}
+	if out.Template == "" && out.RouteBucket == "" && out.RouteReason == "" && out.Score == 0 && out.ScoreSource == "" && out.BucketBudget == 0 && out.StrategyWeight == 0 && out.SymbolWeight == 0 && out.RiskScale == 0 && out.PositionBudget == 0 && !out.TradingPaused && out.PauseReason == "" {
+		return nil
+	}
+	return out
+}
+
+// allocatorStatusPBToJSON 将 protobuf allocator 快照转换为订单日志 JSON 结构。
+func allocatorStatusPBToJSON(v *orderpb.PositionAllocatorStatus) *positionAllocatorStatusJSON {
+	if v == nil {
+		return nil
+	}
+	out := &positionAllocatorStatusJSON{
+		Template:       strings.TrimSpace(v.GetTemplate()),
+		RouteBucket:    strings.TrimSpace(v.GetRouteBucket()),
+		RouteReason:    strings.TrimSpace(v.GetRouteReason()),
+		Score:          v.GetScore(),
+		ScoreSource:    strings.TrimSpace(v.GetScoreSource()),
+		BucketBudget:   v.GetBucketBudget(),
+		StrategyWeight: v.GetStrategyWeight(),
+		SymbolWeight:   v.GetSymbolWeight(),
+		RiskScale:      v.GetRiskScale(),
+		PositionBudget: v.GetPositionBudget(),
+		TradingPaused:  v.GetTradingPaused(),
+		PauseReason:    strings.TrimSpace(v.GetPauseReason()),
+	}
+	if out.Template == "" && out.RouteBucket == "" && out.RouteReason == "" && out.Score == 0 && out.ScoreSource == "" && out.BucketBudget == 0 && out.StrategyWeight == 0 && out.SymbolWeight == 0 && out.RiskScale == 0 && out.PositionBudget == 0 && !out.TradingPaused && out.PauseReason == "" {
+		return nil
+	}
+	return out
+}
+
+// cloneAllocatorStatusPB 复制 allocator 快照，避免调用方共享原对象。
+func cloneAllocatorStatusPB(v *orderpb.PositionAllocatorStatus) *orderpb.PositionAllocatorStatus {
+	if v == nil {
+		return nil
+	}
+	return &orderpb.PositionAllocatorStatus{
+		Template:       v.GetTemplate(),
+		RouteBucket:    v.GetRouteBucket(),
+		RouteReason:    v.GetRouteReason(),
+		Score:          v.GetScore(),
+		ScoreSource:    v.GetScoreSource(),
+		BucketBudget:   v.GetBucketBudget(),
+		StrategyWeight: v.GetStrategyWeight(),
+		SymbolWeight:   v.GetSymbolWeight(),
+		RiskScale:      v.GetRiskScale(),
+		PositionBudget: v.GetPositionBudget(),
+		TradingPaused:  v.GetTradingPaused(),
+		PauseReason:    v.GetPauseReason(),
 	}
 }
 
@@ -1170,7 +1537,8 @@ func buildTradeFeeSummaryMap(trades []binance.UserTrade) map[int64]tradeFeeSumma
 	return result
 }
 
-func BuildOrderLifecycleMap(orders []binance.AllOrder) map[int64]OrderLifecycleInfo {
+// BuildOrderLifecycleMap 根据订单序列和 execution 日志里的 signal_type 推导每笔委托所属的动作类型与持仓周期。
+func (s *ServiceContext) BuildOrderLifecycleMap(orders []binance.AllOrder) map[int64]OrderLifecycleInfo {
 	result := make(map[int64]OrderLifecycleInfo, len(orders))
 	if len(orders) == 0 {
 		return result
@@ -1197,7 +1565,7 @@ func BuildOrderLifecycleMap(orders []binance.AllOrder) map[int64]OrderLifecycleI
 	}
 
 	for _, order := range sorted {
-		actionType := inferOrderActionType(order)
+		actionType := inferOrderActionTypeWithSignal(order, s.allOrderHarvestPathMeta(order).SignalType)
 		info := OrderLifecycleInfo{ActionType: actionType}
 		qty := parseFloatString(order.ExecutedQty)
 		if qty <= 0 {
@@ -1237,15 +1605,25 @@ func BuildOrderLifecycleMap(orders []binance.AllOrder) map[int64]OrderLifecycleI
 	return result
 }
 
+// inferOrderActionType 保留原有兜底路径，在缺少 signal_type 时仅根据方向推断 open/close。
 func inferOrderActionType(order binance.AllOrder) string {
+	return inferOrderActionTypeWithSignal(order, "")
+}
+
+// inferOrderActionTypeWithSignal 优先使用 execution 日志里的 signal_type，区分 CLOSE 和 PARTIAL_CLOSE。
+func inferOrderActionTypeWithSignal(order binance.AllOrder, signalType string) string {
 	side := strings.ToUpper(strings.TrimSpace(order.Side))
 	positionSide := normalizeOrderPositionSide(order.PositionSide)
+	signalType = strings.ToUpper(strings.TrimSpace(signalType))
 	switch positionSide {
 	case "LONG":
 		if side == "BUY" {
 			return "OPEN_LONG"
 		}
 		if side == "SELL" {
+			if signalType == "PARTIAL_CLOSE" {
+				return "PARTIAL_CLOSE_LONG"
+			}
 			return "CLOSE_LONG"
 		}
 	case "SHORT":
@@ -1253,6 +1631,9 @@ func inferOrderActionType(order binance.AllOrder) string {
 			return "OPEN_SHORT"
 		}
 		if side == "BUY" {
+			if signalType == "PARTIAL_CLOSE" {
+				return "PARTIAL_CLOSE_SHORT"
+			}
 			return "CLOSE_SHORT"
 		}
 	}

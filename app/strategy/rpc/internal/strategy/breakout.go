@@ -222,14 +222,16 @@ func (s *TrendFollowingStrategy) openBreakoutPosition(ctx context.Context, k *ma
 	)
 
 	s.pos = position{
-		side:         sideLong,
-		entryPrice:   snap.Close,
-		stopLoss:     stopLoss,
-		takeProfit1:  tp1,
-		takeProfit2:  tp2,
-		entryBarTime: snap.OpenTime,
-		atr:          snap.Atr,
-		hitTP1:       false,
+		side:          sideLong,
+		entryPrice:    snap.Close,
+		quantity:      quantity,
+		stopLoss:      stopLoss,
+		takeProfit1:   tp1,
+		takeProfit2:   tp2,
+		entryBarTime:  snap.OpenTime,
+		atr:           snap.Atr,
+		hitTP1:        false,
+		partialClosed: false,
 	}
 	if entry == entryShort {
 		s.pos.side = sideShort

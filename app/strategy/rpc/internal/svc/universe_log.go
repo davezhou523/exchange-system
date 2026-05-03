@@ -21,6 +21,8 @@ type universeLogEntry struct {
 	Symbol          string  `json:"symbol"`
 	BaseTemplate    string  `json:"base_template,omitempty"`
 	Template        string  `json:"template"`
+	RouteBucket     string  `json:"route_bucket,omitempty"`
+	RouteReason     string  `json:"route_reason,omitempty"`
 	Action          string  `json:"action"`
 	Reason          string  `json:"reason"`
 	Enabled         bool    `json:"enabled"`
@@ -158,6 +160,8 @@ func buildUniverseLogEntry(now time.Time, decision universe.DesiredStrategy, sna
 		Symbol:          decision.Symbol,
 		BaseTemplate:    decision.BaseTemplate,
 		Template:        decision.Template,
+		RouteBucket:     decision.Bucket,
+		RouteReason:     decision.Reason,
 		Action:          result.Action,
 		Reason:          result.Reason,
 		Enabled:         result.Enabled,

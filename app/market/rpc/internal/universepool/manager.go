@@ -419,8 +419,12 @@ func isSnapshotFresh(cfg Config, now time.Time, snap Snapshot) bool {
 	if snap.UpdatedAt.IsZero() {
 		return false
 	}
-	window := cfg.EvaluateInterval * 3
+	return now.Sub(snap.UpdatedAt) <= snapshotFreshnessWindow(cfg)
+}
 
+// snapshotFreshnessWindow 统一计算动态币池快照的新鲜度窗口，供 manager 与 selector 共用。
+func snapshotFreshnessWindow(cfg Config) time.Duration {
+	window := cfg.EvaluateInterval * 3
 	if iv := validationSnapshotIntervalDuration(cfg); iv > 0 {
 		candidate := iv*2 + cfg.EvaluateInterval
 		if candidate > window {
@@ -430,7 +434,7 @@ func isSnapshotFresh(cfg Config, now time.Time, snap Snapshot) bool {
 	if window <= 0 {
 		window = 90 * time.Second
 	}
-	return now.Sub(snap.UpdatedAt) <= window
+	return window
 }
 
 // UpdateSnapshotFromKline 使用验证模式对应周期的闭合 K 线更新动态币池评估快照。

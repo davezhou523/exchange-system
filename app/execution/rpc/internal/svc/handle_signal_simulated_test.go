@@ -54,7 +54,6 @@ func TestHandleSignalKline1mPublishesOrderEventAndWritesOrderLog(t *testing.T) {
 		MaxPositionSize:     1.0,
 		MaxLeverage:         20,
 		MaxDailyLossPct:     1.0,
-		MaxDrawdownPct:      1.0,
 		MaxOpenPositions:    5,
 		MaxPositionExposure: 10,
 		StopLossPercent:     0.02,
@@ -62,7 +61,7 @@ func TestHandleSignalKline1mPublishesOrderEventAndWritesOrderLog(t *testing.T) {
 	}, posManager)
 
 	eventCh := make(chan map[string]interface{}, 1)
-	producer := newMockExecutionProducer(t, eventCh)
+	producer := newMockExecutionProducer(t, eventCh, 1)
 
 	svcCtx := &ServiceContext{
 		router:             router,
@@ -110,6 +109,21 @@ func TestHandleSignalKline1mPublishesOrderEventAndWritesOrderLog(t *testing.T) {
 			PathContext:      "harvest_path_guard=disabled",
 			ExecutionContext: "next 1m open",
 			Tags:             []string{"1m", "trend_following", "long"},
+			RouteBucket:      "trend",
+			RouteReason:      "market_state_trend",
+			RouteTemplate:    "eth-trend",
+			Allocator: &strategypb.PositionAllocatorStatus{
+				Template:       "eth-trend",
+				RouteBucket:    "trend",
+				RouteReason:    "market_state_trend",
+				Score:          1.1,
+				ScoreSource:    "symbol_score",
+				BucketBudget:   0.6,
+				StrategyWeight: 0.6,
+				SymbolWeight:   0.5,
+				RiskScale:      1,
+				PositionBudget: 0.3,
+			},
 		},
 	}
 
@@ -170,6 +184,16 @@ func TestHandleSignalKline1mPublishesOrderEventAndWritesOrderLog(t *testing.T) {
 		if signalReason["summary"] != "open long" {
 			t.Fatalf("unexpected signal_reason summary: %v", signalReason["summary"])
 		}
+		if signalReason["route_reason"] != "market_state_trend" {
+			t.Fatalf("unexpected signal_reason route_reason: %v", signalReason["route_reason"])
+		}
+		allocator, ok := signalReason["allocator"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("signal_reason allocator type mismatch: %T", signalReason["allocator"])
+		}
+		if allocator["position_budget"] != 0.3 {
+			t.Fatalf("unexpected signal_reason allocator position_budget: %v", allocator["position_budget"])
+		}
 		indicators, ok := event["indicators"].(map[string]interface{})
 		if !ok {
 			t.Fatalf("indicators type mismatch: %T", event["indicators"])
@@ -224,27 +248,130 @@ func TestHandleSignalKline1mPublishesOrderEventAndWritesOrderLog(t *testing.T) {
 	}
 }
 
-func newMockExecutionProducer(t *testing.T, eventCh chan<- map[string]interface{}) *execKafka.Producer {
+func TestHandleSignalPartialCloseUsesRequestedQuantity(t *testing.T) {
+	t.Parallel()
+
+	router := exchange.NewRouter(exchange.RouterConfig{
+		Strategy:        exchange.RouteSimulated,
+		DefaultExchange: "simulated",
+	})
+	simExchange := exchange.NewSimulatedExchange(exchange.SimConfig{
+		InitialBalance:  10000,
+		SlippageBPS:     0,
+		SlippageModel:   "fixed",
+		CommissionRate:  0.0004,
+		CommissionAsset: "USDT",
+		MatchMode:       exchange.MatchModeInstant,
+	})
+	router.Register("simulated", simExchange)
+
+	posManager := position.NewManager()
+	orderManager := order.NewManager()
+	riskManager := risk.NewManager(risk.RiskConfig{
+		MaxPositionSize:     1.0,
+		MaxLeverage:         20,
+		MaxDailyLossPct:     1.0,
+		MaxOpenPositions:    5,
+		MaxPositionExposure: 10,
+		StopLossPercent:     0.02,
+		MinOrderNotional:    5,
+	}, posManager)
+	eventCh := make(chan map[string]interface{}, 4)
+	producer := newMockExecutionProducer(t, eventCh, 2)
+
+	svcCtx := &ServiceContext{
+		router:             router,
+		riskManager:        riskManager,
+		orderManager:       orderManager,
+		posManager:         posManager,
+		deduplicator:       idempotent.NewSignalDeduplicator(time.Minute),
+		logger:             orderlog.NewLogger(t.TempDir(), t.TempDir()),
+		simExchange:        simExchange,
+		orderProducer:      producer,
+		harvestPathSignals: make(map[string]harvestPathRiskSnapshot),
+	}
+	defer func() { _ = svcCtx.Close() }()
+
+	openSig := &strategypb.Signal{
+		StrategyId: "range-ETHUSDT",
+		Symbol:     "ETHUSDT",
+		Action:     "BUY",
+		Side:       "LONG",
+		SignalType: "OPEN",
+		Timestamp:  time.Now().UTC().UnixMilli(),
+		Quantity:   0.2,
+		EntryPrice: 2500,
+		StopLoss:   2450,
+		TakeProfits: []float64{
+			2520,
+			2550,
+		},
+		Reason: "open long",
+	}
+	if err := svcCtx.HandleSignal(context.Background(), openSig); err != nil {
+		t.Fatalf("open HandleSignal failed: %v", err)
+	}
+	<-eventCh
+
+	closeSig := &strategypb.Signal{
+		StrategyId: "range-ETHUSDT",
+		Symbol:     "ETHUSDT",
+		Action:     "SELL",
+		Side:       "LONG",
+		SignalType: "PARTIAL_CLOSE",
+		Timestamp:  time.Now().UTC().Add(time.Millisecond).UnixMilli(),
+		Quantity:   0.05,
+		EntryPrice: 2510,
+		Reason:     "split tp1",
+	}
+	if err := svcCtx.HandleSignal(context.Background(), closeSig); err != nil {
+		t.Fatalf("partial close HandleSignal failed: %v", err)
+	}
+
+	select {
+	case event := <-eventCh:
+		if got := event["signal_type"]; got != "PARTIAL_CLOSE" {
+			t.Fatalf("unexpected signal_type: %v", got)
+		}
+		if got := event["quantity"]; got != 0.05 {
+			t.Fatalf("unexpected executed quantity: %v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected order event for partial close")
+	}
+
+	pos, ok := posManager.GetPosition("ETHUSDT")
+	if !ok {
+		t.Fatal("expected remaining position after partial close")
+	}
+	if pos.PositionAmount >= 0.2 || pos.PositionAmount <= 0.14 {
+		t.Fatalf("unexpected remaining position amount: %.4f", pos.PositionAmount)
+	}
+}
+
+func newMockExecutionProducer(t *testing.T, eventCh chan<- map[string]interface{}, expectedMessages int) *execKafka.Producer {
 	t.Helper()
 
 	cfg := sarama.NewConfig()
 	cfg.Producer.Return.Successes = true
 	mockProducer := mocks.NewSyncProducer(t, cfg)
-	mockProducer.ExpectSendMessageWithMessageCheckerFunctionAndSucceed(func(msg *sarama.ProducerMessage) error {
-		if msg.Topic != "order" {
-			return fmt.Errorf("unexpected topic: %s", msg.Topic)
-		}
-		payload, err := msg.Value.Encode()
-		if err != nil {
-			return err
-		}
-		var event map[string]interface{}
-		if err := json.Unmarshal(payload, &event); err != nil {
-			return err
-		}
-		eventCh <- event
-		return nil
-	})
+	for i := 0; i < expectedMessages; i++ {
+		mockProducer.ExpectSendMessageWithMessageCheckerFunctionAndSucceed(func(msg *sarama.ProducerMessage) error {
+			if msg.Topic != "order" {
+				return fmt.Errorf("unexpected topic: %s", msg.Topic)
+			}
+			payload, err := msg.Value.Encode()
+			if err != nil {
+				return err
+			}
+			var event map[string]interface{}
+			if err := json.Unmarshal(payload, &event); err != nil {
+				return err
+			}
+			eventCh <- event
+			return nil
+		})
+	}
 
 	producer := &execKafka.Producer{}
 	setUnexportedField(producer, "producer", sarama.SyncProducer(mockProducer))

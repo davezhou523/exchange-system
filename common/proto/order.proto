@@ -41,6 +41,21 @@ message OpenOrderItem {
 }
 
 // 历史委托条目
+message PositionAllocatorStatus {
+  string template = 1;
+  string route_bucket = 2;
+  string route_reason = 3;
+  double score = 4;
+  string score_source = 5;
+  double bucket_budget = 6;
+  double strategy_weight = 7;
+  double symbol_weight = 8;
+  double risk_scale = 9;
+  double position_budget = 10;
+  bool trading_paused = 11;
+  string pause_reason = 12;
+}
+
 message SignalReason {
   string summary = 1;
   string phase = 2;
@@ -49,6 +64,40 @@ message SignalReason {
   string path_context = 5;
   string execution_context = 6;
   repeated string tags = 7;
+  string route_bucket = 8;
+  string route_reason = 9;
+  string route_template = 10;
+  PositionAllocatorStatus allocator = 11;
+  RangeSignalReason range = 12;
+  string exit_reason_kind = 13;
+  string exit_reason_label = 14;
+}
+
+message RangeSignalReason {
+  bool h1_range_ok = 1;
+  bool h1_adx_ok = 2;
+  bool h1_boll_width_ok = 3;
+  bool m15_touch_lower = 4;
+  bool m15_rsi_turn_up = 5;
+  bool m15_touch_upper = 6;
+  bool m15_rsi_turn_down = 7;
+}
+
+message ProtectionLegStatus {
+  bool requested = 1;
+  string status = 2;
+  double trigger_price = 3;
+  string reason = 4;
+  string order_id = 5;
+  string client_order_id = 6;
+}
+
+message ProtectionStatus {
+  bool requested = 1;
+  string status = 2;
+  string reason = 3;
+  ProtectionLegStatus stop_loss = 4;
+  ProtectionLegStatus take_profit = 5;
 }
 
 message AllOrderItem {
@@ -89,6 +138,7 @@ message AllOrderItem {
   string harvest_path_applied_threshold = 35;
   string harvest_path_book_probability = 36;
   string harvest_path_book_summary = 37;
+  ProtectionStatus protection = 38;
 }
 
 // 历史成交条目

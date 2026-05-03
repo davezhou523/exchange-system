@@ -14,20 +14,25 @@ import (
 )
 
 type (
-	AllOrderItem        = order.AllOrderItem
-	AllOrderResponse    = order.AllOrderResponse
-	EmptyRequest        = order.EmptyRequest
-	FundingFeeItem      = order.FundingFeeItem
-	FundingFeeResponse  = order.FundingFeeResponse
-	FundingRateItem     = order.FundingRateItem
-	FundingRateResponse = order.FundingRateResponse
-	IncomeItem          = order.IncomeItem
-	IncomeResponse      = order.IncomeResponse
-	OpenOrderItem       = order.OpenOrderItem
-	OpenOrderResponse   = order.OpenOrderResponse
-	OrderQueryRequest   = order.OrderQueryRequest
-	UserTradeItem       = order.UserTradeItem
-	UserTradeResponse   = order.UserTradeResponse
+	AllOrderItem            = order.AllOrderItem
+	AllOrderResponse        = order.AllOrderResponse
+	EmptyRequest            = order.EmptyRequest
+	FundingFeeItem          = order.FundingFeeItem
+	FundingFeeResponse      = order.FundingFeeResponse
+	FundingRateItem         = order.FundingRateItem
+	FundingRateResponse     = order.FundingRateResponse
+	IncomeItem              = order.IncomeItem
+	IncomeResponse          = order.IncomeResponse
+	OpenOrderItem           = order.OpenOrderItem
+	OpenOrderResponse       = order.OpenOrderResponse
+	OrderQueryRequest       = order.OrderQueryRequest
+	PositionAllocatorStatus = order.PositionAllocatorStatus
+	ProtectionLegStatus     = order.ProtectionLegStatus
+	ProtectionStatus        = order.ProtectionStatus
+	RangeSignalReason       = order.RangeSignalReason
+	SignalReason            = order.SignalReason
+	UserTradeItem           = order.UserTradeItem
+	UserTradeResponse       = order.UserTradeResponse
 
 	OrderService interface {
 		// 查询当前委托（未成交订单）

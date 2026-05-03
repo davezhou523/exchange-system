@@ -264,45 +264,77 @@ func (c *BinanceClient) ensureSymbolLeverage(ctx context.Context, symbol string)
 	return nil
 }
 
-// SetStopLossTakeProfit 设置止损止盈
-func (c *BinanceClient) SetStopLossTakeProfit(ctx context.Context, symbol string, positionSide string, quantity float64, stopLossPrice float64, takeProfitPrices []float64) error {
+// SetStopLossTakeProfit 设置止损止盈，并返回每一腿的结构化下发结果。
+func (c *BinanceClient) SetStopLossTakeProfit(ctx context.Context, symbol string, positionSide string, quantity float64, stopLossPrice float64, takeProfitPrices []float64) (*ProtectionSetupResult, error) {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	result := newProtectionSetupResult(stopLossPrice, firstPositivePrice(takeProfitPrices))
+	if !result.Requested {
+		result.Status = "skipped"
+		result.Reason = "no stop loss or take profit requested"
+		return result, nil
+	}
+
 	if err := c.CancelStopLossTakeProfit(ctx, symbol, positionSide); err != nil {
-		return fmt.Errorf("cancel existing stop loss/take profit failed: %v", err)
+		markProtectionSetupFailure(result, fmt.Sprintf("cancel existing stop loss/take profit failed: %v", err))
+		return result, fmt.Errorf("%s", result.Reason)
 	}
 
-	// 设置止损单
-	if stopLossPrice > 0 {
-		side := "SELL"
-		if positionSide == string(PosShort) {
-			side = "BUY"
-		}
+	side := "SELL"
+	if positionSide == string(PosShort) {
+		side = "BUY"
+	}
 
-		if err := c.createAlgoConditionalOrder(ctx, strings.ToUpper(symbol), side, positionSide, "STOP_MARKET", stopLossPrice, true); err != nil {
-			return fmt.Errorf("set stop loss failed: %v", err)
+	normalizedQty, qtyPrecision, qtyErr := c.normalizeProtectionQuantity(ctx, symbol, quantity)
+
+	if leg := result.StopLoss; leg != nil && leg.Requested {
+		resp, err := c.createAlgoConditionalOrder(ctx, algoConditionalOrderRequest{
+			Symbol:            symbol,
+			Side:              side,
+			PositionSide:      positionSide,
+			OrderType:         "STOP_MARKET",
+			TriggerPrice:      leg.TriggerPrice,
+			Quantity:          normalizedQty,
+			QuantityPrecision: qtyPrecision,
+			QuantityErr:       qtyErr,
+		})
+		if err != nil {
+			leg.Status = "failed"
+			leg.Reason = err.Error()
+		} else {
+			leg.Status = "success"
+			leg.Reason = "binance conditional stop loss created"
+			leg.OrderID = strconv.FormatInt(resp.AlgoId, 10)
+			leg.ClientOrderID = strings.TrimSpace(resp.ClientAlgoId)
 		}
 	}
 
-	// Binance 持仓级 TP/SL 更适合单组全平条件单。
-	// 多段止盈需要拆分仓位分别挂单，当前先使用第一档止盈，确保官网可见且语义明确。
-	takeProfitPrice := 0.0
-	for _, price := range takeProfitPrices {
-		if price > 0 {
-			takeProfitPrice = price
-			break
+	if leg := result.TakeProfit; leg != nil && leg.Requested {
+		resp, err := c.createAlgoConditionalOrder(ctx, algoConditionalOrderRequest{
+			Symbol:            symbol,
+			Side:              side,
+			PositionSide:      positionSide,
+			OrderType:         "TAKE_PROFIT_MARKET",
+			TriggerPrice:      leg.TriggerPrice,
+			Quantity:          normalizedQty,
+			QuantityPrecision: qtyPrecision,
+			QuantityErr:       qtyErr,
+		})
+		if err != nil {
+			leg.Status = "failed"
+			leg.Reason = err.Error()
+		} else {
+			leg.Status = "success"
+			leg.Reason = "binance conditional take profit created"
+			leg.OrderID = strconv.FormatInt(resp.AlgoId, 10)
+			leg.ClientOrderID = strings.TrimSpace(resp.ClientAlgoId)
 		}
 	}
-	if takeProfitPrice > 0 {
-		side := "SELL"
-		if positionSide == string(PosShort) {
-			side = "BUY"
-		}
 
-		if err := c.createAlgoConditionalOrder(ctx, strings.ToUpper(symbol), side, positionSide, "TAKE_PROFIT_MARKET", takeProfitPrice, true); err != nil {
-			return fmt.Errorf("set take profit failed: %v", err)
-		}
+	finalizeProtectionSetupResult(result)
+	if result.Status != "success" {
+		return result, fmt.Errorf("%s", result.Reason)
 	}
-
-	return nil
+	return result, nil
 }
 
 type binanceAlgoCancelResponse struct {
@@ -392,55 +424,216 @@ type binanceAlgoOrderResponse struct {
 	ClientAlgoId string `json:"clientAlgoId"`
 }
 
-// createAlgoConditionalOrder creates a conditional order via the Futures Algo Order API.
-// Binance migrated conditional order types (STOP_MARKET/TAKE_PROFIT_MARKET, etc.) away from /fapi/v1/order,
-// which now returns -4120 ("use Algo Order API endpoints instead").
-func (c *BinanceClient) createAlgoConditionalOrder(ctx context.Context, symbol, side, positionSide, orderType string, triggerPrice float64, closePosition bool) error {
-	if symbol == "" {
-		return fmt.Errorf("symbol is required")
+type algoConditionalOrderRequest struct {
+	Symbol            string
+	Side              string
+	PositionSide      string
+	OrderType         string
+	TriggerPrice      float64
+	Quantity          float64
+	QuantityPrecision int
+	QuantityErr       error
+}
+
+// createAlgoConditionalOrder 通过 Binance Futures Algo API 创建条件保护单。
+// 这里会优先使用 closePosition 方式，失败后再回退到 quantity + reduceOnly 方式。
+func (c *BinanceClient) createAlgoConditionalOrder(ctx context.Context, req algoConditionalOrderRequest) (*binanceAlgoOrderResponse, error) {
+	if req.Symbol == "" {
+		return nil, fmt.Errorf("symbol is required")
 	}
-	if side == "" {
-		return fmt.Errorf("side is required")
+	if req.Side == "" {
+		return nil, fmt.Errorf("side is required")
 	}
-	if orderType == "" {
-		return fmt.Errorf("type is required")
+	if req.OrderType == "" {
+		return nil, fmt.Errorf("type is required")
 	}
-	if triggerPrice <= 0 {
-		return fmt.Errorf("trigger price must be positive")
+	if req.TriggerPrice <= 0 {
+		return nil, fmt.Errorf("trigger price must be positive")
 	}
 
-	q := url.Values{}
-	q.Set("symbol", symbol)
-	q.Set("side", side)
-	if positionSide != "" {
-		q.Set("positionSide", positionSide)
+	attempts := []algoConditionalOrderAttempt{
+		{
+			Name:  "close_position",
+			Query: buildAlgoConditionalOrderQuery(req, true),
+		},
 	}
-	// Binance futures algo orders require the conditional order type and trigger price.
-	q.Set("algoType", "CONDITIONAL")
-	q.Set("type", orderType)
-	q.Set("triggerPrice", fmt.Sprintf("%.2f", triggerPrice))
-	q.Set("workingType", "MARK_PRICE")
-	q.Set("priceProtect", "TRUE")
-	if closePosition {
-		q.Set("closePosition", "true")
+	if req.Quantity > 0 && req.QuantityErr == nil {
+		attempts = append(attempts, algoConditionalOrderAttempt{
+			Name:  "reduce_only_quantity",
+			Query: buildAlgoConditionalOrderQuery(req, false),
+		})
 	}
-	q.Set("recvWindow", "5000")
 
-	// Try both known paths to tolerate minor upstream naming differences.
-	var resp binanceAlgoOrderResponse
-	if err := c.doSignedRequest(ctx, http.MethodPost, "/fapi/v1/algo/order", q, &resp); err == nil {
-		return nil
-	} else {
-		var resp2 binanceAlgoOrderResponse
-		err2 := c.doSignedRequest(ctx, http.MethodPost, "/fapi/v1/algoOrder", q, &resp2)
-		if err2 == nil {
-			return nil
+	var errors []string
+	for _, attempt := range attempts {
+		resp, err := c.submitAlgoConditionalOrder(ctx, attempt.Query)
+		if err == nil {
+			return resp, nil
 		}
-		return fmt.Errorf("algo endpoint failed: path1=%v; path2=%v", err, err2)
+		errors = append(errors, attempt.Name+": "+err.Error())
+	}
+	if len(errors) == 0 && req.QuantityErr != nil {
+		errors = append(errors, "quantity preparation failed: "+req.QuantityErr.Error())
+	}
+	return nil, fmt.Errorf("%s", strings.Join(errors, "; "))
+}
+
+type algoConditionalOrderAttempt struct {
+	Name  string
+	Query url.Values
+}
+
+// newProtectionSetupResult 根据请求价格初始化保护单结果骨架。
+func newProtectionSetupResult(stopLossPrice, takeProfitPrice float64) *ProtectionSetupResult {
+	result := &ProtectionSetupResult{}
+	if stopLossPrice > 0 {
+		result.Requested = true
+		result.StopLoss = &ProtectionLegResult{
+			Requested:    true,
+			Status:       "skipped",
+			TriggerPrice: stopLossPrice,
+		}
+	}
+	if takeProfitPrice > 0 {
+		result.Requested = true
+		result.TakeProfit = &ProtectionLegResult{
+			Requested:    true,
+			Status:       "skipped",
+			TriggerPrice: takeProfitPrice,
+		}
+	}
+	return result
+}
+
+// markProtectionSetupFailure 将整体失败原因同步到所有已请求的保护腿，方便前端直接展示。
+func markProtectionSetupFailure(result *ProtectionSetupResult, reason string) {
+	if result == nil {
+		return
+	}
+	result.Status = "failed"
+	result.Reason = strings.TrimSpace(reason)
+	if leg := result.StopLoss; leg != nil && leg.Requested {
+		leg.Status = "failed"
+		leg.Reason = result.Reason
+	}
+	if leg := result.TakeProfit; leg != nil && leg.Requested {
+		leg.Status = "failed"
+		leg.Reason = result.Reason
 	}
 }
 
-const fallbackQuantityPrecision = 3
+// finalizeProtectionSetupResult 汇总止损腿和止盈腿结果，形成整体状态与摘要。
+func finalizeProtectionSetupResult(result *ProtectionSetupResult) {
+	if result == nil {
+		return
+	}
+	total := 0
+	successCount := 0
+	failedReasons := make([]string, 0, 2)
+	for _, leg := range []*ProtectionLegResult{result.StopLoss, result.TakeProfit} {
+		if leg == nil || !leg.Requested {
+			continue
+		}
+		total++
+		switch strings.TrimSpace(leg.Status) {
+		case "success":
+			successCount++
+		case "failed":
+			if reason := strings.TrimSpace(leg.Reason); reason != "" {
+				failedReasons = append(failedReasons, reason)
+			}
+		default:
+			leg.Status = "skipped"
+		}
+	}
+	switch {
+	case total == 0:
+		result.Status = "skipped"
+		if result.Reason == "" {
+			result.Reason = "no protection legs requested"
+		}
+	case successCount == total:
+		result.Status = "success"
+		result.Reason = fmt.Sprintf("created %d protection leg(s)", total)
+	case successCount > 0:
+		result.Status = "partial_success"
+		if len(failedReasons) == 0 {
+			result.Reason = fmt.Sprintf("%d/%d protection leg(s) created", successCount, total)
+		} else {
+			result.Reason = fmt.Sprintf("%d/%d protection leg(s) created; %s", successCount, total, strings.Join(failedReasons, " | "))
+		}
+	default:
+		result.Status = "failed"
+		if len(failedReasons) == 0 {
+			result.Reason = "all protection legs failed"
+		} else {
+			result.Reason = strings.Join(failedReasons, " | ")
+		}
+	}
+}
+
+// normalizeProtectionQuantity 预先标准化保护单数量，便于 quantity + reduceOnly 回退方案复用。
+func (c *BinanceClient) normalizeProtectionQuantity(ctx context.Context, symbol string, quantity float64) (float64, int, error) {
+	if quantity <= 0 {
+		return 0, 0, fmt.Errorf("quantity must be positive")
+	}
+	return c.normalizeOrderQuantity(ctx, CreateOrderParam{
+		Symbol:   symbol,
+		Quantity: quantity,
+	})
+}
+
+// buildAlgoConditionalOrderQuery 根据不同下发模式组装 Binance 条件单参数。
+func buildAlgoConditionalOrderQuery(req algoConditionalOrderRequest, closePosition bool) url.Values {
+	q := url.Values{}
+	q.Set("symbol", req.Symbol)
+	q.Set("side", req.Side)
+	if req.PositionSide != "" {
+		q.Set("positionSide", req.PositionSide)
+	}
+	q.Set("algoType", "CONDITIONAL")
+	q.Set("type", req.OrderType)
+	q.Set("triggerPrice", fmt.Sprintf("%.2f", req.TriggerPrice))
+	q.Set("workingType", "MARK_PRICE")
+	q.Set("priceProtect", "TRUE")
+	q.Set("timeInForce", "GTC")
+	q.Set("newOrderRespType", "RESULT")
+	if closePosition {
+		q.Set("closePosition", "true")
+	} else if req.Quantity > 0 && req.QuantityPrecision >= 0 {
+		q.Set("quantity", fmt.Sprintf("%.*f", req.QuantityPrecision, req.Quantity))
+		q.Set("reduceOnly", "TRUE")
+	}
+	q.Set("recvWindow", "5000")
+	return q
+}
+
+// submitAlgoConditionalOrder 提交 Binance 条件单，并兼容当前已知的两个路径命名。
+func (c *BinanceClient) submitAlgoConditionalOrder(ctx context.Context, q url.Values) (*binanceAlgoOrderResponse, error) {
+	paths := []string{"/fapi/v1/algoOrder", "/fapi/v1/algo/order"}
+	var errors []string
+	for _, path := range paths {
+		var resp binanceAlgoOrderResponse
+		if err := c.doSignedRequest(ctx, http.MethodPost, path, q, &resp); err != nil {
+			errors = append(errors, path+": "+err.Error())
+			continue
+		}
+		return &resp, nil
+	}
+	return nil, fmt.Errorf("%s", strings.Join(errors, "; "))
+}
+
+// firstPositivePrice 返回第一档有效止盈价，保持当前“只挂首档止盈”的语义。
+func firstPositivePrice(prices []float64) float64 {
+	for _, price := range prices {
+		if price > 0 {
+			return price
+		}
+	}
+	return 0
+}
+
+const fallbackQuantityPrecision = 4
 
 type binanceExchangeInfoResponse struct {
 	Symbols []struct {

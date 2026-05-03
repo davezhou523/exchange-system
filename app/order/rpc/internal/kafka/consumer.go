@@ -43,13 +43,34 @@ type OrderEvent struct {
 }
 
 type SignalReason struct {
-	Summary          string   `json:"summary"`
-	Phase            string   `json:"phase"`
-	TrendContext     string   `json:"trend_context"`
-	SetupContext     string   `json:"setup_context"`
-	PathContext      string   `json:"path_context"`
-	ExecutionContext string   `json:"execution_context"`
-	Tags             []string `json:"tags"`
+	Summary          string                   `json:"summary"`
+	Phase            string                   `json:"phase"`
+	TrendContext     string                   `json:"trend_context"`
+	SetupContext     string                   `json:"setup_context"`
+	PathContext      string                   `json:"path_context"`
+	ExecutionContext string                   `json:"execution_context"`
+	ExitReasonKind   string                   `json:"exit_reason_kind"`
+	ExitReasonLabel  string                   `json:"exit_reason_label"`
+	Tags             []string                 `json:"tags"`
+	RouteBucket      string                   `json:"route_bucket"`
+	RouteReason      string                   `json:"route_reason"`
+	RouteTemplate    string                   `json:"route_template"`
+	Allocator        *PositionAllocatorStatus `json:"allocator"`
+}
+
+type PositionAllocatorStatus struct {
+	Template       string  `json:"template"`
+	RouteBucket    string  `json:"route_bucket"`
+	RouteReason    string  `json:"route_reason"`
+	Score          float64 `json:"score"`
+	ScoreSource    string  `json:"score_source"`
+	BucketBudget   float64 `json:"bucket_budget"`
+	StrategyWeight float64 `json:"strategy_weight"`
+	SymbolWeight   float64 `json:"symbol_weight"`
+	RiskScale      float64 `json:"risk_scale"`
+	PositionBudget float64 `json:"position_budget"`
+	TradingPaused  bool    `json:"trading_paused"`
+	PauseReason    string  `json:"pause_reason"`
 }
 
 type OrderEventHandler func(event *OrderEvent) error

@@ -19,6 +19,11 @@ type logEntry struct {
 	Timestamp      string  `json:"timestamp"`
 	Symbol         string  `json:"symbol"`
 	Template       string  `json:"template,omitempty"`
+	RouteBucket    string  `json:"route_bucket,omitempty"`
+	RouteReason    string  `json:"route_reason,omitempty"`
+	Score          float64 `json:"score,omitempty"`
+	ScoreSource    string  `json:"score_source,omitempty"`
+	BucketBudget   float64 `json:"bucket_budget,omitempty"`
 	StrategyWeight float64 `json:"strategy_weight"`
 	SymbolWeight   float64 `json:"symbol_weight"`
 	RiskScale      float64 `json:"risk_scale"`
@@ -28,18 +33,22 @@ type logEntry struct {
 }
 
 type metaLogEntry struct {
-	Timestamp           string         `json:"timestamp"`
-	SymbolCount         int            `json:"symbol_count"`
-	RecommendationCount int            `json:"recommendation_count"`
-	PausedCount         int            `json:"paused_count"`
-	MarketPaused        bool           `json:"market_paused"`
-	MarketPauseReason   string         `json:"market_pause_reason,omitempty"`
-	CoolingUntil        string         `json:"cooling_until,omitempty"`
-	AtrSpikeRatio       float64        `json:"atr_spike_ratio,omitempty"`
-	VolumeSpikeRatio    float64        `json:"volume_spike_ratio,omitempty"`
-	MarketState         string         `json:"market_state,omitempty"`
-	MarketStateSource   string         `json:"market_state_source,omitempty"`
-	TemplateCounts      map[string]int `json:"template_counts,omitempty"`
+	Timestamp           string             `json:"timestamp"`
+	SymbolCount         int                `json:"symbol_count"`
+	RecommendationCount int                `json:"recommendation_count"`
+	PausedCount         int                `json:"paused_count"`
+	MarketPaused        bool               `json:"market_paused"`
+	MarketPauseReason   string             `json:"market_pause_reason,omitempty"`
+	CoolingUntil        string             `json:"cooling_until,omitempty"`
+	AtrSpikeRatio       float64            `json:"atr_spike_ratio,omitempty"`
+	VolumeSpikeRatio    float64            `json:"volume_spike_ratio,omitempty"`
+	MarketState         string             `json:"market_state,omitempty"`
+	MarketStateSource   string             `json:"market_state_source,omitempty"`
+	TemplateCounts      map[string]int     `json:"template_counts,omitempty"`
+	MatchCounts         map[string]int     `json:"match_counts,omitempty"`
+	StrategyMix         map[string]float64 `json:"strategy_mix,omitempty"`
+	BucketBudgets       map[string]float64 `json:"bucket_budgets,omitempty"`
+	BucketSymbolCount   map[string]int     `json:"bucket_symbol_count,omitempty"`
 }
 
 // NewLogState 创建 weights 日志文件句柄缓存。
@@ -79,6 +88,11 @@ func (l *LogState) Write(baseDir string, rec Recommendation, now time.Time) {
 		Timestamp:      formatLogTime(now),
 		Symbol:         rec.Symbol,
 		Template:       rec.Template,
+		RouteBucket:    rec.Bucket,
+		RouteReason:    rec.RouteReason,
+		Score:          roundFloat(rec.Score),
+		ScoreSource:    rec.ScoreSource,
+		BucketBudget:   roundFloat(rec.BucketBudget),
 		StrategyWeight: roundFloat(rec.StrategyWeight),
 		SymbolWeight:   roundFloat(rec.SymbolWeight),
 		RiskScale:      roundFloat(rec.RiskScale),
@@ -169,6 +183,10 @@ func BuildMetaLogEntry(out Output, symbolCount int, marketState string, marketSt
 		MarketState:         marketState,
 		MarketStateSource:   marketStateSource,
 		TemplateCounts:      make(map[string]int),
+		MatchCounts:         cloneMetaMatchCounts(out.MatchCounts),
+		StrategyMix:         cloneMetaStrategyMix(out.StrategyMix),
+		BucketBudgets:       cloneMetaStrategyMix(out.BucketBudgets),
+		BucketSymbolCount:   cloneMetaBucketCounts(out.BucketSymbolCount),
 	}
 	if !out.CoolingUntil.IsZero() {
 		entry.CoolingUntil = formatLogTime(out.CoolingUntil)
@@ -185,6 +203,54 @@ func BuildMetaLogEntry(out Output, symbolCount int, marketState string, marketSt
 		entry.TemplateCounts = nil
 	}
 	return entry
+}
+
+// cloneMetaMatchCounts 复制一份命中面统计，避免日志对象与运行态共享底层 map。
+func cloneMetaMatchCounts(in map[string]int) map[string]int {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(in))
+	for state, count := range in {
+		out[state] = count
+	}
+	return out
+}
+
+// cloneMetaStrategyMix 复制并统一裁剪日志中的策略桶配比精度。
+func cloneMetaStrategyMix(in map[string]float64) map[string]float64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(in))
+	for bucket, weight := range in {
+		if weight <= 0 {
+			continue
+		}
+		out[bucket] = roundFloat(weight)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// cloneMetaBucketCounts 复制每个策略桶当前轮承载的 symbol 数量，避免日志对象共享运行态 map。
+func cloneMetaBucketCounts(in map[string]int) map[string]int {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(in))
+	for bucket, count := range in {
+		if count <= 0 {
+			continue
+		}
+		out[bucket] = count
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func formatLogTime(t time.Time) string {

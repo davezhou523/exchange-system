@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"exchange-system/common/featureengine"
+	"exchange-system/common/regimejudge"
 	"exchange-system/common/symbolranker"
 )
 
@@ -96,7 +97,7 @@ func (s *BasicSelector) Evaluate(now time.Time, snapshots map[string]Snapshot) D
 			stateVotes[symbol] = vote
 			out.StateVotes[symbol] = vote
 		}
-		score := s.scoreSnapshot(symbol, snap, globalState, rankScores)
+		score := s.scoreSnapshot(now, symbol, snap, globalState, rankScores)
 		item := DesiredUniverseSymbol{
 			Symbol:    symbol,
 			Score:     score,
@@ -148,7 +149,7 @@ func (s *BasicSelector) isFresh(now time.Time, snap Snapshot) bool {
 }
 
 // scoreSnapshot 对单个快照做最小打分，并在配置偏好时按全局状态优先放行特定币组。
-func (s *BasicSelector) scoreSnapshot(symbol string, snap Snapshot, globalState selectorMarketState, rankScores map[string]symbolranker.SymbolScore) float64 {
+func (s *BasicSelector) scoreSnapshot(now time.Time, symbol string, snap Snapshot, globalState selectorMarketState, rankScores map[string]symbolranker.SymbolScore) float64 {
 	if !snap.Healthy {
 		return 0
 	}
@@ -163,17 +164,18 @@ func (s *BasicSelector) scoreSnapshot(symbol string, snap Snapshot, globalState 
 	}
 	// 基础分改由 Symbol Ranker 提供，再叠加原有状态与偏好加分，尽量保持旧策略语义稳定。
 	score := 0.55 + baseScore*0.05
+	analysis := s.analyzeSnapshot(now, snap, selectorMarketStateUnknown)
 	switch globalState {
 	case selectorMarketStateTrend:
-		if s.isTrendAligned(snap) {
+		if s.trendAlignedFromAnalysis(analysis) {
 			score += 0.10
 		}
 	case selectorMarketStateRange:
-		if snap.AtrPct > 0 && snap.AtrPct <= s.rangeAtrPctMax() {
+		if analysis.RangeMatch {
 			score += 0.10
 		}
 	case selectorMarketStateBreakout:
-		if snap.AtrPct >= s.breakoutAtrPctMin() {
+		if analysis.BreakoutMatch {
 			score += 0.10
 		}
 	}
@@ -193,29 +195,36 @@ func (s *BasicSelector) buildRankScores(snapshots map[string]Snapshot) map[strin
 		return out
 	}
 	timeframe := validationSnapshotIntervalName(s.cfg)
-	features := make([]featureengine.Features, 0, len(s.cfg.CandidateSymbols))
+	inputs := make(map[string]featureengine.SnapshotValues, len(s.cfg.CandidateSymbols))
 	for _, symbol := range s.cfg.CandidateSymbols {
 		snap, ok := snapshots[symbol]
 		if !ok {
 			continue
 		}
-		item := featureengine.BuildFromSnapshotValues(
-			symbol,
-			timeframe,
-			snap.LastPrice,
-			snap.Ema21,
-			snap.Ema55,
-			snap.Atr,
-			snap.Rsi,
-			snap.Volume24h,
-			false,
-			true,
-			true,
-			snap.UpdatedAt,
-		)
-		item.Healthy = snap.Healthy
-		if snap.LastReason != "" {
-			item.LastReason = snap.LastReason
+		inputs[symbol] = featureengine.SnapshotValues{
+			Symbol:     symbol,
+			Timeframe:  timeframe,
+			Close:      snap.LastPrice,
+			Ema21:      snap.Ema21,
+			Ema55:      snap.Ema55,
+			Atr:        snap.Atr,
+			AtrPct:     snap.AtrPct,
+			Rsi:        snap.Rsi,
+			Volume:     snap.Volume24h,
+			UpdatedAt:  snap.UpdatedAt,
+			IsTradable: true,
+			IsFinal:    true,
+			Healthy:    snap.Healthy,
+			HasHealth:  true,
+			LastReason: snap.LastReason,
+		}
+	}
+	featureMap := featureengine.BuildFeatureMap(inputs)
+	features := make([]featureengine.Features, 0, len(featureMap))
+	for _, symbol := range s.cfg.CandidateSymbols {
+		item, ok := featureMap[symbol]
+		if !ok {
+			continue
 		}
 		features = append(features, item)
 	}
@@ -294,54 +303,23 @@ func (s *BasicSelector) currentStableState() selectorMarketState {
 	return s.lastStableState
 }
 
-// classifySnapshot 按当前验证模式配置的优先级分类单个快照，并在已有稳定状态时启用退出阈值。
-func (s *BasicSelector) classifySnapshot(snap Snapshot, stableHint selectorMarketState) selectorMarketState {
-	breakoutMatch := s.isBreakoutMatch(snap, stableHint == selectorMarketStateBreakout)
-	rangeMatch := s.isRangeMatch(snap, stableHint == selectorMarketStateRange)
-	trendMatch := s.isTrendMatch(snap, stableHint == selectorMarketStateTrend)
-	for _, state := range s.classificationPriority() {
-		switch state {
-		case selectorMarketStateBreakout:
-			if breakoutMatch {
-				return selectorMarketStateBreakout
-			}
-		case selectorMarketStateTrend:
-			if trendMatch {
-				return selectorMarketStateTrend
-			}
-		case selectorMarketStateRange:
-			if rangeMatch {
-				return selectorMarketStateRange
-			}
-		}
-	}
-	return selectorMarketStateUnknown
-}
-
 // buildStateVoteDetail 生成单个候选币在本轮全局状态投票中的证据，方便日志直接解释“为什么判成某个状态”。
 func (s *BasicSelector) buildStateVoteDetail(now time.Time, snap Snapshot, stableHint selectorMarketState) StateVoteDetail {
 	detail := StateVoteDetail{
-		Fresh:     s.isFresh(now, snap),
 		Healthy:   snap.Healthy,
 		LastPrice: snap.LastPrice,
 		Ema21:     snap.Ema21,
 		Ema55:     snap.Ema55,
 		AtrPct:    snap.AtrPct,
 	}
-	rangeMax := s.rangeAtrPctMax()
-	if stableHint == selectorMarketStateRange {
-		rangeMax = s.rangeAtrPctExitMax()
-	}
-	breakoutMin := s.breakoutAtrPctMin()
-	if stableHint == selectorMarketStateBreakout {
-		breakoutMin = s.breakoutAtrPctExitMin()
-	}
-	detail.RangeAtrPctMax = rangeMax
-	detail.BreakoutAtrPctMin = breakoutMin
-	detail.TrendAligned = s.isTrendAligned(snap)
-	detail.BreakoutMatch = s.isBreakoutMatch(snap, stableHint == selectorMarketStateBreakout)
-	detail.RangeMatch = s.isRangeMatch(snap, stableHint == selectorMarketStateRange)
-	detail.TrendMatch = s.isTrendMatch(snap, stableHint == selectorMarketStateTrend)
+	analysis := s.analyzeSnapshot(now, snap, stableHint)
+	detail.Fresh = analysis.Fresh
+	detail.RangeAtrPctMax = s.analysisRangeAtrPctMax(stableHint)
+	detail.BreakoutAtrPctMin = s.analysisBreakoutAtrPctMin(stableHint)
+	detail.TrendAligned = s.trendAlignedFromAnalysis(analysis)
+	detail.BreakoutMatch = analysis.BreakoutMatch
+	detail.RangeMatch = analysis.RangeMatch
+	detail.TrendMatch = s.trendMatchFromAnalysis(analysis, stableHint == selectorMarketStateTrend)
 	switch {
 	case !detail.Healthy:
 		detail.ClassifiedReason = "unhealthy_snapshot"
@@ -353,6 +331,46 @@ func (s *BasicSelector) buildStateVoteDetail(now time.Time, snap Snapshot, stabl
 		detail.ClassifiedState, detail.ClassifiedReason, detail.ClassifiedReasonZh = s.resolveClassification(detail)
 	}
 	return detail
+}
+
+// analyzeSnapshot 把 market 快照统一转换为公共特征后交给 Regime Judge，避免 market 侧重复维护底层判态细节。
+func (s *BasicSelector) analyzeSnapshot(now time.Time, snap Snapshot, stableHint selectorMarketState) regimejudge.Analysis {
+	return regimejudge.Analyze(now, featureengine.BuildFromSnapshot(featureengine.SnapshotValues{
+		Symbol:     snap.Symbol,
+		Timeframe:  validationSnapshotIntervalName(s.cfg),
+		Close:      snap.LastPrice,
+		Ema21:      snap.Ema21,
+		Ema55:      snap.Ema55,
+		AtrPct:     snap.AtrPct,
+		Rsi:        snap.Rsi,
+		Volume:     snap.Volume24h,
+		UpdatedAt:  snap.UpdatedAt,
+		IsTradable: true,
+		IsFinal:    true,
+		Healthy:    snap.Healthy,
+		HasHealth:  true,
+		LastReason: snap.LastReason,
+	}), regimejudge.Config{
+		FreshnessWindow:   snapshotFreshnessWindow(s.cfg),
+		RangeAtrPctMax:    s.analysisRangeAtrPctMax(stableHint),
+		BreakoutAtrPctMin: s.analysisBreakoutAtrPctMin(stableHint),
+	})
+}
+
+// analysisRangeAtrPctMax 根据是否处于 range 稳定态保持阶段，统一返回本轮分析用的 range 阈值。
+func (s *BasicSelector) analysisRangeAtrPctMax(stableHint selectorMarketState) float64 {
+	if stableHint == selectorMarketStateRange {
+		return s.rangeAtrPctExitMax()
+	}
+	return s.rangeAtrPctMax()
+}
+
+// analysisBreakoutAtrPctMin 根据是否处于 breakout 稳定态保持阶段，统一返回本轮分析用的 breakout 阈值。
+func (s *BasicSelector) analysisBreakoutAtrPctMin(stableHint selectorMarketState) float64 {
+	if stableHint == selectorMarketStateBreakout {
+		return s.breakoutAtrPctExitMin()
+	}
+	return s.breakoutAtrPctMin()
 }
 
 // classificationPriority 返回当前验证模式下的状态分类优先级。
@@ -592,44 +610,23 @@ func (s *BasicSelector) breakoutAtrPctExitMin() float64 {
 	return 0.0055
 }
 
-// isTrendAligned 判断快照是否满足不同验证模式下的趋势入场条件。
-func (s *BasicSelector) isTrendAligned(snap Snapshot) bool {
+// trendAlignedFromAnalysis 根据当前验证模式把公共判态结果映射成 market 侧的趋势对齐结论。
+func (s *BasicSelector) trendAlignedFromAnalysis(analysis regimejudge.Analysis) bool {
 	if strings.EqualFold(s.cfg.ValidationMode, "1m") {
-		return snap.Ema21 > snap.Ema55
+		return analysis.BullTrendAligned
 	}
 	if strings.EqualFold(s.cfg.ValidationMode, "5m") {
-		return snap.LastPrice >= snap.Ema21 && snap.Ema21 > snap.Ema55
+		return analysis.BullTrendInclusive
 	}
-	return snap.LastPrice > snap.Ema21 && snap.Ema21 > snap.Ema55
+	return analysis.BullTrendStrict
 }
 
-// isRangeMatch 判断快照是否命中 range，并在保持旧状态时切换到更宽的退出阈值。
-func (s *BasicSelector) isRangeMatch(snap Snapshot, allowExitThreshold bool) bool {
-	if snap.AtrPct <= 0 {
-		return false
-	}
-	max := s.rangeAtrPctMax()
+// trendMatchFromAnalysis 根据是否处于稳定态保持阶段，决定 market 侧趋势命中的放宽程度。
+func (s *BasicSelector) trendMatchFromAnalysis(analysis regimejudge.Analysis, allowExitThreshold bool) bool {
 	if allowExitThreshold {
-		max = s.rangeAtrPctExitMax()
+		return analysis.BullTrendAligned
 	}
-	return snap.AtrPct <= max
-}
-
-// isBreakoutMatch 判断快照是否命中 breakout，并在保持旧状态时切换到更宽的退出阈值。
-func (s *BasicSelector) isBreakoutMatch(snap Snapshot, allowExitThreshold bool) bool {
-	min := s.breakoutAtrPctMin()
-	if allowExitThreshold {
-		min = s.breakoutAtrPctExitMin()
-	}
-	return snap.AtrPct >= min
-}
-
-// isTrendMatch 判断快照是否命中 trend，并在退出阶段放宽为均线仍保持多头排列即可。
-func (s *BasicSelector) isTrendMatch(snap Snapshot, allowExitThreshold bool) bool {
-	if allowExitThreshold {
-		return snap.Ema21 > snap.Ema55
-	}
-	return s.isTrendAligned(snap)
+	return s.trendAlignedFromAnalysis(analysis)
 }
 
 // makeStringSet 把字符串切片转成集合，方便做白名单和黑名单判断。

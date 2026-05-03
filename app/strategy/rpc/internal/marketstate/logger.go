@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"exchange-system/common/regimejudge"
 )
 
 // LogState 管理 Market State 结果的 jsonl 文件句柄缓存。
@@ -43,6 +45,7 @@ type metaLogEntry struct {
 	GlobalReason     string         `json:"global_reason,omitempty"`
 	DominantSymbols  []string       `json:"dominant_symbols,omitempty"`
 	StateCounts      map[string]int `json:"state_counts,omitempty"`
+	MatchCounts      map[string]int `json:"match_counts,omitempty"`
 	ReasonCounts     map[string]int `json:"reason_counts,omitempty"`
 }
 
@@ -168,32 +171,33 @@ func (l *LogState) Close() error {
 	return firstErr
 }
 
-// BuildMetaLogEntry 汇总一轮 market state 结果，生成总览 jsonl 记录。
-func BuildMetaLogEntry(now time.Time, features map[string]Features, results map[string]Result) metaLogEntry {
-	aggregate := Aggregate(now, results)
+// BuildMetaLogEntry 汇总一轮 market state 结果和统一 Analysis，生成总览 jsonl 记录。
+func BuildMetaLogEntry(now time.Time, features map[string]Features, analyses map[string]regimejudge.Analysis, results map[string]Result) metaLogEntry {
+	aggregate := Aggregate(now, analyses, results)
 	entry := metaLogEntry{
 		Timestamp:        formatLogTime(now),
 		CandidateCount:   len(results),
 		ResultCount:      len(results),
+		HealthyCount:     aggregate.HealthyCount,
+		UnknownCount:     aggregate.UnknownCount,
 		GlobalState:      string(aggregate.State),
 		GlobalConfidence: roundFloat(aggregate.Confidence),
 		GlobalReason:     aggregate.Reason,
 		DominantSymbols:  aggregate.DominantSymbols,
 		StateCounts:      make(map[string]int),
+		MatchCounts:      aggregate.MatchCounts,
 		ReasonCounts:     make(map[string]int),
 	}
 	for symbol, result := range results {
 		entry.StateCounts[string(result.State)]++
 		entry.ReasonCounts[result.Reason]++
-		if result.State == MarketStateUnknown {
-			entry.UnknownCount++
-		}
-		if feature, ok := features[symbol]; ok && feature.Healthy {
-			entry.HealthyCount++
-		}
+		_, _ = features[symbol]
 	}
 	if len(entry.StateCounts) == 0 {
 		entry.StateCounts = nil
+	}
+	if len(entry.MatchCounts) == 0 {
+		entry.MatchCounts = nil
 	}
 	if len(entry.ReasonCounts) == 0 {
 		entry.ReasonCounts = nil

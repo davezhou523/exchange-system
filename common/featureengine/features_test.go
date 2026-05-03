@@ -63,3 +63,71 @@ func TestNormalizeMarksDirtyFeatureUnhealthy(t *testing.T) {
 		t.Fatalf("last_reason = %s, want dirty_data", got.LastReason)
 	}
 }
+
+// TestBuildFromSnapshotPreservesExplicitHealth 验证显式健康状态会覆盖默认推导结果，便于上游复用现成健康判定。
+func TestBuildFromSnapshotPreservesExplicitHealth(t *testing.T) {
+	got := BuildFromSnapshot(SnapshotValues{
+		Symbol:     "DOGEUSDT",
+		Timeframe:  "1m",
+		Close:      0.11,
+		Ema21:      0.109,
+		Ema55:      0.108,
+		Atr:        0.001,
+		Volume:     123,
+		UpdatedAt:  time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
+		IsTradable: true,
+		IsFinal:    true,
+		Healthy:    false,
+		HasHealth:  true,
+		LastReason: "bootstrap_no_snapshot",
+	})
+
+	if got.Healthy {
+		t.Fatalf("healthy = true, want false")
+	}
+	if got.LastReason != "bootstrap_no_snapshot" {
+		t.Fatalf("last_reason = %s, want bootstrap_no_snapshot", got.LastReason)
+	}
+}
+
+// TestBuildFeatureMapBuildsBatch 验证 Feature Engine 可以批量产出统一特征，供上层模块共享。
+func TestBuildFeatureMapBuildsBatch(t *testing.T) {
+	got := BuildFeatureMap(map[string]SnapshotValues{
+		"BTCUSDT": {
+			Timeframe:  "1m",
+			Close:      80000,
+			Ema21:      79900,
+			Ema55:      79800,
+			Atr:        120,
+			Volume:     888,
+			UpdatedAt:  time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
+			IsTradable: true,
+			IsFinal:    true,
+		},
+		"ETHUSDT": {
+			Symbol:     "ETHUSDT",
+			Timeframe:  "5m",
+			Close:      2000,
+			Ema21:      1995,
+			Ema55:      1990,
+			Atr:        15,
+			Volume:     456,
+			UpdatedAt:  time.Date(2026, 5, 2, 12, 0, 0, 0, time.UTC),
+			IsTradable: true,
+			IsFinal:    true,
+		},
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("len(features) = %d, want 2", len(got))
+	}
+	if got["BTCUSDT"].Symbol != "BTCUSDT" {
+		t.Fatalf("BTC symbol = %s, want BTCUSDT", got["BTCUSDT"].Symbol)
+	}
+	if got["ETHUSDT"].Timeframe != "5m" {
+		t.Fatalf("ETH timeframe = %s, want 5m", got["ETHUSDT"].Timeframe)
+	}
+	if got["BTCUSDT"].AtrPct <= 0 || got["ETHUSDT"].TrendScore <= 0 {
+		t.Fatalf("derived fields not populated: BTC=%+v ETH=%+v", got["BTCUSDT"], got["ETHUSDT"])
+	}
+}

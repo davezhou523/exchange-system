@@ -88,13 +88,64 @@ type SignalLogEntry struct {
 }
 
 type SignalReasonEntry struct {
-	Summary          string   `json:"summary,omitempty"`
-	Phase            string   `json:"phase,omitempty"`
-	TrendContext     string   `json:"trend_context,omitempty"`
-	SetupContext     string   `json:"setup_context,omitempty"`
-	PathContext      string   `json:"path_context,omitempty"`
-	ExecutionContext string   `json:"execution_context,omitempty"`
-	Tags             []string `json:"tags,omitempty"`
+	Summary          string                `json:"summary,omitempty"`
+	Phase            string                `json:"phase,omitempty"`
+	TrendContext     string                `json:"trend_context,omitempty"`
+	SetupContext     string                `json:"setup_context,omitempty"`
+	PathContext      string                `json:"path_context,omitempty"`
+	ExecutionContext string                `json:"execution_context,omitempty"`
+	ExitReasonKind   string                `json:"exit_reason_kind,omitempty"`
+	ExitReasonLabel  string                `json:"exit_reason_label,omitempty"`
+	Tags             []string              `json:"tags,omitempty"`
+	RouteBucket      string                `json:"route_bucket,omitempty"`
+	RouteReason      string                `json:"route_reason,omitempty"`
+	RouteTemplate    string                `json:"route_template,omitempty"`
+	Allocator        *AllocatorStatusEntry `json:"allocator,omitempty"`
+	Range            *RangeSignalEntry     `json:"range,omitempty"`
+}
+
+type RangeSignalEntry struct {
+	H1RangeOK      bool `json:"h1_range_ok"`
+	H1AdxOK        bool `json:"h1_adx_ok"`
+	H1BollWidthOK  bool `json:"h1_boll_width_ok"`
+	M15TouchLower  bool `json:"m15_touch_lower"`
+	M15RsiTurnUp   bool `json:"m15_rsi_turn_up"`
+	M15TouchUpper  bool `json:"m15_touch_upper"`
+	M15RsiTurnDown bool `json:"m15_rsi_turn_down"`
+}
+
+type AllocatorStatusEntry struct {
+	Template       string  `json:"template,omitempty"`
+	RouteBucket    string  `json:"route_bucket,omitempty"`
+	RouteReason    string  `json:"route_reason,omitempty"`
+	Score          float64 `json:"score,omitempty"`
+	ScoreSource    string  `json:"score_source,omitempty"`
+	BucketBudget   float64 `json:"bucket_budget,omitempty"`
+	StrategyWeight float64 `json:"strategy_weight"`
+	SymbolWeight   float64 `json:"symbol_weight"`
+	RiskScale      float64 `json:"risk_scale"`
+	PositionBudget float64 `json:"position_budget"`
+	TradingPaused  bool    `json:"trading_paused"`
+	PauseReason    string  `json:"pause_reason,omitempty"`
+}
+
+// ProtectionEntry 记录整组保护单的下发结果，方便事后排查官网未显示的原因。
+type ProtectionEntry struct {
+	Requested  bool                `json:"requested"`
+	Status     string              `json:"status,omitempty"`
+	Reason     string              `json:"reason,omitempty"`
+	StopLoss   *ProtectionLegEntry `json:"stop_loss,omitempty"`
+	TakeProfit *ProtectionLegEntry `json:"take_profit,omitempty"`
+}
+
+// ProtectionLegEntry 记录单条保护腿的下发结果。
+type ProtectionLegEntry struct {
+	Requested     bool    `json:"requested"`
+	Status        string  `json:"status,omitempty"`
+	TriggerPrice  float64 `json:"trigger_price,omitempty"`
+	Reason        string  `json:"reason,omitempty"`
+	OrderID       string  `json:"order_id,omitempty"`
+	ClientOrderID string  `json:"client_order_id,omitempty"`
 }
 
 // LogSignal 记录收到的策略信号
@@ -153,6 +204,7 @@ type OrderLogEntry struct {
 	RiskReward                  float64            `json:"risk_reward"`
 	Reason                      string             `json:"reason"`
 	SignalReason                *SignalReasonEntry `json:"signal_reason,omitempty"`
+	Protection                  *ProtectionEntry   `json:"protection,omitempty"`
 	ErrorMessage                string             `json:"error_message,omitempty"`
 	TransactTime                string             `json:"transact_time"`
 	HarvestPathProbability      float64            `json:"harvest_path_probability,omitempty"`
@@ -170,8 +222,8 @@ type OrderLogEntry struct {
 	HarvestPathMarketPrice      float64            `json:"harvest_path_market_price,omitempty"`
 }
 
-// LogOrder 记录订单执行结果
-func (l *Logger) LogOrder(sig *strategypb.Signal, result *exchange.OrderResult, orderQuantity float64, harvestPath *HarvestPathMeta) {
+// LogOrder 记录订单执行结果，并把保护单下发状态一起落盘。
+func (l *Logger) LogOrder(sig *strategypb.Signal, result *exchange.OrderResult, orderQuantity float64, harvestPath *HarvestPathMeta, protection *exchange.ProtectionSetupResult) {
 	if l == nil || l.orderLogDir == "" {
 		return
 	}
@@ -199,6 +251,7 @@ func (l *Logger) LogOrder(sig *strategypb.Signal, result *exchange.OrderResult, 
 		RiskReward:      sig.GetRiskReward(),
 		Reason:          ComposeHarvestPathReason(sig.GetReason(), harvestPath),
 		SignalReason:    signalReasonEntryFromPB(sig.GetSignalReason()),
+		Protection:      protectionEntryFromResult(protection),
 		ErrorMessage:    result.ErrorMessage,
 		TransactTime:    formatMillisTime(result.TransactTime),
 	}
@@ -302,11 +355,100 @@ func signalReasonEntryFromPB(reason *strategypb.SignalReason) *SignalReasonEntry
 		SetupContext:     strings.TrimSpace(reason.GetSetupContext()),
 		PathContext:      strings.TrimSpace(reason.GetPathContext()),
 		ExecutionContext: strings.TrimSpace(reason.GetExecutionContext()),
+		ExitReasonKind:   strings.TrimSpace(reason.GetExitReasonKind()),
+		ExitReasonLabel:  strings.TrimSpace(reason.GetExitReasonLabel()),
+		RouteBucket:      strings.TrimSpace(reason.GetRouteBucket()),
+		RouteReason:      strings.TrimSpace(reason.GetRouteReason()),
+		RouteTemplate:    strings.TrimSpace(reason.GetRouteTemplate()),
+		Allocator:        allocatorStatusEntryFromPB(reason.GetAllocator()),
+		Range:            rangeSignalEntryFromPB(reason.GetRange()),
 	}
 	if tags := reason.GetTags(); len(tags) > 0 {
 		entry.Tags = append([]string(nil), tags...)
 	}
-	if entry.Summary == "" && entry.Phase == "" && entry.TrendContext == "" && entry.SetupContext == "" && entry.PathContext == "" && entry.ExecutionContext == "" && len(entry.Tags) == 0 {
+	if entry.Summary == "" && entry.Phase == "" && entry.TrendContext == "" && entry.SetupContext == "" && entry.PathContext == "" && entry.ExecutionContext == "" && entry.ExitReasonKind == "" && entry.ExitReasonLabel == "" && entry.RouteBucket == "" && entry.RouteReason == "" && entry.RouteTemplate == "" && len(entry.Tags) == 0 && entry.Allocator == nil && entry.Range == nil {
+		return nil
+	}
+	return entry
+}
+
+// rangeSignalEntryFromPB 将结构化 range 摘要转换为日志结构。
+func rangeSignalEntryFromPB(v *strategypb.RangeSignalReason) *RangeSignalEntry {
+	if v == nil {
+		return nil
+	}
+	entry := &RangeSignalEntry{
+		H1RangeOK:      v.GetH1RangeOk(),
+		H1AdxOK:        v.GetH1AdxOk(),
+		H1BollWidthOK:  v.GetH1BollWidthOk(),
+		M15TouchLower:  v.GetM15TouchLower(),
+		M15RsiTurnUp:   v.GetM15RsiTurnUp(),
+		M15TouchUpper:  v.GetM15TouchUpper(),
+		M15RsiTurnDown: v.GetM15RsiTurnDown(),
+	}
+	if !entry.H1RangeOK && !entry.H1AdxOK && !entry.H1BollWidthOK && !entry.M15TouchLower && !entry.M15RsiTurnUp && !entry.M15TouchUpper && !entry.M15RsiTurnDown {
+		return nil
+	}
+	return entry
+}
+
+// allocatorStatusEntryFromPB 将 allocator 快照转换为日志友好的结构。
+func allocatorStatusEntryFromPB(v *strategypb.PositionAllocatorStatus) *AllocatorStatusEntry {
+	if v == nil {
+		return nil
+	}
+	entry := &AllocatorStatusEntry{
+		Template:       strings.TrimSpace(v.GetTemplate()),
+		RouteBucket:    strings.TrimSpace(v.GetRouteBucket()),
+		RouteReason:    strings.TrimSpace(v.GetRouteReason()),
+		Score:          v.GetScore(),
+		ScoreSource:    strings.TrimSpace(v.GetScoreSource()),
+		BucketBudget:   v.GetBucketBudget(),
+		StrategyWeight: v.GetStrategyWeight(),
+		SymbolWeight:   v.GetSymbolWeight(),
+		RiskScale:      v.GetRiskScale(),
+		PositionBudget: v.GetPositionBudget(),
+		TradingPaused:  v.GetTradingPaused(),
+		PauseReason:    strings.TrimSpace(v.GetPauseReason()),
+	}
+	if entry.Template == "" && entry.RouteBucket == "" && entry.RouteReason == "" && entry.Score == 0 && entry.ScoreSource == "" && entry.BucketBudget == 0 && entry.StrategyWeight == 0 && entry.SymbolWeight == 0 && entry.RiskScale == 0 && entry.PositionBudget == 0 && !entry.TradingPaused && entry.PauseReason == "" {
+		return nil
+	}
+	return entry
+}
+
+// protectionEntryFromResult 将交易所返回的结构化保护单结果转换为日志结构。
+func protectionEntryFromResult(v *exchange.ProtectionSetupResult) *ProtectionEntry {
+	if v == nil {
+		return nil
+	}
+	entry := &ProtectionEntry{
+		Requested:  v.Requested,
+		Status:     strings.TrimSpace(v.Status),
+		Reason:     strings.TrimSpace(v.Reason),
+		StopLoss:   protectionLegEntryFromResult(v.StopLoss),
+		TakeProfit: protectionLegEntryFromResult(v.TakeProfit),
+	}
+	if !entry.Requested && entry.Status == "" && entry.Reason == "" && entry.StopLoss == nil && entry.TakeProfit == nil {
+		return nil
+	}
+	return entry
+}
+
+// protectionLegEntryFromResult 将单条保护腿结果转换为日志结构。
+func protectionLegEntryFromResult(v *exchange.ProtectionLegResult) *ProtectionLegEntry {
+	if v == nil {
+		return nil
+	}
+	entry := &ProtectionLegEntry{
+		Requested:     v.Requested,
+		Status:        strings.TrimSpace(v.Status),
+		TriggerPrice:  v.TriggerPrice,
+		Reason:        strings.TrimSpace(v.Reason),
+		OrderID:       strings.TrimSpace(v.OrderID),
+		ClientOrderID: strings.TrimSpace(v.ClientOrderID),
+	}
+	if !entry.Requested && entry.Status == "" && entry.TriggerPrice == 0 && entry.Reason == "" && entry.OrderID == "" && entry.ClientOrderID == "" {
 		return nil
 	}
 	return entry
@@ -461,5 +603,13 @@ func formatNumbers(entry interface{}) {
 		e.HarvestPathAppliedThreshold = round4(e.HarvestPathAppliedThreshold)
 		e.HarvestPathReferencePrice = round2(e.HarvestPathReferencePrice)
 		e.HarvestPathMarketPrice = round2(e.HarvestPathMarketPrice)
+		if e.Protection != nil {
+			if e.Protection.StopLoss != nil {
+				e.Protection.StopLoss.TriggerPrice = round2(e.Protection.StopLoss.TriggerPrice)
+			}
+			if e.Protection.TakeProfit != nil {
+				e.Protection.TakeProfit.TriggerPrice = round2(e.Protection.TakeProfit.TriggerPrice)
+			}
+		}
 	}
 }

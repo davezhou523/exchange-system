@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"exchange-system/app/strategy/rpc/internal/marketstate"
+	"exchange-system/common/regimejudge"
 )
 
 // 验证趋势市会按 70/30 分给趋势桶和突破桶，并在趋势桶内使用 ETH/SOL/BNB 固定配比。
@@ -221,6 +222,110 @@ func TestEvaluateCoolingPausePersistsWithinWindow(t *testing.T) {
 	if out.MarketPauseReason != "market_cooling_pause" {
 		t.Fatalf("MarketPauseReason = %s, want market_cooling_pause", out.MarketPauseReason)
 	}
+}
+
+// 验证未显式提供 SymbolScores 时，权重引擎会直接复用 Regime Judge Analysis 生成最小分数。
+func TestEvaluateUsesRegimeAnalysisAsFallbackScore(t *testing.T) {
+	engine := NewEngine(Config{})
+	out := engine.Evaluate(time.Unix(0, 0), Inputs{
+		MarketState: marketstate.AggregateResult{State: marketstate.MarketStateRange},
+		Symbols:     []string{"BTCUSDT", "ETHUSDT"},
+		Templates: map[string]string{
+			"BTCUSDT": "range-core",
+			"ETHUSDT": "range-core",
+		},
+		RegimeAnalyses: map[string]regimejudge.Analysis{
+			"BTCUSDT": {
+				Healthy:    true,
+				Fresh:      true,
+				RangeMatch: true,
+			},
+			"ETHUSDT": {
+				Healthy:         true,
+				Fresh:           true,
+				BullTrendStrict: true,
+			},
+		},
+	})
+	got := recBySymbol(out.Recommendations)
+
+	assertApproxEqual(t, got["BTCUSDT"].SymbolWeight, 1.05/(1.05+1.10))
+	assertApproxEqual(t, got["ETHUSDT"].SymbolWeight, 1.10/(1.05+1.10))
+}
+
+// 验证存在 MatchCounts 时，策略桶配比会直接参考 breakout/range/trend 命中面强弱。
+func TestEvaluateUsesMatchCountsForStrategyWeights(t *testing.T) {
+	engine := NewEngine(Config{})
+	out := engine.Evaluate(time.Unix(0, 0), Inputs{
+		MarketState: marketstate.AggregateResult{
+			State: marketstate.MarketStateTrendUp,
+			MatchCounts: map[string]int{
+				string(marketstate.MarketStateTrendUp):  2,
+				string(marketstate.MarketStateBreakout): 1,
+				string(marketstate.MarketStateRange):    1,
+			},
+		},
+		Symbols: []string{"ETHUSDT", "BTCUSDT", "XRPUSDT"},
+		Templates: map[string]string{
+			"ETHUSDT": "eth-core",
+			"BTCUSDT": "breakout-core",
+			"XRPUSDT": "range-core",
+		},
+		StrategyBuckets: map[string]string{
+			"ETHUSDT": "trend",
+			"BTCUSDT": "breakout",
+			"XRPUSDT": "range",
+		},
+		RouteReasons: map[string]string{
+			"ETHUSDT": "market_state_trend",
+			"BTCUSDT": "market_state_breakout",
+			"XRPUSDT": "market_state_range",
+		},
+	})
+	got := recBySymbol(out.Recommendations)
+
+	assertApproxEqual(t, got["ETHUSDT"].StrategyWeight, 0.5)
+	assertApproxEqual(t, got["BTCUSDT"].StrategyWeight, 0.25)
+	assertApproxEqual(t, got["XRPUSDT"].StrategyWeight, 0.25)
+	assertApproxEqual(t, out.BucketBudgets["trend"], 0.5)
+	if out.BucketSymbolCount["trend"] != 1 {
+		t.Fatalf("BucketSymbolCount[trend] = %d, want 1", out.BucketSymbolCount["trend"])
+	}
+	if got["BTCUSDT"].RouteReason != "market_state_breakout" {
+		t.Fatalf("BTCUSDT RouteReason = %s, want market_state_breakout", got["BTCUSDT"].RouteReason)
+	}
+}
+
+// 验证 Allocator 会把 score 与来源一起写到 recommendation，方便解释预算来自显式打分还是 Analysis。
+func TestEvaluateIncludesScoreSourceInRecommendation(t *testing.T) {
+	engine := NewEngine(Config{})
+	out := engine.Evaluate(time.Unix(0, 0), Inputs{
+		MarketState: marketstate.AggregateResult{State: marketstate.MarketStateTrendUp},
+		Symbols:     []string{"ETHUSDT", "SOLUSDT"},
+		Templates: map[string]string{
+			"ETHUSDT": "eth-core",
+			"SOLUSDT": "high-beta",
+		},
+		SymbolScores: map[string]float64{
+			"ETHUSDT": 1.3,
+		},
+		RegimeAnalyses: map[string]regimejudge.Analysis{
+			"SOLUSDT": {
+				Healthy:         true,
+				Fresh:           true,
+				BullTrendStrict: true,
+			},
+		},
+	})
+	got := recBySymbol(out.Recommendations)
+	if got["ETHUSDT"].ScoreSource != "symbol_score" {
+		t.Fatalf("ETHUSDT ScoreSource = %s, want symbol_score", got["ETHUSDT"].ScoreSource)
+	}
+	assertApproxEqual(t, got["ETHUSDT"].Score, 1.3)
+	if got["SOLUSDT"].ScoreSource != "regime_analysis" {
+		t.Fatalf("SOLUSDT ScoreSource = %s, want regime_analysis", got["SOLUSDT"].ScoreSource)
+	}
+	assertApproxEqual(t, got["SOLUSDT"].BucketBudget, got["SOLUSDT"].StrategyWeight*got["SOLUSDT"].RiskScale)
 }
 
 func recBySymbol(recs []Recommendation) map[string]Recommendation {

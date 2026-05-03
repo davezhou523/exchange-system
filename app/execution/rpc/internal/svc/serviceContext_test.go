@@ -54,7 +54,24 @@ func TestBuildOrderEventIncludesSignalReasonAndHarvestPathMeta(t *testing.T) {
 			SetupContext:     "1H pullback + 15m breakout",
 			PathContext:      "harvest_path_guard=enabled",
 			ExecutionContext: "atr stop",
+			ExitReasonKind:   "take_profit",
+			ExitReasonLabel:  "目标止盈",
 			Tags:             []string{"15m", "trend_following", "long"},
+			RouteBucket:      "trend",
+			RouteReason:      "market_state_trend",
+			RouteTemplate:    "btc-trend",
+			Allocator: &strategypb.PositionAllocatorStatus{
+				Template:       "btc-trend",
+				RouteBucket:    "trend",
+				RouteReason:    "market_state_trend",
+				Score:          1.15,
+				ScoreSource:    "symbol_score",
+				BucketBudget:   0.7,
+				StrategyWeight: 0.7,
+				SymbolWeight:   0.4,
+				RiskScale:      1,
+				PositionBudget: 0.28,
+			},
 		},
 	}
 
@@ -122,6 +139,22 @@ func TestBuildOrderEventIncludesSignalReasonAndHarvestPathMeta(t *testing.T) {
 	}
 	if signalReason["phase"] != "OPEN_ENTRY" {
 		t.Fatalf("unexpected signal_reason phase: %v", signalReason["phase"])
+	}
+	if signalReason["route_reason"] != "market_state_trend" {
+		t.Fatalf("unexpected signal_reason route_reason: %v", signalReason["route_reason"])
+	}
+	if signalReason["exit_reason_kind"] != "take_profit" {
+		t.Fatalf("unexpected signal_reason exit_reason_kind: %v", signalReason["exit_reason_kind"])
+	}
+	if signalReason["exit_reason_label"] != "目标止盈" {
+		t.Fatalf("unexpected signal_reason exit_reason_label: %v", signalReason["exit_reason_label"])
+	}
+	allocator, ok := signalReason["allocator"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("signal_reason allocator type mismatch: %T", signalReason["allocator"])
+	}
+	if allocator["score_source"] != "symbol_score" {
+		t.Fatalf("unexpected signal_reason allocator score_source: %v", allocator["score_source"])
 	}
 	tags, ok := signalReason["tags"].([]string)
 	if !ok {
