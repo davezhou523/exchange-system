@@ -17,7 +17,6 @@ type OKXClient struct {
 	secretKey  string
 	passphrase string
 	baseURL    string
-	simulated  bool // 是否使用模拟盘
 }
 
 // OKXConfig OKX 客户端配置
@@ -26,7 +25,6 @@ type OKXConfig struct {
 	SecretKey  string
 	Passphrase string // OKX 独有的 passphrase
 	BaseURL    string // 默认 https://www.okx.com
-	Simulated  bool   // 是否使用模拟盘
 }
 
 // NewOKXClient 创建 OKX 交易所客户端
@@ -39,7 +37,6 @@ func NewOKXClient(cfg OKXConfig) *OKXClient {
 		secretKey:  cfg.SecretKey,
 		passphrase: cfg.Passphrase,
 		baseURL:    cfg.BaseURL,
-		simulated:  cfg.Simulated,
 	}
 }
 

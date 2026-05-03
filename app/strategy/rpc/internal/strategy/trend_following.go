@@ -130,11 +130,68 @@ type TrendFollowingStrategy struct {
 	// 决策日志（无信号也记录），目录：{SignalLogDir}/decision/{SYMBOL}/{YYYY-MM-DD}.jsonl
 	decisionLogMu    sync.Mutex
 	decisionLogFiles map[string]*os.File
+
+	// 分析写入器（可选），用于把 decision/signal 同步写入 ClickHouse。
+	analyticsWriter AnalyticsWriter
+}
+
+// AnalyticsWriter 定义策略分析事件的可选写入能力。
+type AnalyticsWriter interface {
+	// WriteSignal 写入策略信号分析事件。
+	WriteSignal(entry StrategySignalAnalyticsEntry)
+	// WriteDecision 写入策略决策分析事件。
+	WriteDecision(entry StrategyDecisionAnalyticsEntry)
+}
+
+// StrategySignalAnalyticsEntry 定义 signal_fact 所需的结构化字段。
+type StrategySignalAnalyticsEntry struct {
+	EventTime       time.Time
+	Symbol          string
+	StrategyID      string
+	Template        string
+	SignalID        string
+	Action          string
+	Side            string
+	SignalType      string
+	Quantity        float64
+	EntryPrice      float64
+	StopLoss        float64
+	TakeProfitJSON  string
+	Reason          string
+	ExitReasonKind  string
+	ExitReasonLabel string
+	RiskReward      float64
+	Atr             float64
+	TagsJSON        string
+	TraceID         string
+}
+
+// StrategyDecisionAnalyticsEntry 定义 decision_fact 所需的结构化字段。
+type StrategyDecisionAnalyticsEntry struct {
+	EventTime   time.Time
+	Symbol      string
+	StrategyID  string
+	Template    string
+	Interval    string
+	Stage       string
+	Decision    string
+	Reason      string
+	ReasonCode  string
+	HasPosition bool
+	IsFinal     bool
+	IsTradable  bool
+	OpenTime    time.Time
+	CloseTime   time.Time
+	RouteBucket string
+	RouteReason string
+	ExtrasJSON  string
+	TraceID     string
 }
 
 type RuntimeOptions struct {
 	HarvestPathLSTMPredictor *harvestpathmodel.LSTMPredictor
 	WeightProvider           func(string) (weights.Recommendation, bool)
+	AnalyticsWriter          AnalyticsWriter
 }
 
 // HistoryWarmupStatus 汇总策略实例当前各周期已缓存的K线数量，便于上层判断冷启动恢复是否完整。
@@ -163,6 +220,7 @@ func NewTrendFollowingStrategy(symbol string, params map[string]float64, produce
 		harvestPathProducer:      harvestPathProducer,
 		harvestPathLSTMPredictor: runtimeHarvestPathLSTMPredictor(opts),
 		weightProvider:           runtimeWeightProvider(opts),
+		analyticsWriter:          runtimeAnalyticsWriter(opts),
 		signalLogDir:             signalLogDir,
 		signalLogFiles:           make(map[string]*os.File),
 		decisionLogFiles:         make(map[string]*os.File),
@@ -184,6 +242,7 @@ func (s *TrendFollowingStrategy) UpdateRuntimeConfig(params map[string]float64, 
 	s.signalLogDir = signalLogDir
 	s.harvestPathLSTMPredictor = runtimeHarvestPathLSTMPredictor(opts)
 	s.weightProvider = runtimeWeightProvider(opts)
+	s.analyticsWriter = runtimeAnalyticsWriter(opts)
 }
 
 func runtimeHarvestPathLSTMPredictor(opts *RuntimeOptions) *harvestpathmodel.LSTMPredictor {
@@ -198,6 +257,14 @@ func runtimeWeightProvider(opts *RuntimeOptions) func(string) (weights.Recommend
 		return nil
 	}
 	return opts.WeightProvider
+}
+
+// runtimeAnalyticsWriter 安全读取运行时分析写入器配置。
+func runtimeAnalyticsWriter(opts *RuntimeOptions) AnalyticsWriter {
+	if opts == nil {
+		return nil
+	}
+	return opts.AnalyticsWriter
 }
 
 // isBreakoutVariant 返回当前策略实例是否运行在 Breakout 变体下。
@@ -1997,6 +2064,9 @@ func (s *TrendFollowingStrategy) writeSignalLog(signal map[string]interface{}, k
 	reason, _ := signal["reason"].(string)
 	signalReason := signal["signal_reason"]
 	interval, _ := signal["interval"].(string)
+	signalType, _ := signal["signal_type"].(string)
+	atr, _ := signal["atr"].(float64)
+	riskReward, _ := signal["risk_reward"].(float64)
 	indicators, _ := signal["indicators"].(map[string]interface{})
 	strategyID, _ := signal["strategy_id"].(string)
 
@@ -2074,6 +2144,30 @@ func (s *TrendFollowingStrategy) writeSignalLog(signal map[string]interface{}, k
 	}
 	if _, err := f.Write(buf.Bytes()); err != nil {
 		log.Printf("[signal-log] write failed: %v", err)
+	}
+	if s.analyticsWriter != nil {
+		exitReasonKind, exitReasonLabel, tagsJSON, template := extractSignalReasonAnalytics(signalReason)
+		s.analyticsWriter.WriteSignal(StrategySignalAnalyticsEntry{
+			EventTime:       now,
+			Symbol:          s.symbol,
+			StrategyID:      strategyID,
+			Template:        firstNonEmptyString(template, weightTemplate(weightSnapshot)),
+			SignalID:        buildSignalAnalyticsID(strategyID, signalType, k.CloseTime),
+			Action:          action,
+			Side:            side,
+			SignalType:      signalType,
+			Quantity:        quantity,
+			EntryPrice:      entryPrice,
+			StopLoss:        stopLoss,
+			TakeProfitJSON:  marshalAnalyticsJSON(takeProfits),
+			Reason:          reason,
+			ExitReasonKind:  exitReasonKind,
+			ExitReasonLabel: exitReasonLabel,
+			RiskReward:      round2(riskReward),
+			Atr:             round2(atr),
+			TagsJSON:        tagsJSON,
+			TraceID:         buildSignalAnalyticsTraceID(strategyID, s.symbol, signalType, k.CloseTime),
+		})
 	}
 }
 
@@ -2363,6 +2457,109 @@ func (s *TrendFollowingStrategy) writeDecisionLogIfEnabled(stage, decision, reas
 	if _, err := f.Write(buf.Bytes()); err != nil {
 		log.Printf("[decision-log] write failed: %v", err)
 	}
+	if s.analyticsWriter != nil {
+		routeBucket, routeReason, template := extractDecisionRouteAnalytics(orderedExtras)
+		s.analyticsWriter.WriteDecision(StrategyDecisionAnalyticsEntry{
+			EventTime:   now,
+			Symbol:      s.symbol,
+			StrategyID:  s.strategySignalID(k.Interval),
+			Template:    template,
+			Interval:    k.Interval,
+			Stage:       stage,
+			Decision:    decision,
+			Reason:      translateDecisionReason(reason),
+			ReasonCode:  reason,
+			HasPosition: s.pos.side != sideNone,
+			IsFinal:     k.IsFinal,
+			IsTradable:  k.IsTradable,
+			OpenTime:    time.UnixMilli(k.OpenTime).UTC(),
+			CloseTime:   time.UnixMilli(k.CloseTime).UTC(),
+			RouteBucket: routeBucket,
+			RouteReason: routeReason,
+			ExtrasJSON:  marshalAnalyticsJSON(orderedExtras),
+			TraceID:     buildSignalAnalyticsTraceID(s.strategySignalID(k.Interval), s.symbol, decision, k.CloseTime),
+		})
+	}
+}
+
+// extractSignalReasonAnalytics 从 signal_reason 结构中提取分析库需要的关键字段。
+func extractSignalReasonAnalytics(signalReason interface{}) (string, string, string, string) {
+	switch payload := signalReason.(type) {
+	case signalReasonPayload:
+		tagsJSON := marshalAnalyticsJSON(payload.Tags)
+		if tagsJSON == "null" || tagsJSON == "" {
+			tagsJSON = "[]"
+		}
+		return payload.ExitReasonKind, payload.ExitReasonLabel, tagsJSON, payload.RouteTemplate
+	case map[string]interface{}:
+		exitReasonKind, _ := payload["exit_reason_kind"].(string)
+		exitReasonLabel, _ := payload["exit_reason_label"].(string)
+		routeTemplate, _ := payload["route_template"].(string)
+		tagsJSON := "[]"
+		if tags, ok := payload["tags"]; ok {
+			tagsJSON = marshalAnalyticsJSON(tags)
+		}
+		if tagsJSON == "null" || tagsJSON == "" {
+			tagsJSON = "[]"
+		}
+		return exitReasonKind, exitReasonLabel, tagsJSON, routeTemplate
+	default:
+		return "", "", "[]", ""
+	}
+}
+
+// extractDecisionRouteAnalytics 从 decision extras 中提取路由与模板信息。
+func extractDecisionRouteAnalytics(extras *orderedDecisionExtras) (string, string, string) {
+	if extras == nil || len(extras.values) == 0 {
+		return "", "", ""
+	}
+	routeBucket, _ := extras.values["route_bucket"].(string)
+	routeReason, _ := extras.values["route_reason"].(string)
+	template, _ := extras.values["route_template"].(string)
+	if template == "" {
+		template, _ = extras.values["template"].(string)
+	}
+	return routeBucket, routeReason, template
+}
+
+// marshalAnalyticsJSON 把任意结构编码为紧凑 JSON 字符串，失败时返回空 JSON。
+func marshalAnalyticsJSON(v interface{}) string {
+	if v == nil {
+		return "{}"
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
+// buildSignalAnalyticsID 生成 signal_fact 使用的稳定信号ID。
+func buildSignalAnalyticsID(strategyID, signalType string, closeTimeMs int64) string {
+	return fmt.Sprintf("%s-%s-%d", firstNonEmptyString(strategyID, "strategy"), firstNonEmptyString(signalType, "signal"), closeTimeMs)
+}
+
+// buildSignalAnalyticsTraceID 生成分析事件使用的 trace_id。
+func buildSignalAnalyticsTraceID(strategyID, symbol, suffix string, ts int64) string {
+	return fmt.Sprintf("%s-%s-%s-%d", firstNonEmptyString(strategyID, "strategy"), firstNonEmptyString(symbol, "symbol"), firstNonEmptyString(suffix, "event"), ts)
+}
+
+// weightTemplate 安全读取权重快照中的模板名。
+func weightTemplate(snapshot *signalWeightSnapshot) string {
+	if snapshot == nil {
+		return ""
+	}
+	return snapshot.Template
+}
+
+// firstNonEmptyString 返回第一个非空字符串，用于模板与trace字段兜底。
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func translateDecisionReason(reason string) string {

@@ -115,3 +115,14 @@ Binance:
   Intervals:
     - 1m
   Proxy: socks5://192.168.10.14:1080
+
+ClickHouse:
+  Enabled: true
+  Endpoint: http://127.0.0.1:8123
+  Database: exchange_analytics
+  Username: default
+  Password: ""
+  Source: market-rpc
+  Timeout: 3s
+  QueueSize: 2048
+  FlushInterval: 1s

@@ -1,8 +1,8 @@
 package svc
 
 import (
-	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -20,6 +20,8 @@ import (
 	"exchange-system/common/binance"
 	commonkafka "exchange-system/common/kafka"
 	orderpb "exchange-system/common/pb/order"
+
+	_ "github.com/lib/pq"
 )
 
 const defaultAllOrdersLookback = 7 * 24 * time.Hour
@@ -35,17 +37,14 @@ const defaultAllOrdersLookback = 7 * 24 * time.Hour
 
 // ServiceContext Order 服务上下文
 type ServiceContext struct {
-	Config                config.Config
-	client                *binance.Client
-	dataDir               string
-	executionOrderLogDir  string
-	orderConsumer         *orderkafka.Consumer
-	cancel                context.CancelFunc
-	feeSummaryMu          sync.RWMutex
-	feeSummaries          map[string]map[int64]tradeFeeSummary
-	executionMetaMu       sync.RWMutex
-	executionMetaByOrder  map[string]map[int64]executionOrderMeta
-	executionMetaByClient map[string]map[string]executionOrderMeta
+	Config        config.Config
+	client        *binance.Client
+	dataDir       string
+	postgresDB    *sql.DB
+	orderConsumer *orderkafka.Consumer
+	cancel        context.CancelFunc
+	feeSummaryMu  sync.RWMutex
+	feeSummaries  map[string]map[int64]tradeFeeSummary
 }
 
 type refreshSummary struct {
@@ -104,11 +103,6 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		dataDir = "data/futures"
 	}
 
-	executionOrderLogDir := c.ExecutionOrderLogDir
-	if executionOrderLogDir == "" {
-		executionOrderLogDir = "../../execution/rpc/data/order"
-	}
-
 	// 确保数据目录存在
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		cancel()
@@ -120,15 +114,19 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	log.Printf("[Order服务] GetAllOrders 查询上下文 | baseURL=%s defaultSymbol=%s startTime=%d(%s) endTime=0(no-limit)",
 		c.Binance.BaseURL, "ETHUSDT", defaultStartTime, formatMillis(defaultStartTime))
 
+	postgresDB, err := openPostgresDB(ctx, c.Postgres)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+
 	svcCtx := &ServiceContext{
-		Config:                c,
-		client:                client,
-		dataDir:               dataDir,
-		executionOrderLogDir:  executionOrderLogDir,
-		cancel:                cancel,
-		feeSummaries:          make(map[string]map[int64]tradeFeeSummary),
-		executionMetaByOrder:  make(map[string]map[int64]executionOrderMeta),
-		executionMetaByClient: make(map[string]map[string]executionOrderMeta),
+		Config:       c,
+		client:       client,
+		dataDir:      dataDir,
+		postgresDB:   postgresDB,
+		cancel:       cancel,
+		feeSummaries: make(map[string]map[int64]tradeFeeSummary),
 	}
 
 	orderTopic := c.Kafka.Topics.Order
@@ -144,12 +142,18 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 
 		consumer, err := orderkafka.NewConsumer(c.Kafka.Addrs, groupID, orderTopic)
 		if err != nil {
+			if postgresDB != nil {
+				_ = postgresDB.Close()
+			}
 			cancel()
 			return nil, fmt.Errorf("init order consumer: %w", err)
 		}
 		svcCtx.orderConsumer = consumer
 		if err := consumer.StartConsuming(ctx, svcCtx.handleOrderEvent); err != nil {
 			_ = consumer.Close()
+			if postgresDB != nil {
+				_ = postgresDB.Close()
+			}
 			cancel()
 			return nil, fmt.Errorf("start order consumer: %w", err)
 		}
@@ -276,27 +280,15 @@ func (s *ServiceContext) GetAllOrders(ctx context.Context, symbol string, startT
 	startTime = normalizeAllOrdersStartTime(startTime)
 	log.Printf("[Order服务] GetAllOrders 请求 | baseURL=%s symbol=%s startTime=%d(%s) endTime=%d(%s) limit=%d",
 		s.Config.Binance.BaseURL, symbol, startTime, formatMillis(startTime), endTime, formatMillis(endTime), limit)
-	if _, err := s.readExecutionOrderLogs(symbol, startTime, endTime); err != nil {
-		log.Printf("[Order服务] 预取 execution 订单日志失败 | symbol=%s err=%v", symbol, err)
-	}
 	orders, apiErr := s.client.GetAllOrders(ctx, symbol, startTime, endTime, limit)
 	if trades, tradeErr := s.GetUserTrades(ctx, symbol, startTime, endTime, maxInt(limit, 1000)); tradeErr == nil {
 		s.cacheTradeFeeSummaries(symbol, trades)
 	} else {
 		log.Printf("[Order服务] 预取手续费汇总失败 | symbol=%s err=%v", symbol, tradeErr)
 	}
-	simOrders, simErr := s.readSimulatedAllOrders(symbol, startTime, endTime)
-	if simErr != nil {
-		log.Printf("[Order服务] 读取 simulated 历史委托失败: %v", simErr)
-	}
 	if apiErr != nil {
-		if len(simOrders) == 0 {
-			return nil, apiErr
-		}
-		log.Printf("[Order服务] Binance 历史委托查询失败，回退使用 simulated 本地订单: %v", apiErr)
-		orders = nil
+		return nil, apiErr
 	}
-	orders = append(orders, simOrders...)
 	sort.Slice(orders, func(i, j int) bool {
 		if orders[i].UpdateTime == orders[j].UpdateTime {
 			return orders[i].OrderID > orders[j].OrderID
@@ -315,18 +307,9 @@ func (s *ServiceContext) GetAllOrders(ctx context.Context, symbol string, startT
 // GetUserTrades 查询历史成交
 func (s *ServiceContext) GetUserTrades(ctx context.Context, symbol string, startTime, endTime int64, limit int) ([]binance.UserTrade, error) {
 	trades, apiErr := s.client.GetUserTrades(ctx, symbol, startTime, endTime, limit)
-	simTrades, simErr := s.readSimulatedUserTrades(symbol, startTime, endTime)
-	if simErr != nil {
-		log.Printf("[Order服务] 读取 simulated 历史成交失败: %v", simErr)
-	}
 	if apiErr != nil {
-		if len(simTrades) == 0 {
-			return nil, apiErr
-		}
-		log.Printf("[Order服务] Binance 历史成交查询失败，回退使用 simulated 本地成交: %v", apiErr)
-		trades = nil
+		return nil, apiErr
 	}
-	trades = append(trades, simTrades...)
 	sort.Slice(trades, func(i, j int) bool {
 		if trades[i].Time == trades[j].Time {
 			return trades[i].ID > trades[j].ID
@@ -425,7 +408,264 @@ func (s *ServiceContext) writeJSONL(category, symbol string, items interface{}) 
 		}
 	}
 
+	if err := s.persistCategorySnapshot(category, symbol, items); err != nil {
+		log.Printf("[Order服务] PostgreSQL落库失败 | category=%s symbol=%s err=%v", category, symbol, err)
+	}
+
 	return nil
+}
+
+// openPostgresDB 按配置初始化 PostgreSQL 连接池。
+func openPostgresDB(ctx context.Context, cfg config.PostgresConfig) (*sql.DB, error) {
+	if !cfg.Enabled {
+		return nil, nil
+	}
+	if strings.TrimSpace(cfg.DSN) == "" {
+		return nil, fmt.Errorf("postgres dsn is required when postgres is enabled")
+	}
+	if strings.TrimSpace(cfg.AccountID) == "" {
+		return nil, fmt.Errorf("postgres account_id is required when postgres is enabled")
+	}
+	db, err := sql.Open("postgres", cfg.DSN)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres: %w", err)
+	}
+	if cfg.MaxOpenConns > 0 {
+		db.SetMaxOpenConns(cfg.MaxOpenConns)
+	}
+	if cfg.MaxIdleConns > 0 {
+		db.SetMaxIdleConns(cfg.MaxIdleConns)
+	}
+	if cfg.ConnMaxLifetime > 0 {
+		db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+	}
+	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err := db.PingContext(pingCtx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping postgres: %w", err)
+	}
+	log.Printf("[Order服务] PostgreSQL连接成功 | account_id=%s", strings.TrimSpace(cfg.AccountID))
+	return db, nil
+}
+
+// persistCategorySnapshot 根据分类把快照同步写入 PostgreSQL。
+func (s *ServiceContext) persistCategorySnapshot(category, symbol string, items interface{}) error {
+	if s == nil || s.postgresDB == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	switch v := items.(type) {
+	case []binance.AllOrder:
+		return s.persistAllOrdersSnapshot(ctx, v)
+	case []positionJSONLEntry:
+		return s.persistPositionsSnapshot(ctx, symbol, v)
+	case []binance.UserTrade:
+		return s.persistTradesSnapshot(ctx, v)
+	default:
+		return nil
+	}
+}
+
+// persistAllOrdersSnapshot 把历史委托快照 upsert 到 exchange_core.orders。
+func (s *ServiceContext) persistAllOrdersSnapshot(ctx context.Context, orders []binance.AllOrder) error {
+	if len(orders) == 0 {
+		return nil
+	}
+	tx, err := s.postgresDB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	lifecycleMap := s.BuildOrderLifecycleMap(orders)
+	const query = `
+INSERT INTO exchange_core.orders
+	(account_id, symbol, order_id, client_order_id, strategy_id, position_cycle_id, side, type, price, quantity, executed_quantity, status, reduce_only, created_at, updated_at)
+VALUES
+	($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+ON CONFLICT (account_id, order_id) DO UPDATE SET
+	symbol = EXCLUDED.symbol,
+	client_order_id = EXCLUDED.client_order_id,
+	strategy_id = EXCLUDED.strategy_id,
+	position_cycle_id = EXCLUDED.position_cycle_id,
+	side = EXCLUDED.side,
+	type = EXCLUDED.type,
+	price = EXCLUDED.price,
+	quantity = EXCLUDED.quantity,
+	executed_quantity = EXCLUDED.executed_quantity,
+	status = EXCLUDED.status,
+	reduce_only = EXCLUDED.reduce_only,
+	updated_at = EXCLUDED.updated_at`
+	accountID := strings.TrimSpace(s.Config.Postgres.AccountID)
+	for _, item := range orders {
+		lifecycle := lifecycleMap[item.OrderID]
+		if _, err := tx.ExecContext(
+			ctx,
+			query,
+			accountID,
+			strings.ToUpper(strings.TrimSpace(item.Symbol)),
+			strconv.FormatInt(item.OrderID, 10),
+			normalizeClientOrderID(item.ClientOrderID, item.OrderID),
+			"",
+			lifecycle.PositionCycleID,
+			strings.ToUpper(strings.TrimSpace(item.Side)),
+			strings.ToUpper(strings.TrimSpace(item.Type)),
+			normalizeNumericString(item.Price),
+			normalizeNumericString(item.OrigQty),
+			normalizeNumericString(item.ExecutedQty),
+			strings.ToUpper(strings.TrimSpace(item.Status)),
+			item.ReduceOnly,
+			millisToTime(item.Time),
+			millisToTime(maxInt64(item.UpdateTime, item.Time)),
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// persistPositionsSnapshot 用最新持仓快照覆盖指定 symbol 的 PostgreSQL 记录。
+func (s *ServiceContext) persistPositionsSnapshot(ctx context.Context, symbol string, items []positionJSONLEntry) error {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		return nil
+	}
+	tx, err := s.postgresDB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	accountID := strings.TrimSpace(s.Config.Postgres.AccountID)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM exchange_core.positions WHERE account_id = $1 AND symbol = $2`, accountID, symbol); err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		return tx.Commit()
+	}
+	const query = `
+INSERT INTO exchange_core.positions
+	(account_id, symbol, position_side, position_amt, entry_price, mark_price, unrealized_pnl, leverage, updated_at)
+VALUES
+	($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (account_id, symbol, position_side) DO UPDATE SET
+	position_amt = EXCLUDED.position_amt,
+	entry_price = EXCLUDED.entry_price,
+	mark_price = EXCLUDED.mark_price,
+	unrealized_pnl = EXCLUDED.unrealized_pnl,
+	leverage = EXCLUDED.leverage,
+	updated_at = EXCLUDED.updated_at`
+	for _, item := range items {
+		if _, err := tx.ExecContext(
+			ctx,
+			query,
+			accountID,
+			symbol,
+			strings.ToUpper(strings.TrimSpace(item.PositionSide)),
+			normalizeNumericString(item.PositionAmt),
+			normalizeNumericString(item.EntryPrice),
+			normalizeNumericString(item.MarkPrice),
+			normalizeNumericString(item.UnrealizedProfit),
+			normalizeNumericString(item.Leverage),
+			millisToTime(item.SnapshotTimestamp),
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// persistTradesSnapshot 把历史成交快照 upsert 到 exchange_core.trades。
+func (s *ServiceContext) persistTradesSnapshot(ctx context.Context, trades []binance.UserTrade) error {
+	if len(trades) == 0 {
+		return nil
+	}
+	tx, err := s.postgresDB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	const query = `
+INSERT INTO exchange_core.trades
+	(account_id, symbol, trade_id, order_id, price, qty, fee, fee_asset, realized_pnl, trade_time)
+VALUES
+	($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (account_id, trade_id) DO UPDATE SET
+	symbol = EXCLUDED.symbol,
+	order_id = EXCLUDED.order_id,
+	price = EXCLUDED.price,
+	qty = EXCLUDED.qty,
+	fee = EXCLUDED.fee,
+	fee_asset = EXCLUDED.fee_asset,
+	realized_pnl = EXCLUDED.realized_pnl,
+	trade_time = EXCLUDED.trade_time`
+	accountID := strings.TrimSpace(s.Config.Postgres.AccountID)
+	for _, item := range trades {
+		if _, err := tx.ExecContext(
+			ctx,
+			query,
+			accountID,
+			strings.ToUpper(strings.TrimSpace(item.Symbol)),
+			strconv.FormatInt(item.ID, 10),
+			strconv.FormatInt(item.OrderID, 10),
+			normalizeNumericString(item.Price),
+			normalizeNumericString(item.Qty),
+			normalizeNumericString(item.Commission),
+			strings.TrimSpace(item.CommissionAsset),
+			normalizeNumericString(item.RealizedPnl),
+			millisToTime(item.Time),
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// normalizeClientOrderID 为缺失的 client_order_id 生成稳定兜底值，避免唯一键冲突。
+func normalizeClientOrderID(clientOrderID string, orderID int64) string {
+	clientOrderID = strings.TrimSpace(clientOrderID)
+	if clientOrderID != "" {
+		return clientOrderID
+	}
+	if orderID <= 0 {
+		return "unknown-client-order-id"
+	}
+	return "order-" + strconv.FormatInt(orderID, 10)
+}
+
+// normalizeNumericString 把空数字段转换成 0，便于写入 numeric 列。
+func normalizeNumericString(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "0"
+	}
+	return v
+}
+
+// millisToTime 把毫秒时间戳转换为 UTC 时间。
+func millisToTime(ms int64) time.Time {
+	if ms <= 0 {
+		return time.UnixMilli(0).UTC()
+	}
+	return time.UnixMilli(ms).UTC()
+}
+
+// maxInt64 返回两个 int64 中的较大值。
+func maxInt64(a, b int64) int64 {
+	if a >= b {
+		return a
+	}
+	return b
 }
 
 func (s *ServiceContext) removeCategoryJSONL(category, symbol string) error {
@@ -675,186 +915,9 @@ func parseExecutionTransactTimeString(raw string, fallbackTimestamp string) int6
 	return 0
 }
 
-func (s *ServiceContext) readSimulatedAllOrders(symbol string, startTime, endTime int64) ([]binance.AllOrder, error) {
-	entries, err := s.readExecutionOrderLogs(symbol, startTime, endTime)
-	if err != nil {
-		return nil, err
-	}
-	orders := make([]binance.AllOrder, 0, len(entries))
-	for _, e := range entries {
-		orders = append(orders, binance.AllOrder{
-			OrderID:       stableID(e.OrderID),
-			Symbol:        e.Symbol,
-			Status:        e.Status,
-			Side:          e.Side,
-			PositionSide:  e.PositionSide,
-			Type:          e.Type,
-			OrigQty:       formatFloat(e.Quantity),
-			ExecutedQty:   formatFloat(e.ExecutedQty),
-			AvgPrice:      formatFloat(e.AvgPrice),
-			Price:         formatFloat(e.AvgPrice),
-			StopPrice:     formatFloat(e.StopLoss),
-			ClientOrderID: e.ClientID,
-			Time:          e.TransactTime,
-			UpdateTime:    e.TransactTime,
-			ReduceOnly:    false,
-			ClosePosition: false,
-			TimeInForce:   "IOC",
-		})
-	}
-	return orders, nil
-}
-
-func (s *ServiceContext) readSimulatedUserTrades(symbol string, startTime, endTime int64) ([]binance.UserTrade, error) {
-	entries, err := s.readExecutionOrderLogs(symbol, startTime, endTime)
-	if err != nil {
-		return nil, err
-	}
-	trades := make([]binance.UserTrade, 0, len(entries))
-	for _, e := range entries {
-		price := e.AvgPrice
-		qty := e.ExecutedQty
-		trades = append(trades, binance.UserTrade{
-			ID:              stableID(e.ClientID + ":" + e.OrderID),
-			Symbol:          e.Symbol,
-			OrderID:         stableID(e.OrderID),
-			Side:            e.Side,
-			PositionSide:    e.PositionSide,
-			Price:           formatFloat(price),
-			Qty:             formatFloat(qty),
-			RealizedPnl:     "0",
-			MarginAsset:     e.CommissionAsset,
-			QuoteQty:        formatFloat(price * qty),
-			Commission:      formatFloat(e.Commission),
-			CommissionAsset: e.CommissionAsset,
-			Time:            e.TransactTime,
-			Buyer:           strings.EqualFold(e.Side, "BUY"),
-			Maker:           false,
-		})
-	}
-	return trades, nil
-}
-
-func (s *ServiceContext) readExecutionOrderLogs(symbol string, startTime, endTime int64) ([]executionOrderLogEntry, error) {
-	if s.executionOrderLogDir == "" || symbol == "" {
-		return nil, nil
-	}
-	pattern := filepath.Join(s.executionOrderLogDir, symbol, "*.jsonl")
-	paths, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil, fmt.Errorf("glob %s: %w", pattern, err)
-	}
-	if len(paths) == 0 {
-		return nil, nil
-	}
-
-	var out []executionOrderLogEntry
-	for _, path := range paths {
-		f, err := os.Open(path)
-		if err != nil {
-			return nil, fmt.Errorf("open %s: %w", path, err)
-		}
-
-		scanner := bufio.NewScanner(f)
-		buf := make([]byte, 0, 64*1024)
-		scanner.Buffer(buf, 1024*1024)
-
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			if len(line) == 0 {
-				continue
-			}
-			var entry executionOrderLogEntry
-			if err := json.Unmarshal(line, &entry); err != nil {
-				continue
-			}
-			if entry.Symbol != symbol {
-				continue
-			}
-			if startTime > 0 && entry.TransactTime < startTime {
-				continue
-			}
-			if endTime > 0 && entry.TransactTime > endTime {
-				continue
-			}
-			out = append(out, entry)
-		}
-		closeErr := f.Close()
-		if err := scanner.Err(); err != nil {
-			return nil, fmt.Errorf("scan %s: %w", path, err)
-		}
-		if closeErr != nil {
-			return nil, fmt.Errorf("close %s: %w", path, closeErr)
-		}
-	}
-	s.cacheExecutionOrderMeta(symbol, out)
-	return out, nil
-}
-
-func (s *ServiceContext) cacheExecutionOrderMeta(symbol string, entries []executionOrderLogEntry) {
-	if s == nil || strings.TrimSpace(symbol) == "" {
-		return
-	}
-	symbol = strings.ToUpper(strings.TrimSpace(symbol))
-	byOrder := make(map[int64]executionOrderMeta)
-	byClient := make(map[string]executionOrderMeta)
-	for _, entry := range entries {
-		meta := executionOrderMeta{
-			SignalType:                  strings.ToUpper(strings.TrimSpace(entry.SignalType)),
-			HarvestPathProbability:      entry.HarvestPathProbability,
-			HarvestPathRuleProbability:  entry.HarvestPathRuleProbability,
-			HarvestPathLSTMProbability:  entry.HarvestPathLSTMProbability,
-			HarvestPathBookProbability:  entry.HarvestPathBookProbability,
-			HarvestPathBookSummary:      strings.TrimSpace(entry.HarvestPathBookSummary),
-			HarvestPathVolatilityRegime: strings.TrimSpace(entry.HarvestPathVolatilityRegime),
-			HarvestPathThresholdSource:  strings.TrimSpace(entry.HarvestPathThresholdSource),
-			HarvestPathAppliedThreshold: entry.HarvestPathAppliedThreshold,
-			HarvestPathAction:           strings.TrimSpace(entry.HarvestPathAction),
-			HarvestPathRiskLevel:        strings.TrimSpace(entry.HarvestPathRiskLevel),
-			HarvestPathTargetSide:       strings.TrimSpace(entry.HarvestPathTargetSide),
-			HarvestPathReferencePrice:   entry.HarvestPathReferencePrice,
-			HarvestPathMarketPrice:      entry.HarvestPathMarketPrice,
-			Reason:                      strings.TrimSpace(entry.Reason),
-			SignalReason:                signalReasonJSONToPB(entry.SignalReason),
-			Protection:                  protectionStatusJSONToPB(entry.Protection),
-		}
-		if orderID := stableID(entry.OrderID); orderID > 0 {
-			byOrder[orderID] = meta
-		}
-		if clientID := strings.TrimSpace(entry.ClientID); clientID != "" {
-			byClient[clientID] = meta
-		}
-	}
-
-	s.executionMetaMu.Lock()
-	s.executionMetaByOrder[symbol] = byOrder
-	s.executionMetaByClient[symbol] = byClient
-	s.executionMetaMu.Unlock()
-}
-
 func (s *ServiceContext) allOrderHarvestPathMeta(order binance.AllOrder) executionOrderMeta {
-	if s == nil {
-		return executionOrderMeta{}
-	}
-	symbol := strings.ToUpper(strings.TrimSpace(order.Symbol))
-	if symbol == "" {
-		return executionOrderMeta{}
-	}
-	s.executionMetaMu.RLock()
-	defer s.executionMetaMu.RUnlock()
-	if byOrder := s.executionMetaByOrder[symbol]; byOrder != nil {
-		if meta, ok := byOrder[order.OrderID]; ok {
-			return meta
-		}
-	}
-	clientID := strings.TrimSpace(order.ClientOrderID)
-	if clientID != "" {
-		if byClient := s.executionMetaByClient[symbol]; byClient != nil {
-			if meta, ok := byClient[clientID]; ok {
-				return meta
-			}
-		}
-	}
+	_ = s
+	_ = order
 	return executionOrderMeta{}
 }
 
@@ -1698,10 +1761,18 @@ func (s *ServiceContext) Close() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	var firstErr error
 	if s.orderConsumer != nil {
-		return s.orderConsumer.Close()
+		if err := s.orderConsumer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return nil
+	if s.postgresDB != nil {
+		if err := s.postgresDB.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // FetchAllData 拉取全部合约数据并保存到本地 JSONL

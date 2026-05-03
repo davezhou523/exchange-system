@@ -16,7 +16,7 @@ type Config struct {
 			Signal            string // 消费的策略信号 topic
 			HarvestPathSignal string // 消费的收割路径风险 topic
 			Order             string // 生产的订单结果 topic
-			Kline             string // 消费的1m K线 topic（1m撮合模式下使用）
+			Kline             string // 生产的历史K线数据 topic
 		}
 	}
 
@@ -35,14 +35,17 @@ type Config struct {
 	// 日志目录
 	SignalLogDir string // 接收信号的日志目录（如 data/signal）
 	OrderLogDir  string // 订单结果的日志目录（如 data/order）
+
+	// ClickHouse 配置执行分析数据落库。
+	ClickHouse ClickHouseConfig
 }
 
 // ExchangeConfig 交易所路由配置
 type ExchangeConfig struct {
-	// 路由策略: "direct" | "simulated" | "by_symbol"
+	// 路由策略: "direct" | "by_symbol"
 	RouteStrategy string
 
-	// 默认交易所名称: "binance" | "okx" | "simulated"
+	// 默认交易所名称: "binance" | "okx"
 	DefaultExchange string
 
 	// 交易对路由映射（by_symbol 策略用）
@@ -53,9 +56,6 @@ type ExchangeConfig struct {
 
 	// OKX 配置（可选，不使用时YAML中留空即可）
 	OKX OKXConfig `json:",optional"`
-
-	// 模拟撮合配置
-	Simulated SimulatedConfig
 }
 
 // BinanceConfig 币安交易所配置
@@ -73,19 +73,6 @@ type OKXConfig struct {
 	SecretKey  string
 	Passphrase string
 	BaseURL    string
-	Simulated  bool
-}
-
-// SimulatedConfig 模拟撮合配置
-type SimulatedConfig struct {
-	Enabled         bool    // 是否启用模拟撮合
-	InitialBalance  float64 // 初始余额
-	SlippageBPS     float64 // 滑点基点
-	SlippageModel   string  // 滑点模型: "fixed" | "random" | "volume"
-	CommissionRate  float64 // 手续费率
-	CommissionAsset string  // 手续费资产
-	FillDelayMs     int64   // 成交延迟毫秒
-	MatchMode       string  // 撮合模式: "instant"=即时成交 | "1m"=1m K线驱动撮合
 }
 
 // RiskConfig 风控配置
@@ -111,4 +98,18 @@ type PositionMonitorConfig struct {
 	DrawdownThreshold float64       `json:",default=0.15"` // 回撤触发阈值（默认 15%）
 	ReduceRatio       float64       `json:",default=0.5"`  // 触发后缩减比例（默认 50%）
 	MinReduceNotional float64       `json:",default=10"`   // 最小降仓金额，低于此跳过
+}
+
+// ClickHouseConfig 定义 ClickHouse 连接与执行分析写入参数。
+type ClickHouseConfig struct {
+	Enabled       bool          `json:",default=false"`
+	Endpoint      string        `json:",optional"`
+	Database      string        `json:",default=exchange_analytics"`
+	Username      string        `json:",default=default"`
+	Password      string        `json:",optional"`
+	AccountID     string        `json:",optional"`
+	Source        string        `json:",default=execution-rpc"`
+	Timeout       time.Duration `json:",default=3s"`
+	QueueSize     int           `json:",default=2048"`
+	FlushInterval time.Duration `json:",default=1s"`
 }

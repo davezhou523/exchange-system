@@ -26,15 +26,7 @@ Exchange:
     APIKey: "EyYZXotRJaaXeycqfwLaDYBREyLTyNQK8lCuZKilieOg5gBgKGnpbdXBSMN7eMjJ"
     SecretKey: "69wfjz9tkqUykbwlla6HUYcCKuVtRKvOEYoCUC1BdA0dYChSOccJpI1xnUpId0UP"
     Proxy: socks5://192.168.10.14:1080
-  Simulated:
-    Enabled: false
-    InitialBalance: 10000
-    SlippageBPS: 5
-    SlippageModel: fixed
-    CommissionRate: 0.0004
-    CommissionAsset: USDT
-    FillDelayMs: 0
-    MatchMode: instant
+
 
 Risk:
   MaxPositionSize: 0.2

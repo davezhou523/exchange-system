@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	commonkafka "exchange-system/common/kafka"
-	marketpb "exchange-system/common/pb/market"
 	strategypb "exchange-system/common/pb/strategy"
 
 	"github.com/Shopify/sarama"
@@ -29,13 +28,6 @@ type Consumer struct {
 	logger  *zap.Logger
 }
 
-type KlineConsumer struct {
-	group   sarama.ConsumerGroup
-	topic   string
-	groupID string
-	logger  *zap.Logger
-}
-
 type HarvestPathConsumer struct {
 	group   sarama.ConsumerGroup
 	topic   string
@@ -45,9 +37,6 @@ type HarvestPathConsumer struct {
 
 // SignalHandler 信号处理回调
 type SignalHandler func(signal *strategypb.Signal) error
-
-// KlineHandler 1m K线处理回调
-type KlineHandler func(kline *marketpb.Kline) error
 
 type HarvestPathSignal struct {
 	Symbol                 string  `json:"symbol"`
@@ -103,25 +92,6 @@ func NewConsumer(brokers []string, groupID string, topic string) (*Consumer, err
 	}, nil
 }
 
-// NewKlineConsumer 创建 1m K线消费者，供 simulated execution 使用。
-func NewKlineConsumer(brokers []string, groupID string, topic string) (*KlineConsumer, error) {
-	if groupID == "" {
-		groupID = fmt.Sprintf("cg-%s", topic)
-	}
-	config := commonkafka.NewConsumerGroupConfig()
-
-	group, err := sarama.NewConsumerGroup(brokers, groupID, config)
-	if err != nil {
-		return nil, err
-	}
-	return &KlineConsumer{
-		group:   group,
-		topic:   topic,
-		groupID: groupID,
-		logger:  zap.L().With(zap.String("component", "kafka-kline-consumer"), zap.String("topic", topic)),
-	}, nil
-}
-
 func NewHarvestPathConsumer(brokers []string, groupID string, topic string) (*HarvestPathConsumer, error) {
 	if groupID == "" {
 		groupID = fmt.Sprintf("cg-%s", topic)
@@ -174,31 +144,6 @@ func (c *Consumer) Close() error {
 	return c.group.Close()
 }
 
-func (c *KlineConsumer) StartConsuming(ctx context.Context, handler KlineHandler) error {
-	if c == nil || c.group == nil {
-		return fmt.Errorf("kline consumer group not initialized")
-	}
-	if handler == nil {
-		return fmt.Errorf("kline handler is nil")
-	}
-
-	h := &klineGroupHandler{
-		handler: handler,
-		logger:  c.logger,
-	}
-	go func() {
-		for {
-			if err := c.group.Consume(ctx, []string{c.topic}, h); err != nil {
-				c.logger.Error("consume kline error", zap.String("group", c.groupID), zap.Error(err))
-			}
-			if ctx.Err() != nil {
-				return
-			}
-		}
-	}()
-	return nil
-}
-
 func (c *HarvestPathConsumer) StartConsuming(ctx context.Context, handler HarvestPathHandler) error {
 	if c == nil || c.group == nil {
 		return fmt.Errorf("harvest path consumer group not initialized")
@@ -224,13 +169,6 @@ func (c *HarvestPathConsumer) StartConsuming(ctx context.Context, handler Harves
 	return nil
 }
 
-func (c *KlineConsumer) Close() error {
-	if c == nil || c.group == nil {
-		return nil
-	}
-	return c.group.Close()
-}
-
 func (c *HarvestPathConsumer) Close() error {
 	if c == nil || c.group == nil {
 		return nil
@@ -249,14 +187,6 @@ type signalGroupHandler struct {
 
 func (h *signalGroupHandler) Setup(sarama.ConsumerGroupSession) error   { return nil }
 func (h *signalGroupHandler) Cleanup(sarama.ConsumerGroupSession) error { return nil }
-
-type klineGroupHandler struct {
-	handler KlineHandler
-	logger  *zap.Logger
-}
-
-func (h *klineGroupHandler) Setup(sarama.ConsumerGroupSession) error   { return nil }
-func (h *klineGroupHandler) Cleanup(sarama.ConsumerGroupSession) error { return nil }
 
 type harvestPathGroupHandler struct {
 	handler HarvestPathHandler
@@ -292,34 +222,6 @@ func (h *signalGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, c
 			h.logger.Error("handle signal failed",
 				zap.String("symbol", sig.GetSymbol()),
 				zap.String("action", sig.GetAction()),
-				zap.Error(err))
-		}
-		session.MarkMessage(msg, "")
-	}
-	return nil
-}
-
-func (h *klineGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
-	for msg := range claim.Messages() {
-		if msg == nil {
-			continue
-		}
-
-		var k marketpb.Kline
-		if err := json.Unmarshal(msg.Value, &k); err != nil {
-			h.logger.Warn("kline unmarshal failed, skipping",
-				zap.Int32("partition", msg.Partition),
-				zap.Int64("offset", msg.Offset),
-				zap.Error(err))
-			session.MarkMessage(msg, "")
-			continue
-		}
-
-		if err := h.handler(&k); err != nil {
-			h.logger.Error("handle kline failed",
-				zap.String("symbol", k.GetSymbol()),
-				zap.String("interval", k.GetInterval()),
-				zap.Int64("open_time", k.GetOpenTime()),
 				zap.Error(err))
 		}
 		session.MarkMessage(msg, "")

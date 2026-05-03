@@ -1,11 +1,17 @@
 package svc
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"exchange-system/app/strategy/rpc/internal/strategyrouter"
 	"exchange-system/common/regimejudge"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +58,7 @@ type ServiceContext struct {
 	strategyWarmup      map[string]strategyWarmupState
 	universeStates      map[string]universeRuntimeState
 	universeLogs        *universeLogState
+	analyticsWriter     *strategyClickHouseWriter
 	universeStartedAt   time.Time
 	cancel              context.CancelFunc
 }
@@ -1156,6 +1163,19 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		ArtifactsDir: c.HarvestPathLSTM.ArtifactsDir,
 		Timeout:      time.Duration(c.HarvestPathLSTM.TimeoutMs) * time.Millisecond,
 	})
+	analyticsWriter, err := newStrategyClickHouseWriter(ctx, c.ClickHouse)
+	if err != nil {
+		if depthConsumer != nil {
+			_ = depthConsumer.Close()
+		}
+		_ = marketConsumer.Close()
+		if harvestPathProducer != nil {
+			_ = harvestPathProducer.Close()
+		}
+		_ = signalProducer.Close()
+		cancel()
+		return nil, err
+	}
 
 	marketStateCfg := buildMarketStateConfig(c)
 	svcCtx := &ServiceContext{
@@ -1181,6 +1201,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		strategyWarmup:           make(map[string]strategyWarmupState),
 		universeStates:           make(map[string]universeRuntimeState),
 		universeLogs:             newUniverseLogState(),
+		analyticsWriter:          analyticsWriter,
 		universeStartedAt:        time.Now().UTC(),
 		cancel:                   cancel,
 	}
@@ -1348,6 +1369,7 @@ func (s *ServiceContext) upsertStrategyLocked(cfg *strategypb.StrategyConfig) {
 	opts := &strategyengine.RuntimeOptions{
 		HarvestPathLSTMPredictor: s.harvestPathLSTMPredictor,
 		WeightProvider:           s.LatestWeightRecommendation,
+		AnalyticsWriter:          s.analyticsWriter,
 	}
 	if current, ok := s.strategies[cfg.Symbol]; ok && current != nil {
 		current.UpdateRuntimeConfig(cfg.Parameters, s.Config.SignalLogDir, opts)
@@ -1432,5 +1454,301 @@ func (s *ServiceContext) Close() error {
 			firstErr = err
 		}
 	}
+	if s.analyticsWriter != nil {
+		if err := s.analyticsWriter.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	return firstErr
+}
+
+// strategyAnalyticsEnvelope 封装待写入 ClickHouse 的策略分析事件。
+type strategyAnalyticsEnvelope struct {
+	table string
+	row   interface{}
+}
+
+// strategyClickHouseWriter 负责把策略信号与决策异步写入 ClickHouse。
+type strategyClickHouseWriter struct {
+	endpoint      string
+	database      string
+	username      string
+	password      string
+	source        string
+	client        *http.Client
+	queue         chan strategyAnalyticsEnvelope
+	flushInterval time.Duration
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+}
+
+// strategyDecisionFactRow 定义 decision_fact 的 JSONEachRow 行结构。
+type strategyDecisionFactRow struct {
+	EventTime   string `json:"event_time"`
+	Symbol      string `json:"symbol"`
+	StrategyID  string `json:"strategy_id"`
+	Template    string `json:"template"`
+	Interval    string `json:"interval"`
+	Stage       string `json:"stage"`
+	Decision    string `json:"decision"`
+	Reason      string `json:"reason"`
+	ReasonCode  string `json:"reason_code"`
+	HasPosition uint8  `json:"has_position"`
+	IsFinal     uint8  `json:"is_final"`
+	IsTradable  uint8  `json:"is_tradable"`
+	OpenTime    string `json:"open_time"`
+	CloseTime   string `json:"close_time"`
+	RouteBucket string `json:"route_bucket"`
+	RouteReason string `json:"route_reason"`
+	ExtrasJSON  string `json:"extras_json"`
+	TraceID     string `json:"trace_id"`
+}
+
+// strategySignalFactRow 定义 signal_fact 的 JSONEachRow 行结构。
+type strategySignalFactRow struct {
+	EventTime       string  `json:"event_time"`
+	Symbol          string  `json:"symbol"`
+	StrategyID      string  `json:"strategy_id"`
+	Template        string  `json:"template"`
+	SignalID        string  `json:"signal_id"`
+	Action          string  `json:"action"`
+	Side            string  `json:"side"`
+	SignalType      string  `json:"signal_type"`
+	Quantity        float64 `json:"quantity"`
+	EntryPrice      float64 `json:"entry_price"`
+	StopLoss        float64 `json:"stop_loss"`
+	TakeProfitJSON  string  `json:"take_profit_json"`
+	Reason          string  `json:"reason"`
+	ExitReasonKind  string  `json:"exit_reason_kind"`
+	ExitReasonLabel string  `json:"exit_reason_label"`
+	RiskReward      float64 `json:"risk_reward"`
+	Atr             float64 `json:"atr"`
+	TagsJSON        string  `json:"tags_json"`
+	TraceID         string  `json:"trace_id"`
+}
+
+// newStrategyClickHouseWriter 创建策略分析异步写入器。
+func newStrategyClickHouseWriter(parent context.Context, cfg config.ClickHouseConfig) (*strategyClickHouseWriter, error) {
+	if !cfg.Enabled {
+		return nil, nil
+	}
+	endpoint := strings.TrimRight(strings.TrimSpace(cfg.Endpoint), "/")
+	if endpoint == "" {
+		return nil, fmt.Errorf("strategy clickhouse endpoint is required when enabled")
+	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	queueSize := cfg.QueueSize
+	if queueSize <= 0 {
+		queueSize = 2048
+	}
+	flushInterval := cfg.FlushInterval
+	if flushInterval <= 0 {
+		flushInterval = time.Second
+	}
+	ctx, cancel := context.WithCancel(parent)
+	writer := &strategyClickHouseWriter{
+		endpoint:      endpoint,
+		database:      strings.TrimSpace(cfg.Database),
+		username:      strings.TrimSpace(cfg.Username),
+		password:      cfg.Password,
+		source:        strings.TrimSpace(cfg.Source),
+		client:        &http.Client{Timeout: timeout},
+		queue:         make(chan strategyAnalyticsEnvelope, queueSize),
+		flushInterval: flushInterval,
+		ctx:           ctx,
+		cancel:        cancel,
+	}
+	if writer.database == "" {
+		writer.database = "exchange_analytics"
+	}
+	writer.wg.Add(1)
+	go writer.run()
+	return writer, nil
+}
+
+// WriteSignal 把 signal_fact 事件投递到异步队列。
+func (w *strategyClickHouseWriter) WriteSignal(entry strategyengine.StrategySignalAnalyticsEntry) {
+	if w == nil {
+		return
+	}
+	row := strategySignalFactRow{
+		EventTime:       formatAnalyticsTime(entry.EventTime),
+		Symbol:          strings.ToUpper(strings.TrimSpace(entry.Symbol)),
+		StrategyID:      strings.TrimSpace(entry.StrategyID),
+		Template:        strings.TrimSpace(entry.Template),
+		SignalID:        strings.TrimSpace(entry.SignalID),
+		Action:          strings.ToUpper(strings.TrimSpace(entry.Action)),
+		Side:            strings.ToUpper(strings.TrimSpace(entry.Side)),
+		SignalType:      strings.ToUpper(strings.TrimSpace(entry.SignalType)),
+		Quantity:        entry.Quantity,
+		EntryPrice:      entry.EntryPrice,
+		StopLoss:        entry.StopLoss,
+		TakeProfitJSON:  analyticsJSONString(entry.TakeProfitJSON, "[]"),
+		Reason:          strings.TrimSpace(entry.Reason),
+		ExitReasonKind:  strings.TrimSpace(entry.ExitReasonKind),
+		ExitReasonLabel: strings.TrimSpace(entry.ExitReasonLabel),
+		RiskReward:      entry.RiskReward,
+		Atr:             entry.Atr,
+		TagsJSON:        analyticsJSONString(entry.TagsJSON, "[]"),
+		TraceID:         strings.TrimSpace(entry.TraceID),
+	}
+	w.enqueue(strategyAnalyticsEnvelope{table: "signal_fact", row: row})
+}
+
+// WriteDecision 把 decision_fact 事件投递到异步队列。
+func (w *strategyClickHouseWriter) WriteDecision(entry strategyengine.StrategyDecisionAnalyticsEntry) {
+	if w == nil {
+		return
+	}
+	row := strategyDecisionFactRow{
+		EventTime:   formatAnalyticsTime(entry.EventTime),
+		Symbol:      strings.ToUpper(strings.TrimSpace(entry.Symbol)),
+		StrategyID:  strings.TrimSpace(entry.StrategyID),
+		Template:    strings.TrimSpace(entry.Template),
+		Interval:    strings.TrimSpace(entry.Interval),
+		Stage:       strings.TrimSpace(entry.Stage),
+		Decision:    strings.TrimSpace(entry.Decision),
+		Reason:      strings.TrimSpace(entry.Reason),
+		ReasonCode:  strings.TrimSpace(entry.ReasonCode),
+		HasPosition: boolToUInt8(entry.HasPosition),
+		IsFinal:     boolToUInt8(entry.IsFinal),
+		IsTradable:  boolToUInt8(entry.IsTradable),
+		OpenTime:    formatAnalyticsTime(entry.OpenTime),
+		CloseTime:   formatAnalyticsTime(entry.CloseTime),
+		RouteBucket: strings.TrimSpace(entry.RouteBucket),
+		RouteReason: strings.TrimSpace(entry.RouteReason),
+		ExtrasJSON:  analyticsJSONString(entry.ExtrasJSON, "{}"),
+		TraceID:     strings.TrimSpace(entry.TraceID),
+	}
+	w.enqueue(strategyAnalyticsEnvelope{table: "decision_fact", row: row})
+}
+
+// Close 停止后台协程并尽量刷完剩余事件。
+func (w *strategyClickHouseWriter) Close() error {
+	if w == nil {
+		return nil
+	}
+	w.cancel()
+	w.wg.Wait()
+	return nil
+}
+
+// enqueue 把分析事件放入队列，满队列时直接丢弃避免阻塞主流程。
+func (w *strategyClickHouseWriter) enqueue(item strategyAnalyticsEnvelope) {
+	if w == nil {
+		return
+	}
+	select {
+	case w.queue <- item:
+	default:
+		log.Printf("[strategy-clickhouse] queue full, drop table=%s", item.table)
+	}
+}
+
+// run 后台按表聚合事件并批量写入 ClickHouse。
+func (w *strategyClickHouseWriter) run() {
+	defer w.wg.Done()
+	ticker := time.NewTicker(w.flushInterval)
+	defer ticker.Stop()
+
+	batches := make(map[string][]interface{})
+	flush := func() {
+		for table, rows := range batches {
+			if len(rows) == 0 {
+				continue
+			}
+			if err := w.insertBatch(table, rows); err != nil {
+				log.Printf("[strategy-clickhouse] insert batch failed table=%s err=%v", table, err)
+			}
+			batches[table] = batches[table][:0]
+		}
+	}
+
+	for {
+		select {
+		case <-w.ctx.Done():
+			for {
+				select {
+				case item := <-w.queue:
+					batches[item.table] = append(batches[item.table], item.row)
+				default:
+					flush()
+					return
+				}
+			}
+		case item := <-w.queue:
+			batches[item.table] = append(batches[item.table], item.row)
+			if len(batches[item.table]) >= 128 {
+				if err := w.insertBatch(item.table, batches[item.table]); err != nil {
+					log.Printf("[strategy-clickhouse] insert batch failed table=%s err=%v", item.table, err)
+				}
+				batches[item.table] = batches[item.table][:0]
+			}
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+// insertBatch 把同一张表的一批行写入 ClickHouse。
+func (w *strategyClickHouseWriter) insertBatch(table string, rows []interface{}) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	var body bytes.Buffer
+	encoder := json.NewEncoder(&body)
+	encoder.SetEscapeHTML(false)
+	for _, row := range rows {
+		if err := encoder.Encode(row); err != nil {
+			return fmt.Errorf("encode %s row: %w", table, err)
+		}
+	}
+	query := fmt.Sprintf("INSERT INTO %s.%s FORMAT JSONEachRow", w.database, table)
+	req, err := http.NewRequestWithContext(w.ctx, http.MethodPost, w.endpoint+"/?query="+url.QueryEscape(query), &body)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if w.username != "" {
+		req.SetBasicAuth(w.username, w.password)
+	}
+	resp, err := w.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusBadRequest {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+	return nil
+}
+
+// formatAnalyticsTime 把时间统一格式化为 ClickHouse DateTime64(3) 字符串。
+func formatAnalyticsTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format("2006-01-02 15:04:05.000")
+}
+
+// boolToUInt8 把布尔值转换为 ClickHouse 常用的 UInt8。
+func boolToUInt8(v bool) uint8 {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+// analyticsJSONString 为 JSON 字符串字段提供非空兜底值。
+func analyticsJSONString(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "null" {
+		return fallback
+	}
+	return value
 }

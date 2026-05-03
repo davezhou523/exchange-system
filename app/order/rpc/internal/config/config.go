@@ -1,6 +1,10 @@
 package config
 
-import "github.com/zeromicro/go-zero/zrpc"
+import (
+	"time"
+
+	"github.com/zeromicro/go-zero/zrpc"
+)
 
 // ---------------------------------------------------------------------------
 // Order 微服务配置
@@ -19,8 +23,8 @@ type Config struct {
 	// 数据保存目录（JSONL 格式）
 	DataDir string
 
-	// execution 服务订单日志目录（simulated 模式下的成交来源）
-	ExecutionOrderLogDir string
+	// Postgres 配置核心交易数据落库。
+	Postgres PostgresConfig
 }
 
 type KafkaConfig struct {
@@ -39,4 +43,14 @@ type BinanceConfig struct {
 	APIKey    string // API Key
 	SecretKey string // Secret Key
 	Proxy     string // 可选代理地址（如 socks5://127.0.0.1:1080）
+}
+
+// PostgresConfig 定义 PostgreSQL 连接与写入参数。
+type PostgresConfig struct {
+	Enabled         bool          `json:",default=false"`
+	DSN             string        `json:",optional"`
+	AccountID       string        `json:",optional"`
+	MaxOpenConns    int           `json:",default=10"`
+	MaxIdleConns    int           `json:",default=5"`
+	ConnMaxLifetime time.Duration `json:",default=30m"`
 }

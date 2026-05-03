@@ -15,13 +15,13 @@ Kafka:
     Signal: signal
     HarvestPathSignal: harvest_path_signal
     Order: order
-    Kline: kline            # 1m K线 topic（MatchMode=1m 时消费）
+    Kline: kline
 
 # 交易所路由配置
 Exchange:
-  # 路由策略: direct=指定交易所 | simulated=模拟撮合 | by_symbol=按交易对路由
+  # 路由策略: direct=指定交易所 | by_symbol=按交易对路由
   RouteStrategy: direct
-  # 默认交易所: binance | okx | simulated
+  # 默认交易所: binance | okx
   DefaultExchange: binance
 
   # 按交易对路由映射（RouteStrategy=by_symbol 时生效）
@@ -43,18 +43,6 @@ Exchange:
   #   SecretKey: ""
   #   Passphrase: ""
   #   BaseURL: https://www.okx.com
-  #   Simulated: false
-
-  # 模拟撮合配置
-  Simulated:
-    Enabled: true
-    InitialBalance: 10000
-    SlippageBPS: 5              # 滑点 0.05%
-    SlippageModel: fixed        # fixed / random / volume
-    CommissionRate: 0.0004      # 手续费 0.04%
-    CommissionAsset: USDT
-    FillDelayMs: 0              # 成交延迟
-    MatchMode: 1m               # instant=即时成交 | 1m=1m K线驱动撮合
 
 # 风控配置
 Risk:
@@ -81,3 +69,15 @@ Idempotent:
 # 日志目录（JSONL 格式，每行一条 JSON）
 SignalLogDir: data/signal       # 收到的策略信号日志
 OrderLogDir: data/order         # 订单执行结果日志
+
+ClickHouse:
+  Enabled: true
+  Endpoint: http://127.0.0.1:8123
+  Database: exchange_analytics
+  Username: default
+  Password: ""
+  AccountID: exchange-demo
+  Source: execution-rpc
+  Timeout: 3s
+  QueueSize: 2048
+  FlushInterval: 1s

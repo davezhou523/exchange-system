@@ -23,5 +23,12 @@ Binance:
 # 数据保存目录（JSONL 格式）
 DataDir: data/futures
 
-# simulated 执行模式下的本地订单日志目录，order 服务会把这些成交并入统一查询口径
-ExecutionOrderLogDir: ../../execution/rpc/data/order
+
+
+Postgres:
+  Enabled: true
+  DSN: host=127.0.0.1 port=5432 user=exchange password=exchange dbname=exchange_core sslmode=disable TimeZone=UTC
+  AccountID: exchange-demo
+  MaxOpenConns: 10
+  MaxIdleConns: 5
+  ConnMaxLifetime: 30m

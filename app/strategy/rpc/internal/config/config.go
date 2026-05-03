@@ -100,4 +100,20 @@ type Config struct {
 		ArtifactsDir string
 		TimeoutMs    int64
 	}
+
+	// ClickHouse 配置策略分析数据落库。
+	ClickHouse ClickHouseConfig
+}
+
+// ClickHouseConfig 定义 ClickHouse 连接与写入参数。
+type ClickHouseConfig struct {
+	Enabled       bool          `json:",default=false"`
+	Endpoint      string        `json:",optional"`
+	Database      string        `json:",default=exchange_analytics"`
+	Username      string        `json:",default=default"`
+	Password      string        `json:",optional"`
+	Source        string        `json:",default=strategy-rpc"`
+	Timeout       time.Duration `json:",default=3s"`
+	QueueSize     int           `json:",default=2048"`
+	FlushInterval time.Duration `json:",default=1s"`
 }

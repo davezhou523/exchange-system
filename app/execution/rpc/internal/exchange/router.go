@@ -8,8 +8,8 @@ import (
 
 // ---------------------------------------------------------------------------
 // 下单路由器
-// 根据配置/规则将订单路由到不同的交易所或模拟撮合引擎
-// 支持路由策略：指定交易所 / 随机分流 / 按交易对分流
+// 根据配置/规则将订单路由到不同的交易所
+// 支持路由策略：指定交易所 / 按交易对分流
 // ---------------------------------------------------------------------------
 
 // RouteStrategy 路由策略
@@ -18,8 +18,6 @@ type RouteStrategy string
 const (
 	// RouteDirect 直接路由到指定交易所
 	RouteDirect RouteStrategy = "direct"
-	// RouteSimulated 强制路由到模拟撮合（回测/仿真）
-	RouteSimulated RouteStrategy = "simulated"
 	// RouteBySymbol 按交易对路由（不同交易对走不同交易所）
 	RouteBySymbol RouteStrategy = "by_symbol"
 )
@@ -54,13 +52,6 @@ func (r *Router) Register(name string, ex Exchange) {
 // Route 根据路由策略选择交易所
 func (r *Router) Route(symbol string) (Exchange, error) {
 	switch r.config.Strategy {
-	case RouteSimulated:
-		// 强制模拟撮合
-		if ex, ok := r.exchanges["simulated"]; ok {
-			return ex, nil
-		}
-		return nil, fmt.Errorf("simulated exchange not registered")
-
 	case RouteBySymbol:
 		// 按交易对路由
 		if target, ok := r.config.SymbolRoutes[symbol]; ok {
@@ -117,7 +108,7 @@ func (r *Router) CancelOrder(ctx context.Context, param CancelOrderParam) (*Orde
 			log.Printf("[路由] 取消订单 %s → %s", param.OrderID, name)
 			return result, nil
 		}
-		// 模拟撮合引擎可能找不到订单，跳过
+		// 某些交易所可能找不到订单，跳过
 	}
 	return nil, fmt.Errorf("order %s not found in any exchange", param.OrderID)
 }
