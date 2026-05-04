@@ -221,6 +221,7 @@ func (s *TrendFollowingStrategy) openBreakoutPosition(ctx context.Context, k *ma
 		interval, s.strategySignalTag(), "open", side,
 	)
 
+	exitPolicy, exitState := s.initializeExitPolicyState(snap.Close, stopLoss)
 	s.pos = position{
 		side:          sideLong,
 		entryPrice:    snap.Close,
@@ -232,6 +233,8 @@ func (s *TrendFollowingStrategy) openBreakoutPosition(ctx context.Context, k *ma
 		atr:           snap.Atr,
 		hitTP1:        false,
 		partialClosed: false,
+		exitPolicy:    exitPolicy,
+		exitState:     exitState,
 	}
 	if entry == entryShort {
 		s.pos.side = sideShort

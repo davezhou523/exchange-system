@@ -33,9 +33,12 @@ func (l *StartStrategyLogic) StartStrategy(in *strategy.StrategyConfig) (*strate
 	in.Enabled = true
 	l.svcCtx.UpsertStrategy(in)
 	return &strategy.StrategyStatus{
-		StrategyId: strategyId,
-		Status:     "RUNNING",
-		Message:    "started",
-		LastUpdate: time.Now().UnixMilli(),
+		StrategyId:  strategyId,
+		Status:      "RUNNING",
+		StatusDesc:  describeServiceStatus("RUNNING"),
+		Message:     statusMessageSummary("started"),
+		MessageCode: "started",
+		MessageDesc: describeStatusMessage("started"),
+		LastUpdate:  time.Now().UnixMilli(),
 	}, nil
 }

@@ -25,8 +25,8 @@ CREATE TABLE IF NOT EXISTS exchange_analytics.kline_fact
     atr              Decimal(20, 8) COMMENT 'ATR 指标值',
     source           LowCardinality(String) COMMENT '数据来源'
 )
-ENGINE = MergeTree
-PARTITION BY toDate(event_time)
+ENGINE = ReplacingMergeTree(event_time)
+PARTITION BY toDate(open_time)
 ORDER BY (symbol, interval, open_time)
 SETTINGS index_granularity = 8192;
 

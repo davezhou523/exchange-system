@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -65,6 +67,13 @@ func (d *klineDispatcher) OnKline(ctx context.Context, k *market.Kline) {
 // NewServiceContext 初始化 market 服务依赖，并在启动 WebSocket 前完成预热与补数。
 func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	ctx, cancel := context.WithCancel(context.Background())
+	c.SharedWarmupDir = resolveSharedWarmupDir(c.SharedWarmupDir)
+	if c.WarmupCleanupOnStartup {
+		if err := cleanupSharedWarmupRoot(c.SharedWarmupDir); err != nil {
+			cancel()
+			return nil, err
+		}
+	}
 
 	producer, err := kafka.NewProducerWithContext(ctx, c.Kafka.Addrs, c.Kafka.Topics.Kline)
 	if err != nil {
@@ -87,6 +96,8 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		RsiPeriod:   c.Indicators.RsiPeriod,
 		AtrPeriod:   c.Indicators.AtrPeriod,
 	})
+	// SharedWarmupDir 供 strategy 等下游服务读取预热快照，避免复用消费验证目录。
+	agg.SetSharedWarmupDir(c.SharedWarmupDir)
 
 	// 设置每个周期的独立指标参数（指标粒度与K线周期对齐）
 	intervalConfigs := make(map[string]aggregator.IntervalIndicatorConfig)
@@ -208,6 +219,10 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		}
 	}
 
+	// 启动阶段主动为已配置交易对创建 worker，并提前拉取 warmup 数据到共享目录。
+	// 这样 strategy 在 market 刚启动时就能读到预热快照，而不是等首条实时 K 线触发懒加载。
+	agg.EnsureWarmupForSymbols(buildBootstrapWarmupSymbols(c))
+
 	if err := recoverKlineFactGap(ctx, c, agg, chWriter, warmupper); err != nil {
 		if chWriter != nil {
 			_ = chWriter.Close()
@@ -236,6 +251,82 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		chWriter:       chWriter,
 		cancel:         cancel,
 	}, nil
+}
+
+// buildBootstrapWarmupSymbols 合并 websocket 订阅列表和 Universe 候选集，得到启动阶段需要提前预热的交易对集合。
+func buildBootstrapWarmupSymbols(c config.Config) []string {
+	symbols := make([]string, 0, len(c.Binance.Symbols)+len(c.UniversePool.CandidateSymbols))
+	symbols = append(symbols, c.Binance.Symbols...)
+	symbols = append(symbols, c.UniversePool.CandidateSymbols...)
+	return symbols
+}
+
+// resolveSharedWarmupDir 把相对 SharedWarmupDir 解析到仓库根目录，避免从不同服务目录启动时写到错误路径。
+func resolveSharedWarmupDir(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return ""
+	}
+	if filepath.IsAbs(dir) {
+		return filepath.Clean(dir)
+	}
+	if repoRoot, ok := findExchangeSystemRepoRoot(); ok {
+		return filepath.Join(repoRoot, filepath.Clean(dir))
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return filepath.Clean(dir)
+}
+
+// cleanupSharedWarmupRoot 在服务启动时清空共享 warmup 根目录，避免 strategy 读到上一轮启动残留的旧快照。
+func cleanupSharedWarmupRoot(dir string) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return nil
+	}
+	cleanDir := filepath.Clean(dir)
+	if !isSafeWarmupRoot(cleanDir) {
+		return fmt.Errorf("refuse to cleanup non-warmup shared dir: %s", cleanDir)
+	}
+	if err := os.RemoveAll(cleanDir); err != nil {
+		return fmt.Errorf("cleanup shared warmup dir %s: %w", cleanDir, err)
+	}
+	if err := os.MkdirAll(cleanDir, 0o755); err != nil {
+		return fmt.Errorf("recreate shared warmup dir %s: %w", cleanDir, err)
+	}
+	log.Printf("[warmup] shared_dir=%s cleaned up warmup root", cleanDir)
+	return nil
+}
+
+// isSafeWarmupRoot 用固定目录后缀校验待清理路径，降低误删其他运行时目录的风险。
+func isSafeWarmupRoot(dir string) bool {
+	dir = filepath.ToSlash(strings.TrimSpace(dir))
+	if dir == "" {
+		return false
+	}
+	return strings.HasSuffix(dir, "/runtime/shared/kline/warmup") || dir == "runtime/shared/kline/warmup"
+}
+
+// findExchangeSystemRepoRoot 从当前工作目录向上查找 go.mod，定位 exchange-system 仓库根目录。
+func findExchangeSystemRepoRoot() (string, bool) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	dir := wd
+	for {
+		goModPath := filepath.Join(dir, "go.mod")
+		content, readErr := os.ReadFile(goModPath)
+		if readErr == nil && strings.Contains(string(content), "module exchange-system") {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
 }
 
 // Close 关闭 ServiceContext 持有的后台资源，尽量按依赖顺序释放。

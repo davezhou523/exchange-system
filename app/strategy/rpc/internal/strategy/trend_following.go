@@ -82,6 +82,92 @@ type position struct {
 	breakBelowCnt int     // EMA破位确认计数
 	breakAboveCnt int     // EMA破位确认计数
 	maxProfit     float64 // 持仓期间记录的最大浮盈，供移动止损使用
+	exitPolicy    ExitPolicyConfig
+	exitState     ExitRuntimeState
+}
+
+// ExitEventCode 定义分层出场体系的稳定事件码，供日志、信号与分析表复用。
+type ExitEventCode string
+
+const (
+	ExitEventFastProtect1m ExitEventCode = "exit_fast_protect_1m"
+	ExitEventEmergency1s   ExitEventCode = "exit_emergency_stop_1s"
+)
+
+// PositionStage 表示当前持仓处于哪个利润阶段，用于决定快速保护减仓力度。
+type PositionStage string
+
+const (
+	PositionStageEarly       PositionStage = "early"
+	PositionStageProfit      PositionStage = "profit"
+	PositionStageTrendProfit PositionStage = "trend_profit"
+)
+
+// ExitAction 描述一次保护性出场动作，后续可以统一映射为 REDUCE/CLOSE 信号。
+type ExitAction struct {
+	Code          ExitEventCode
+	Interval      string
+	Action        string
+	SignalType    string
+	ReducePct     float64
+	RaiseStopTo   float64
+	StopRaiseMode string
+	Reason        string
+	ReasonCode    string
+	ReasonLabel   string
+	TriggerPrice  float64
+	CurrentR      float64
+	PositionStage PositionStage
+}
+
+// ExitPolicyConfig 保存 15m/1m/1s 分层出场参数，当前先落 1m 快速保护相关部分。
+type ExitPolicyConfig struct {
+	FastProtectEnabled            bool
+	FastProtectMaxTriggerCount    int
+	FastProtectReducePctEarly     float64
+	FastProtectReducePctProfit    float64
+	FastProtectReducePctTrend     float64
+	FastProtectBearBars1m         int
+	FastProtectStructureLookback  int
+	FastProtectVolumeSpikeMult1m  float64
+	FastProtectStructureATRBuf    float64
+	FastProtectATR1mDropMult      float64
+	FastProtectPullbackATR15m     float64
+	EarlyProfitR                  float64
+	TrendProfitR                  float64
+	Emergency1sEnabled            bool
+	Emergency1sWindowSec          int
+	Emergency1sDropPct            float64
+	Emergency1sVolumeSpikeMult    float64
+	Emergency1sFullExitNoProfit   bool
+	Emergency1sSyntheticDropMult  float64
+	Emergency1sSyntheticReducePct float64
+}
+
+// ExitRuntimeState 保存持仓期间不断变化的保护状态，避免同一类快速保护重复触发。
+type ExitRuntimeState struct {
+	MaxFavorablePrice       float64
+	InitialRiskDistance     float64
+	CurrentR                float64
+	Stage                   PositionStage
+	FastProtectTriggered    bool
+	FastProtectTriggerCount int
+	EmergencyTriggered      bool
+	LastReduceReason        ExitEventCode
+	LastReduceTime          int64
+}
+
+// SecondBar 定义秒级极端保护使用的简化行情结构，避免直接依赖完整 1 秒 K 线链路。
+type SecondBar struct {
+	OpenTimeMs  int64
+	CloseTimeMs int64
+	Open        float64
+	High        float64
+	Low         float64
+	Close       float64
+	Volume      float64
+	IsFinal     bool
+	Synthetic   bool
 }
 
 // TrendFollowingStrategy 多时间周期趋势跟踪策略
@@ -109,6 +195,7 @@ type TrendFollowingStrategy struct {
 	latest15m   klineSnapshot
 	latest1m    klineSnapshot // 最新1m K线快照
 	latestDepth *harvestpathmodel.OrderBookSnapshot
+	secondBars  []SecondBar // 秒级极端保护窗口，仅用于 1s 异常急跌保护
 
 	// 1m trading paused log flag (atomic)
 	pause1mLogOnce sync.Once
@@ -394,17 +481,37 @@ const (
 	paramEquity = "equity"
 
 	// 1m信号模式参数
-	paramSignalMode         = "signal_mode"            // 信号模式: 0=15m(默认) | 1=1m分钟周期
-	param1mTradingPaused    = "1m_trading_paused"      // 1m成交暂停: 0=正常(默认) | 1=暂停1m成交，仅用15m+1h+4h判断
-	param1mRsiPeriod        = "1m_rsi_period"          // 1m RSI周期（默认14）
-	param1mAtrMult          = "1m_atr_multiplier"      // 1m 止损ATR倍数（默认1.5）
-	param1mBreakoutLookback = "1m_breakout_lookback"   // 1m 突破回顾期（默认20）
-	param1mRsiOverbought    = "1m_rsi_overbought"      // 1m RSI超买阈值（默认70）
-	param1mRsiOversold      = "1m_rsi_oversold"        // 1m RSI超卖阈值（默认30）
-	param1mRsiBiasLong      = "1m_rsi_bias_long"       // 1m 多头RSI偏置（默认55）
-	param1mRsiBiasShort     = "1m_rsi_bias_short"      // 1m 空头RSI偏置（默认45）
-	param1mMinHoldingBars   = "1m_min_holding_bars"    // 1m 最小持仓K线数（默认5）
-	param1mEmaExitBufferATR = "1m_ema_exit_buffer_atr" // 1m EMA破位缓冲ATR倍数（默认0.3）
+	paramSignalMode                        = "signal_mode"                             // 信号模式: 0=15m(默认) | 1=1m分钟周期
+	param1mTradingPaused                   = "1m_trading_paused"                       // 1m成交暂停: 0=正常(默认) | 1=暂停1m成交，仅用15m+1h+4h判断
+	param1mRsiPeriod                       = "1m_rsi_period"                           // 1m RSI周期（默认14）
+	param1mAtrMult                         = "1m_atr_multiplier"                       // 1m 止损ATR倍数（默认1.5）
+	param1mBreakoutLookback                = "1m_breakout_lookback"                    // 1m 突破回顾期（默认20）
+	param1mRsiOverbought                   = "1m_rsi_overbought"                       // 1m RSI超买阈值（默认70）
+	param1mRsiOversold                     = "1m_rsi_oversold"                         // 1m RSI超卖阈值（默认30）
+	param1mRsiBiasLong                     = "1m_rsi_bias_long"                        // 1m 多头RSI偏置（默认55）
+	param1mRsiBiasShort                    = "1m_rsi_bias_short"                       // 1m 空头RSI偏置（默认45）
+	param1mMinHoldingBars                  = "1m_min_holding_bars"                     // 1m 最小持仓K线数（默认5）
+	param1mEmaExitBufferATR                = "1m_ema_exit_buffer_atr"                  // 1m EMA破位缓冲ATR倍数（默认0.3）
+	paramExitFastProtectEnabled            = "exit_fast_protect_enabled"               // 是否开启 1m 快速保护：0=关闭 | 1=开启
+	paramExitFastProtectMaxTriggerCount    = "exit_fast_protect_max_trigger_count"     // 单次持仓最多允许触发的 1m 快速保护次数（默认1）
+	paramExitFastProtectReducePctEarly     = "exit_fast_protect_reduce_pct_early"      // early 阶段快速保护减仓比例（默认0.50）
+	paramExitFastProtectReducePctProfit    = "exit_fast_protect_reduce_pct_profit"     // profit 阶段快速保护减仓比例（默认0.40）
+	paramExitFastProtectReducePctTrend     = "exit_fast_protect_reduce_pct_trend"      // trend_profit 阶段快速保护减仓比例（默认0.30）
+	paramExitFastProtectBearBars1m         = "exit_fast_protect_bear_bars_1m"          // 连续弱势 1m K 线根数（默认3）
+	paramExitFastProtectStructureLookback  = "exit_fast_protect_structure_lookback_1m" // 最近 1m 微结构止损参考窗口（默认3）
+	paramExitFastProtectVolumeSpike1m      = "exit_fast_protect_volume_spike_mult"     // 1m 放量阈值，使用近20根均量倍数（默认1.5）
+	paramExitFastProtectStructureATRBuf    = "exit_fast_protect_structure_atr_buffer"  // 1m 微结构止损附加 ATR 缓冲倍数（默认0.10）
+	paramExitFastProtectATR1mDropMult      = "exit_fast_protect_atr1m_drop_mult"       // 单根 1m 急跌阈值，使用 ATR(1m) 倍数（默认1.1）
+	paramExitFastProtectPullbackATR15m     = "exit_fast_protect_pullback_atr15m"       // 持仓后高点到当前价的快速回撤阈值，使用 ATR(15m) 倍数（默认0.8）
+	paramExitPositionEarlyProfitR          = "exit_position_early_profit_r"            // 进入 profit 阶段的 R 倍数阈值（默认0.8）
+	paramExitPositionTrendProfitR          = "exit_position_trend_profit_r"            // 进入 trend_profit 阶段的 R 倍数阈值（默认2.0）
+	paramExitEmergency1sEnabled            = "exit_emergency_1s_enabled"               // 是否开启 1s 极端保护：0=关闭 | 1=开启
+	paramExitEmergency1sWindowSec          = "exit_emergency_1s_window_sec"            // 1s 极端保护观察窗口秒数（默认5）
+	paramExitEmergency1sDropPct            = "exit_emergency_1s_drop_pct"              // 观察窗口内极端跌幅/涨幅阈值（默认0.005=0.5%）
+	paramExitEmergency1sVolumeSpikeMult    = "exit_emergency_1s_volume_spike_mult"     // 秒级放量阈值，使用窗口均量倍数（默认2.0）
+	paramExitEmergency1sFullExitNoProfit   = "exit_emergency_1s_full_exit_no_profit"   // 未形成利润时是否直接全平：0=否 | 1=是
+	paramExitEmergency1sSyntheticDropMult  = "exit_emergency_1s_synthetic_drop_mult"   // synthetic 秒使用的更高跌幅倍数（默认1.5）
+	paramExitEmergency1sSyntheticReducePct = "exit_emergency_1s_synthetic_reduce_pct"  // synthetic 秒触发时的保护性减仓比例（默认0.35）
 
 	// 策略变体参数
 	paramStrategyVariant         = "strategy_variant"           // 策略变体：0=趋势跟踪（默认）| 1=突破策略 | 2=震荡策略
@@ -648,6 +755,25 @@ func (s *TrendFollowingStrategy) HistoryWarmupStatus() HistoryWarmupStatus {
 	}
 }
 
+// RecentSecondBars 返回最近收到的秒级行情快照副本，供上层测试或状态检查验证 1s 保护输入。
+func (s *TrendFollowingStrategy) RecentSecondBars(limit int) []SecondBar {
+	if s == nil || limit == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.secondBars) == 0 {
+		return nil
+	}
+	if limit < 0 || limit > len(s.secondBars) {
+		limit = len(s.secondBars)
+	}
+	start := len(s.secondBars) - limit
+	result := make([]SecondBar, limit)
+	copy(result, s.secondBars[start:])
+	return result
+}
+
 // applyKlineSnapshotLocked 把一根已收盘K线写入对应周期缓存，调用方需持有策略锁。
 func (s *TrendFollowingStrategy) applyKlineSnapshotLocked(k *marketpb.Kline) bool {
 	if s == nil || k == nil || !k.IsClosed {
@@ -738,6 +864,86 @@ func (s *TrendFollowingStrategy) OnDepth(depth *marketpb.Depth) {
 		return
 	}
 	s.latestDepth = snapshot
+}
+
+// appendSecondBarLocked 把最新秒级行情加入窗口缓存，只保留极端保护所需的最近片段。
+func (s *TrendFollowingStrategy) appendSecondBarLocked(bar *SecondBar) {
+	if s == nil || bar == nil {
+		return
+	}
+	s.secondBars = append(s.secondBars, *bar)
+	if len(s.secondBars) > 30 {
+		s.secondBars = s.secondBars[len(s.secondBars)-30:]
+	}
+}
+
+// OnSecondBar 接收秒级简化行情，仅用于 1s 极端保护，不参与正常入场或常规出场判断。
+func (s *TrendFollowingStrategy) OnSecondBar(ctx context.Context, bar *SecondBar) error {
+	if s == nil || bar == nil || !bar.IsFinal {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.appendSecondBarLocked(bar)
+	if s.pos.side == sideNone {
+		return nil
+	}
+
+	action := s.evaluateEmergencyExitOn1s()
+	if action == nil {
+		return nil
+	}
+
+	k := secondBarToKline(s.symbol, bar)
+	s.writeDecisionLogIfEnabled("exit", "signal", action.ReasonCode, k, map[string]interface{}{
+		"event_code":      string(action.Code),
+		"event_desc":      action.ReasonLabel,
+		"interval":        action.Interval,
+		"synthetic_bar":   bar.Synthetic,
+		"second_source":   secondBarSourceLabel(bar),
+		"signal_type":     action.SignalType,
+		"reduce_pct":      action.ReducePct,
+		"raise_stop_to":   action.RaiseStopTo,
+		"stop_raise_mode": action.StopRaiseMode,
+		"trigger_price":   action.TriggerPrice,
+		"current_r":       action.CurrentR,
+		"position_stage":  action.PositionStage,
+	})
+	return s.applyEmergencyExitOn1s(ctx, k, action)
+}
+
+// secondBarSourceLabel 将秒级条目的来源统一映射为调试字段，便于现场区分真实成交和盘口兜底。
+func secondBarSourceLabel(bar *SecondBar) string {
+	if bar == nil {
+		return "unknown"
+	}
+	if bar.Synthetic {
+		return "depth_fallback"
+	}
+	return "trade"
+}
+
+// secondBarToKline 把秒级极端保护条目转换成最小 Kline 结构，便于复用现有日志与信号链路。
+func secondBarToKline(symbol string, bar *SecondBar) *marketpb.Kline {
+	if bar == nil {
+		return nil
+	}
+	return &marketpb.Kline{
+		Symbol:     symbol,
+		Interval:   "1s",
+		OpenTime:   bar.OpenTimeMs,
+		CloseTime:  bar.CloseTimeMs,
+		Open:       bar.Open,
+		High:       bar.High,
+		Low:        bar.Low,
+		Close:      bar.Close,
+		Volume:     bar.Volume,
+		IsClosed:   true,
+		IsFinal:    bar.IsFinal,
+		IsTradable: true,
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1227,6 +1433,7 @@ func (s *TrendFollowingStrategy) openPosition(ctx context.Context, k *marketpb.K
 	)
 
 	// 记录持仓
+	exitPolicy, exitState := s.initializeExitPolicyState(m15.Close, stopLoss)
 	s.pos = position{
 		side:          sideLong,
 		entryPrice:    m15.Close,
@@ -1238,6 +1445,8 @@ func (s *TrendFollowingStrategy) openPosition(ctx context.Context, k *marketpb.K
 		atr:           m15.Atr,
 		hitTP1:        false,
 		partialClosed: false,
+		exitPolicy:    exitPolicy,
+		exitState:     exitState,
 	}
 	if entry == entryShort {
 		s.pos.side = sideShort
@@ -1536,6 +1745,542 @@ func (s *TrendFollowingStrategy) calculatePositionSize(price float64, stopLoss f
 	}
 
 	return finalPosition
+}
+
+// buildExitPolicyConfig 从当前策略参数中读取 1m 快速保护相关配置，供出场判断复用。
+func (s *TrendFollowingStrategy) buildExitPolicyConfig() ExitPolicyConfig {
+	return ExitPolicyConfig{
+		FastProtectEnabled:            s.getParam(paramExitFastProtectEnabled, 1) > 0,
+		FastProtectMaxTriggerCount:    int(s.getParam(paramExitFastProtectMaxTriggerCount, 1)),
+		FastProtectReducePctEarly:     s.getParam(paramExitFastProtectReducePctEarly, 0.50),
+		FastProtectReducePctProfit:    s.getParam(paramExitFastProtectReducePctProfit, 0.40),
+		FastProtectReducePctTrend:     s.getParam(paramExitFastProtectReducePctTrend, 0.30),
+		FastProtectBearBars1m:         int(s.getParam(paramExitFastProtectBearBars1m, 3)),
+		FastProtectStructureLookback:  int(s.getParam(paramExitFastProtectStructureLookback, 3)),
+		FastProtectVolumeSpikeMult1m:  s.getParam(paramExitFastProtectVolumeSpike1m, 1.50),
+		FastProtectStructureATRBuf:    s.getParam(paramExitFastProtectStructureATRBuf, 0.10),
+		FastProtectATR1mDropMult:      s.getParam(paramExitFastProtectATR1mDropMult, 1.10),
+		FastProtectPullbackATR15m:     s.getParam(paramExitFastProtectPullbackATR15m, 0.80),
+		EarlyProfitR:                  s.getParam(paramExitPositionEarlyProfitR, 0.80),
+		TrendProfitR:                  s.getParam(paramExitPositionTrendProfitR, 2.00),
+		Emergency1sEnabled:            s.getParam(paramExitEmergency1sEnabled, 1) > 0,
+		Emergency1sWindowSec:          int(s.getParam(paramExitEmergency1sWindowSec, 5)),
+		Emergency1sDropPct:            s.getParam(paramExitEmergency1sDropPct, 0.005),
+		Emergency1sVolumeSpikeMult:    s.getParam(paramExitEmergency1sVolumeSpikeMult, 2.00),
+		Emergency1sFullExitNoProfit:   s.getParam(paramExitEmergency1sFullExitNoProfit, 1) > 0,
+		Emergency1sSyntheticDropMult:  s.getParam(paramExitEmergency1sSyntheticDropMult, 1.50),
+		Emergency1sSyntheticReducePct: s.getParam(paramExitEmergency1sSyntheticReducePct, 0.35),
+	}
+}
+
+// currentPositionStage 根据当前 R 倍数把持仓划分为 early/profit/trend_profit 三段。
+func (s *TrendFollowingStrategy) currentPositionStage(currentR float64, cfg ExitPolicyConfig) PositionStage {
+	if currentR >= cfg.TrendProfitR {
+		return PositionStageTrendProfit
+	}
+	if currentR >= cfg.EarlyProfitR {
+		return PositionStageProfit
+	}
+	return PositionStageEarly
+}
+
+// currentRMultiple 计算当前价格相对初始风险距离的 R 倍数，便于统一决定保护力度。
+func (s *TrendFollowingStrategy) currentRMultiple(currentPrice float64) float64 {
+	if s == nil || s.pos.side == sideNone {
+		return 0
+	}
+	riskDistance := s.pos.exitState.InitialRiskDistance
+	if riskDistance <= 0 {
+		riskDistance = math.Abs(s.pos.entryPrice - s.pos.stopLoss)
+	}
+	if riskDistance <= 0 {
+		return 0
+	}
+	return s.calculatePnL(currentPrice) / riskDistance
+}
+
+// hasConsecutiveWeak1mBars 判断最近 N 根 1m K 线是否连续收在 EMA21 下方并持续走弱。
+func (s *TrendFollowingStrategy) hasConsecutiveWeak1mBars(requiredBars int) bool {
+	if requiredBars <= 0 || len(s.klines1m) < requiredBars {
+		return false
+	}
+	start := len(s.klines1m) - requiredBars
+	for i := start; i < len(s.klines1m); i++ {
+		snap := s.klines1m[i]
+		if snap.Close == 0 || snap.Ema21 == 0 || snap.Close >= snap.Ema21 {
+			return false
+		}
+		if i > start && snap.Low >= s.klines1m[i-1].Low {
+			return false
+		}
+	}
+	return true
+}
+
+// averageVolumeOfRecent1m 计算最近 N 根 1m K 线的平均成交量，供放量急跌判断使用。
+func (s *TrendFollowingStrategy) averageVolumeOfRecent1m(lookback int) float64 {
+	if lookback <= 0 || len(s.klines1m) == 0 {
+		return 0
+	}
+	if lookback > len(s.klines1m) {
+		lookback = len(s.klines1m)
+	}
+	start := len(s.klines1m) - lookback
+	total := 0.0
+	for i := start; i < len(s.klines1m); i++ {
+		total += s.klines1m[i].Volume
+	}
+	return total / float64(lookback)
+}
+
+// averageVolumeOfRecentSecondBars 计算最近若干秒级条目的平均成交量，可选择忽略最新一条避免被尖峰自我稀释。
+func (s *TrendFollowingStrategy) averageVolumeOfRecentSecondBars(lookback int, excludeLatest bool) float64 {
+	if lookback <= 0 || len(s.secondBars) == 0 {
+		return 0
+	}
+	end := len(s.secondBars)
+	if excludeLatest {
+		end--
+	}
+	if end <= 0 {
+		return 0
+	}
+	if lookback > end {
+		lookback = end
+	}
+	start := end - lookback
+	total := 0.0
+	for i := start; i < end; i++ {
+		total += s.secondBars[i].Volume
+	}
+	return total / float64(lookback)
+}
+
+// emergencyWindowMovePct 计算秒级窗口内相对极值到当前收盘的急跌/急涨比例。
+func (s *TrendFollowingStrategy) emergencyWindowMovePct(windowSec int) (float64, bool) {
+	if s == nil || s.pos.side == sideNone || len(s.secondBars) == 0 {
+		return 0, false
+	}
+	if windowSec <= 1 {
+		windowSec = 5
+	}
+	if windowSec > len(s.secondBars) {
+		windowSec = len(s.secondBars)
+	}
+	start := len(s.secondBars) - windowSec
+	latest := s.secondBars[len(s.secondBars)-1]
+	if s.pos.side == sideLong {
+		refHigh := s.secondBars[start].High
+		for i := start + 1; i < len(s.secondBars); i++ {
+			if s.secondBars[i].High > refHigh {
+				refHigh = s.secondBars[i].High
+			}
+		}
+		if refHigh <= 0 {
+			return 0, false
+		}
+		return (refHigh - latest.Close) / refHigh, true
+	}
+	refLow := s.secondBars[start].Low
+	for i := start + 1; i < len(s.secondBars); i++ {
+		if s.secondBars[i].Low < refLow {
+			refLow = s.secondBars[i].Low
+		}
+	}
+	if refLow <= 0 {
+		return 0, false
+	}
+	return (latest.Close - refLow) / refLow, true
+}
+
+// fastProtectReducePct 根据持仓阶段返回建议的快速保护减仓比例。
+func (s *TrendFollowingStrategy) fastProtectReducePct(stage PositionStage, cfg ExitPolicyConfig) float64 {
+	switch stage {
+	case PositionStageTrendProfit:
+		return cfg.FastProtectReducePctTrend
+	case PositionStageProfit:
+		return cfg.FastProtectReducePctProfit
+	default:
+		return cfg.FastProtectReducePctEarly
+	}
+}
+
+// recent1mStructureStop 返回最近 1m 微结构止损价，供快速保护后进一步锁盈使用。
+func (s *TrendFollowingStrategy) recent1mStructureStop(cfg ExitPolicyConfig) (float64, bool) {
+	if s == nil || len(s.klines1m) == 0 {
+		return 0, false
+	}
+	lookback := cfg.FastProtectStructureLookback
+	if lookback <= 0 {
+		lookback = 3
+	}
+	if lookback > len(s.klines1m) {
+		lookback = len(s.klines1m)
+	}
+	start := len(s.klines1m) - lookback
+	atrBuf := cfg.FastProtectStructureATRBuf * s.latest1m.Atr
+	if s.pos.side == sideLong {
+		structureLow := s.klines1m[start].Low
+		for i := start + 1; i < len(s.klines1m); i++ {
+			if s.klines1m[i].Low < structureLow {
+				structureLow = s.klines1m[i].Low
+			}
+		}
+		return structureLow - atrBuf, true
+	}
+	structureHigh := s.klines1m[start].High
+	for i := start + 1; i < len(s.klines1m); i++ {
+		if s.klines1m[i].High > structureHigh {
+			structureHigh = s.klines1m[i].High
+		}
+	}
+	return structureHigh + atrBuf, true
+}
+
+// fastProtectRaisedStop 决定快速保护减仓后把止损抬到保本，还是抬到最近 1m 微结构位置。
+func (s *TrendFollowingStrategy) fastProtectRaisedStop(stage PositionStage, cfg ExitPolicyConfig) (float64, string, bool) {
+	if s == nil || s.pos.side == sideNone {
+		return 0, "", false
+	}
+	breakeven := s.pos.entryPrice
+	if stage != PositionStageTrendProfit {
+		return breakeven, "break_even", true
+	}
+	structureStop, ok := s.recent1mStructureStop(cfg)
+	if !ok {
+		return breakeven, "break_even", true
+	}
+	if s.pos.side == sideLong {
+		if structureStop > breakeven {
+			return structureStop, "micro_structure_1m", true
+		}
+		return breakeven, "break_even", true
+	}
+	if structureStop < breakeven {
+		return structureStop, "micro_structure_1m", true
+	}
+	return breakeven, "break_even", true
+}
+
+// initializeExitPolicyState 在开仓时初始化分层出场参数和运行态，避免首次保护判断缺少基线。
+func (s *TrendFollowingStrategy) initializeExitPolicyState(entryPrice, stopLoss float64) (ExitPolicyConfig, ExitRuntimeState) {
+	cfg := s.buildExitPolicyConfig()
+	state := ExitRuntimeState{
+		MaxFavorablePrice:   entryPrice,
+		InitialRiskDistance: math.Abs(entryPrice - stopLoss),
+		Stage:               PositionStageEarly,
+	}
+	return cfg, state
+}
+
+// evaluateFastProtectOn1m 评估 1m 快速保护是否应先减仓。
+// 当前返回的是可直接执行的 PARTIAL_CLOSE 动作，同时携带止损抬升目标。
+func (s *TrendFollowingStrategy) evaluateFastProtectOn1m() *ExitAction {
+	if s == nil || s.pos.side == sideNone {
+		return nil
+	}
+
+	cfg := s.buildExitPolicyConfig()
+	if !cfg.FastProtectEnabled {
+		return nil
+	}
+	if cfg.FastProtectMaxTriggerCount > 0 && s.pos.exitState.FastProtectTriggerCount >= cfg.FastProtectMaxTriggerCount {
+		return nil
+	}
+
+	m1 := s.latest1m
+	if m1.Close == 0 || m1.Atr == 0 {
+		return nil
+	}
+
+	currentR := s.currentRMultiple(m1.Close)
+	stage := s.currentPositionStage(currentR, cfg)
+	consecutiveWeak := s.hasConsecutiveWeak1mBars(cfg.FastProtectBearBars1m)
+	avgVolume20 := s.averageVolumeOfRecent1m(20)
+	largeBearBar := false
+	if s.pos.side == sideLong {
+		largeBearBar = (m1.Open-m1.Close) >= cfg.FastProtectATR1mDropMult*m1.Atr &&
+			avgVolume20 > 0 && m1.Volume >= avgVolume20*cfg.FastProtectVolumeSpikeMult1m
+	} else if s.pos.side == sideShort {
+		largeBearBar = (m1.Close-m1.Open) >= cfg.FastProtectATR1mDropMult*m1.Atr &&
+			avgVolume20 > 0 && m1.Volume >= avgVolume20*cfg.FastProtectVolumeSpikeMult1m
+	}
+
+	if !consecutiveWeak && !largeBearBar {
+		return nil
+	}
+
+	reducePct := s.fastProtectReducePct(stage, cfg)
+	if reducePct <= 0 {
+		return nil
+	}
+
+	action := "SELL"
+	if s.pos.side == sideShort {
+		action = "BUY"
+	}
+	raiseStopTo, stopRaiseMode, _ := s.fastProtectRaisedStop(stage, cfg)
+	return &ExitAction{
+		Code:          ExitEventFastProtect1m,
+		Interval:      "1m",
+		Action:        action,
+		SignalType:    "PARTIAL_CLOSE",
+		ReducePct:     reducePct,
+		RaiseStopTo:   raiseStopTo,
+		StopRaiseMode: stopRaiseMode,
+		Reason:        "1分钟快速保护触发，建议先减仓防止亏损扩大",
+		ReasonCode:    "exit_fast_protect_1m",
+		ReasonLabel:   "1分钟快速保护减仓",
+		TriggerPrice:  m1.Close,
+		CurrentR:      currentR,
+		PositionStage: stage,
+	}
+}
+
+// evaluateEmergencyExitOn1s 评估 1s 极端保护，只处理异常瀑布或急速反向波动。
+func (s *TrendFollowingStrategy) evaluateEmergencyExitOn1s() *ExitAction {
+	if s == nil || s.pos.side == sideNone {
+		return nil
+	}
+
+	cfg := s.buildExitPolicyConfig()
+	if !cfg.Emergency1sEnabled || s.pos.exitState.EmergencyTriggered || len(s.secondBars) < 2 {
+		return nil
+	}
+
+	latest := s.secondBars[len(s.secondBars)-1]
+	syntheticBar := latest.Synthetic
+	currentR := s.currentRMultiple(latest.Close)
+	stage := s.currentPositionStage(currentR, cfg)
+	movePct, ok := s.emergencyWindowMovePct(cfg.Emergency1sWindowSec)
+	if !ok {
+		return nil
+	}
+	avgVolume := s.averageVolumeOfRecentSecondBars(cfg.Emergency1sWindowSec, true)
+	volumeSpike := avgVolume > 0 && latest.Volume >= avgVolume*cfg.Emergency1sVolumeSpikeMult
+	triggerDropPct := cfg.Emergency1sDropPct
+	if syntheticBar && cfg.Emergency1sSyntheticDropMult > 1 {
+		triggerDropPct *= cfg.Emergency1sSyntheticDropMult
+	}
+
+	action := "SELL"
+	breakStop := latest.Close <= s.pos.stopLoss
+	if s.pos.side == sideShort {
+		action = "BUY"
+		breakStop = latest.Close >= s.pos.stopLoss
+	}
+	moveTriggered := movePct >= triggerDropPct
+	if syntheticBar {
+		if !(breakStop && moveTriggered) && !moveTriggered {
+			return nil
+		}
+	} else if !breakStop && !(moveTriggered && volumeSpike) {
+		return nil
+	}
+
+	fullExit := breakStop || (cfg.Emergency1sFullExitNoProfit && currentR <= 0)
+	if syntheticBar {
+		fullExit = false
+	}
+	signalType := "PARTIAL_CLOSE"
+	reducePct := 0.5
+	raiseStopTo, stopRaiseMode, _ := s.fastProtectRaisedStop(stage, cfg)
+	reason := "1秒极端保护触发，检测到异常急跌或急速反向波动"
+	reasonLabel := "1秒极端保护止损"
+	if syntheticBar {
+		reducePct = cfg.Emergency1sSyntheticReducePct
+		if reducePct <= 0 {
+			reducePct = 0.35
+		}
+		reason = "1秒极端保护触发，检测到 synthetic 秒级急跌，先做保护性减仓确认"
+		reasonLabel = "1秒极端保护减仓（盘口兜底）"
+	}
+	if fullExit {
+		signalType = "CLOSE"
+		reducePct = 1.0
+		raiseStopTo = 0
+		stopRaiseMode = ""
+	}
+
+	return &ExitAction{
+		Code:          ExitEventEmergency1s,
+		Interval:      "1s",
+		Action:        action,
+		SignalType:    signalType,
+		ReducePct:     reducePct,
+		RaiseStopTo:   raiseStopTo,
+		StopRaiseMode: stopRaiseMode,
+		Reason:        reason,
+		ReasonCode:    "exit_emergency_stop_1s",
+		ReasonLabel:   reasonLabel,
+		TriggerPrice:  latest.Close,
+		CurrentR:      currentR,
+		PositionStage: stage,
+	}
+}
+
+// applyFastProtectOn1m 发送真实的 1m 快速保护减仓信号，并同步更新本地持仓状态。
+func (s *TrendFollowingStrategy) applyFastProtectOn1m(ctx context.Context, k *marketpb.Kline, action *ExitAction) error {
+	if s == nil || action == nil || s.pos.side == sideNone {
+		return nil
+	}
+	if action.SignalType == "" {
+		action.SignalType = "PARTIAL_CLOSE"
+	}
+	if action.ReducePct <= 0 || s.pos.quantity <= 0 {
+		return nil
+	}
+
+	quantity := s.pos.quantity * action.ReducePct
+	if quantity <= 0 {
+		return nil
+	}
+	if quantity > s.pos.quantity {
+		quantity = s.pos.quantity
+	}
+
+	side := "LONG"
+	if s.pos.side == sideShort {
+		side = "SHORT"
+	}
+	interval := action.Interval
+	if interval == "" {
+		interval = "1m"
+	}
+	signalReason := s.newExitSignalReason(
+		action.Reason,
+		fmt.Sprintf("持仓方向=%s | 周期=%s | 动作=%s", side, interval, action.SignalType),
+		action.Reason,
+		fmt.Sprintf("触发价=%.2f | 当前R=%.2f | 减仓比例=%.2f | 减仓数量=%.4f", action.TriggerPrice, action.CurrentR, action.ReducePct, quantity),
+		"risk_reduce",
+		action.ReasonLabel,
+		interval, s.strategySignalTag(), "close", side,
+	)
+	signal := map[string]interface{}{
+		"strategy_id":   s.strategySignalID(interval),
+		"symbol":        s.symbol,
+		"interval":      interval,
+		"action":        action.Action,
+		"side":          side,
+		"signal_type":   action.SignalType,
+		"quantity":      quantity,
+		"entry_price":   action.TriggerPrice,
+		"stop_loss":     action.RaiseStopTo,
+		"take_profits":  []float64{s.pos.takeProfit1, s.pos.takeProfit2},
+		"reason":        signalReason.Summary,
+		"signal_reason": signalReason,
+		"timestamp":     time.Now().UnixMilli(),
+		"atr":           s.latest1m.Atr,
+		"risk_reward":   0,
+		"indicators": map[string]interface{}{
+			"m1_ema21":        s.latest1m.Ema21,
+			"m1_rsi":          s.latest1m.Rsi,
+			"m1_atr":          s.latest1m.Atr,
+			"m15_atr":         s.latest15m.Atr,
+			"current_r":       action.CurrentR,
+			"raise_stop_to":   action.RaiseStopTo,
+			"stop_raise_mode": action.StopRaiseMode,
+		},
+	}
+
+	if err := s.sendSignal(ctx, signal, k); err != nil {
+		return err
+	}
+
+	s.pos.quantity = math.Max(0, s.pos.quantity-quantity)
+	s.pos.partialClosed = true
+	s.pos.exitState.CurrentR = action.CurrentR
+	s.pos.exitState.Stage = action.PositionStage
+	s.pos.exitState.FastProtectTriggered = true
+	s.pos.exitState.FastProtectTriggerCount++
+	s.pos.exitState.LastReduceReason = action.Code
+	s.pos.exitState.LastReduceTime = time.Now().UnixMilli()
+	if action.RaiseStopTo > 0 {
+		if s.pos.side == sideLong {
+			s.pos.stopLoss = math.Max(s.pos.stopLoss, action.RaiseStopTo)
+		} else {
+			s.pos.stopLoss = math.Min(s.pos.stopLoss, action.RaiseStopTo)
+		}
+	}
+	return nil
+}
+
+// applyEmergencyExitOn1s 执行 1s 极端保护动作，未盈利时优先直接全平，盈利阶段可先做保护性减仓。
+func (s *TrendFollowingStrategy) applyEmergencyExitOn1s(ctx context.Context, k *marketpb.Kline, action *ExitAction) error {
+	if s == nil || action == nil || s.pos.side == sideNone {
+		return nil
+	}
+
+	side := "LONG"
+	if s.pos.side == sideShort {
+		side = "SHORT"
+	}
+	quantity := s.pos.quantity
+	if action.SignalType == "PARTIAL_CLOSE" {
+		quantity = s.pos.quantity * action.ReducePct
+		if quantity <= 0 {
+			return nil
+		}
+		if quantity > s.pos.quantity {
+			quantity = s.pos.quantity
+		}
+	}
+
+	signalReason := s.newExitSignalReason(
+		action.Reason,
+		fmt.Sprintf("持仓方向=%s | 周期=%s | 动作=%s", side, action.Interval, action.SignalType),
+		action.Reason,
+		fmt.Sprintf("触发价=%.2f | 当前R=%.2f | 数量=%.4f", action.TriggerPrice, action.CurrentR, quantity),
+		"emergency_stop",
+		action.ReasonLabel,
+		action.Interval, s.strategySignalTag(), "close", side,
+	)
+	signal := map[string]interface{}{
+		"strategy_id":   s.strategySignalID(action.Interval),
+		"symbol":        s.symbol,
+		"interval":      action.Interval,
+		"action":        action.Action,
+		"side":          side,
+		"signal_type":   action.SignalType,
+		"quantity":      quantity,
+		"entry_price":   action.TriggerPrice,
+		"stop_loss":     action.RaiseStopTo,
+		"take_profits":  []float64{s.pos.takeProfit1, s.pos.takeProfit2},
+		"reason":        signalReason.Summary,
+		"signal_reason": signalReason,
+		"timestamp":     time.Now().UnixMilli(),
+		"atr":           s.latest1m.Atr,
+		"risk_reward":   0,
+		"indicators": map[string]interface{}{
+			"current_r":       action.CurrentR,
+			"raise_stop_to":   action.RaiseStopTo,
+			"stop_raise_mode": action.StopRaiseMode,
+		},
+	}
+	if err := s.sendSignal(ctx, signal, k); err != nil {
+		return err
+	}
+
+	s.pos.exitState.CurrentR = action.CurrentR
+	s.pos.exitState.Stage = action.PositionStage
+	s.pos.exitState.EmergencyTriggered = true
+	s.pos.exitState.LastReduceReason = action.Code
+	s.pos.exitState.LastReduceTime = time.Now().UnixMilli()
+	if action.SignalType == "CLOSE" {
+		s.updateRiskState(s.calculatePnL(action.TriggerPrice))
+		s.pos = position{}
+		return nil
+	}
+	s.pos.quantity = math.Max(0, s.pos.quantity-quantity)
+	s.pos.partialClosed = true
+	if action.RaiseStopTo > 0 {
+		if s.pos.side == sideLong {
+			s.pos.stopLoss = math.Max(s.pos.stopLoss, action.RaiseStopTo)
+		} else {
+			s.pos.stopLoss = math.Min(s.pos.stopLoss, action.RaiseStopTo)
+		}
+	}
+	return nil
 }
 
 // applyWeightRecommendation 把 Phase 5 的权重建议真正应用到开仓数量上。
@@ -3178,6 +3923,7 @@ func (s *TrendFollowingStrategy) openPosition1m(ctx context.Context, k *marketpb
 	)
 
 	// 记录持仓
+	exitPolicy, exitState := s.initializeExitPolicyState(m1.Close, stopLoss)
 	s.pos = position{
 		side:          sideLong,
 		entryPrice:    m1.Close,
@@ -3189,6 +3935,8 @@ func (s *TrendFollowingStrategy) openPosition1m(ctx context.Context, k *marketpb
 		atr:           m1.Atr,
 		hitTP1:        false,
 		partialClosed: false,
+		exitPolicy:    exitPolicy,
+		exitState:     exitState,
 	}
 	if entry == entryShort {
 		s.pos.side = sideShort
@@ -3256,6 +4004,24 @@ func (s *TrendFollowingStrategy) buildEntryReason1m(trend trendDirection, pullba
 func (s *TrendFollowingStrategy) checkExitConditions1m(ctx context.Context, k *marketpb.Kline) error {
 	m1 := s.latest1m
 	price := m1.Close
+
+	// 先执行 1m 快速保护减仓，再继续走原有 1m 止损/止盈/EMA 破位流程。
+	if fastProtect := s.evaluateFastProtectOn1m(); fastProtect != nil {
+		s.writeDecisionLogIfEnabled("exit", "signal", fastProtect.ReasonCode, k, map[string]interface{}{
+			"event_code":      string(fastProtect.Code),
+			"event_desc":      fastProtect.ReasonLabel,
+			"interval":        fastProtect.Interval,
+			"reduce_pct":      fastProtect.ReducePct,
+			"raise_stop_to":   fastProtect.RaiseStopTo,
+			"stop_raise_mode": fastProtect.StopRaiseMode,
+			"trigger_price":   fastProtect.TriggerPrice,
+			"current_r":       fastProtect.CurrentR,
+			"position_stage":  fastProtect.PositionStage,
+		})
+		if err := s.applyFastProtectOn1m(ctx, k, fastProtect); err != nil {
+			return err
+		}
+	}
 
 	// 计算持仓K线数
 	heldBars := 0

@@ -12,6 +12,8 @@ Kafka:
     Depth: depth
 
 KlineLogDir: data/kline
+SharedWarmupDir: runtime/shared/kline/warmup
+WarmupCleanupOnStartup: false
 WatermarkDelay: 2s
 MaxWatermarkBufferAge: 5m
 IndicatorMode: closed

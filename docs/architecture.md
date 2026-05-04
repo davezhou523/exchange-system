@@ -130,8 +130,6 @@
                           │  2. Kline Aggregator     │
                           │     聚合为多周期K线       │
                           │     • 1m (基准)          │
-                          │     • 3m                 │
-                          │     • 5m                 │
                           │     • 15m                │
                           │     • 1h                 │
                           │     • 4h                 │
@@ -1619,7 +1617,7 @@ Features
 
 ```
 输入: 1分钟原始K线 (Binance WebSocket)
-输出: 多周期聚合K线 (1m/3m/5m/15m/1h/4h)
+输出: 多周期聚合K线 (1m/15m/1h/4h)
 
 特性:
 • Watermark 机制: 保证数据完整性
@@ -2057,7 +2055,7 @@ grep '"base_template"\|"template"\|"action"\|"reason"' \
 • 看 selector_decision：
   grep '"action":"selector_decision"' app/market/rpc/data/universepool/{BNBUSDT,SOLUSDT,XRPUSDT}/$(date -u +%F).jsonl | tail -n 30
 • 看 ws / aggregator / universepool：
-  grep '\[ws\]\|\[aggregated\]\|\[aggregated 5m emit\]\|\[universepool\]' app/market/rpc/logs/market.log | tail -n 50
+  grep '\[ws\]\|\[aggregated\]\|\[universepool\]' app/market/rpc/logs/market.log | tail -n 50
 
 一句话原则：
 • 先查输入有没有进来，再查 selector 有没有命中，最后才考虑要不要调阈值
@@ -2384,7 +2382,7 @@ flowchart LR
    目标是补齐“真实市场下的正向样本时间点”
 ```
 
-1m 加速验证 vs 5m 稳定验证:
+1m 加速验证 vs 15m 稳定验证:
 
 ```text
 什么时候优先用 1m:
@@ -2393,21 +2391,21 @@ flowchart LR
 • 需要尽快收集 state_filtered / state_preferred_score_pass 样本
 • 接受更高噪声，且明白它更适合“加速取证”，不适合直接做最终稳定性结论
 
-什么时候优先用 5m:
+什么时候优先用 15m:
 • 需要确认 global_state 在真实运行里是否足够稳定
 • 需要验证 freshness、迟滞阈值、持有逻辑是否会减少 range -> unknown 抖动
-• 需要更接近最终线上使用习惯
+• 需要更贴近当前实际产出的聚合周期
 • 接受样本出现更慢，但更关注“稳定”而不是“快”
 
 建议用法:
 • 先用 1m 做链路冒烟和快速取证
-• 再用 5m 做稳定性复核
-• 如果 1m 能看到 state_filtered / state_preferred_score_pass，但 5m 长期只有 unknown，
+• 再用 15m 做稳定性复核
+• 如果 1m 能看到 state_filtered / state_preferred_score_pass，但 15m 长期只有 unknown，
   优先排查 snapshot freshness、聚合输入周期、迟滞逻辑，而不是先怀疑 selector 完全失效
 
 一句话理解:
 • 1m 更像验证链路“有没有动起来”
-• 5m 更像验证结果“能不能稳下来”
+• 15m 更像验证结果“能不能稳下来”
 ```
 
 正常 warmup:
@@ -2595,12 +2593,11 @@ grep '"reason":"state_preferred_score_pass"' \
 # 如果当前 market 是前台启动，直接观察终端中的以下关键字：
 # [ws]
 # [aggregated]
-# [aggregated 5m emit]
 # [universepool] evaluate
 # [universepool] state
 
 # Step 3.1: 若日志已重定向到文件，可按关键字过滤
-grep '\[ws\]\|\[aggregated\]\|\[aggregated 5m emit\]\|\[universepool\]' \
+grep '\[ws\]\|\[aggregated\]\|\[universepool\]' \
   app/market/rpc/logs/market.log | tail -n 50
 ```
 
@@ -2669,7 +2666,7 @@ grep '\[ws\]\|\[aggregated\]\|\[aggregated 5m emit\]\|\[universepool\]' \
    • emit observer 没接上
    • UpdateSnapshotFromKline 被 interval 过滤掉了
    下一步动作：
-   • 先看 aggregator 是否有 [aggregated] 或 [aggregated 5m emit]
+   • 先看 aggregator 是否有 [aggregated]
    • 再看 ValidationMode 是否与 snapshot_interval 一致
    • 再查 emit observer -> UpdateSnapshotFromKline 这段链路
 
@@ -2690,7 +2687,7 @@ grep '\[ws\]\|\[aggregated\]\|\[aggregated 5m emit\]\|\[universepool\]' \
    下一步动作：
    • 先看 _meta.global_state 是否长期停在 range
    • 若只是想快速取证，可切到 1m 或用 replay / 定向注入补正向样本
-   • 若要做最终稳定性判断，继续保留 5m 观察
+   • 若要做最终稳定性判断，继续保留 15m 观察
 ```
 
 #### 3.3.7 Dynamic Evolution Roadmap
@@ -4765,12 +4762,30 @@ Kafka:
   Brokers:
     - kafka1:9092
   Topic: kline
+SharedWarmupDir: runtime/shared/kline/warmup
+WarmupCleanupOnStartup: false
 WatermarkDelay: 3000  # 3秒
 IndicatorParams:
   Ema21Period: 21
   Ema55Period: 55
   RsiPeriod: 14
   AtrPeriod: 14
+```
+
+说明：
+
+```text
+SharedWarmupDir:
+• market 启动 warmup 后写入的共享快照目录
+• strategy 启动恢复时会优先从这里读取 ClickHouse fallback 快照
+
+WarmupCleanupOnStartup:
+• true: 服务启动时先清空 SharedWarmupDir，再生成本轮 warmup 快照
+• false: 保留上一轮 warmup 快照，降低本轮 warmup 失败时的恢复风险
+
+建议默认值:
+• market.demo.yaml: WarmupCleanupOnStartup: true
+• market.prod.yaml: WarmupCleanupOnStartup: false
 ```
 
 ### 7.2 Strategy Service 配置
@@ -5070,7 +5085,7 @@ Redis:
 | 指标 | 说明 |
 |------|------|
 | Received1m | 接收1m K线数量 |
-| Emitted1m/3m/15m/1h/4h | 各周期发射数量 |
+| Emitted1m/15m/1h/4h | 各周期发射数量 |
 | GapsDetected | 数据缺失检测 |
 | KafkaSendErrors | Kafka发送失败次数 |
 | WatermarkWaits | Watermark等待次数 |

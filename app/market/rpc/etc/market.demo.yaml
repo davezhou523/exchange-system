@@ -14,6 +14,8 @@ Kafka:
     Depth: ""
 
 KlineLogDir: data/kline
+SharedWarmupDir: runtime/shared/kline/warmup
+WarmupCleanupOnStartup: true
 WatermarkDelay: 1s
 MaxWatermarkBufferAge: 5m
 IndicatorMode: closed
@@ -42,11 +44,6 @@ Binance:
   WebSocketURL: wss://fstream.binance.com
   Symbols:
     - ETHUSDT
-    - BTCUSDT
-    - BNBUSDT
-    - SOLUSDT
-    - DOGEUSDT
-    - PEPEUSDT
   Intervals:
     - 1m
   Proxy: socks5://192.168.10.14:1080
@@ -82,24 +79,14 @@ UniversePool:
   LogDir: data/universepool
   CandidateSymbols:
     - ETHUSDT
-    - BTCUSDT
-    - BNBUSDT
-    - SOLUSDT
-    - DOGEUSDT
-    - PEPEUSDT
   AllowList: []
   BlockList: []
   TrendPreferredSymbols:
     - ETHUSDT
-    - SOLUSDT
-    - BNBUSDT
   RangePreferredSymbols:
-    - BTCUSDT
     - ETHUSDT
   BreakoutPreferredSymbols:
-    - BTCUSDT
-    - DOGEUSDT
-    - PEPEUSDT
+    - ETHUSDT
   BreakoutAtrPctMin: 0.0045
   BreakoutAtrPctExitMin: 0.0040
   EvaluateInterval: 30s

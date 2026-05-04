@@ -286,6 +286,111 @@ func TestUpsertStrategyLockedHydratesWarmupHistoryOnEnable(t *testing.T) {
 	}
 }
 
+// TestServiceContextDispatchTradeAndDepthToStrategy 验证 depth fallback 与真实 trade 会沿同一条分发链路进入策略秒级缓存。
+func TestServiceContextDispatchTradeAndDepthToStrategy(t *testing.T) {
+	strat := strategyengine.NewTrendFollowingStrategy("BTCUSDT", nil, nil, nil, "", nil)
+	svcCtx := &ServiceContext{
+		strategies: map[string]*strategyengine.TrendFollowingStrategy{
+			"BTCUSDT": strat,
+		},
+		secondBarAssemblers: map[string]*SecondBarAssembler{
+			"BTCUSDT": NewSecondBarAssembler("BTCUSDT", SecondBarAssemblerConfig{
+				EnableDepthMidFallback: true,
+			}),
+		},
+	}
+
+	ctx := context.Background()
+	if err := svcCtx.dispatchDepthToStrategy(ctx, &marketpb.Depth{
+		Symbol:    "BTCUSDT",
+		Timestamp: 1_700_000_000_100,
+		Bids:      []*marketpb.DepthItem{{Price: 100, Quantity: 1}},
+		Asks:      []*marketpb.DepthItem{{Price: 101, Quantity: 1}},
+	}); err != nil {
+		t.Fatalf("dispatchDepthToStrategy(first) error = %v", err)
+	}
+	if got := strat.RecentSecondBars(-1); len(got) != 0 {
+		t.Fatalf("RecentSecondBars after first depth len = %d, want 0", len(got))
+	}
+
+	if err := svcCtx.dispatchDepthToStrategy(ctx, &marketpb.Depth{
+		Symbol:    "BTCUSDT",
+		Timestamp: 1_700_000_001_100,
+		Bids:      []*marketpb.DepthItem{{Price: 102, Quantity: 1}},
+		Asks:      []*marketpb.DepthItem{{Price: 104, Quantity: 1}},
+	}); err != nil {
+		t.Fatalf("dispatchDepthToStrategy(second) error = %v", err)
+	}
+	bars := strat.RecentSecondBars(-1)
+	if len(bars) != 1 {
+		t.Fatalf("RecentSecondBars after second depth len = %d, want 1", len(bars))
+	}
+	if !bars[0].Synthetic || bars[0].Volume != 0 || bars[0].Open != 100.5 {
+		t.Fatalf("first bar = %+v, want synthetic depth fallback bar", bars[0])
+	}
+
+	if err := svcCtx.dispatchTradeToStrategy(ctx, &marketpb.Trade{
+		Symbol:    "BTCUSDT",
+		TradeId:   1,
+		Price:     105,
+		Quantity:  1.5,
+		Timestamp: 1_700_000_001_700,
+	}); err != nil {
+		t.Fatalf("dispatchTradeToStrategy(first) error = %v", err)
+	}
+	if err := svcCtx.dispatchTradeToStrategy(ctx, &marketpb.Trade{
+		Symbol:    "BTCUSDT",
+		TradeId:   2,
+		Price:     106,
+		Quantity:  0.5,
+		Timestamp: 1_700_000_002_100,
+	}); err != nil {
+		t.Fatalf("dispatchTradeToStrategy(second) error = %v", err)
+	}
+
+	bars = strat.RecentSecondBars(-1)
+	if len(bars) != 2 {
+		t.Fatalf("RecentSecondBars final len = %d, want 2", len(bars))
+	}
+	last := bars[len(bars)-1]
+	if last.Synthetic {
+		t.Fatalf("last bar Synthetic = true, want false")
+	}
+	if last.Open != 105 || last.High != 105 || last.Low != 105 || last.Close != 105 || last.Volume != 1.5 {
+		t.Fatalf("last bar = %+v, want real trade finalized bar", last)
+	}
+}
+
+// TestLatestSecondBarStatus 验证状态查询读取最近一条秒级行情时，会同时返回 synthetic/source 等调试关键信息。
+func TestLatestSecondBarStatus(t *testing.T) {
+	strat := strategyengine.NewTrendFollowingStrategy("BTCUSDT", nil, nil, nil, "", nil)
+	if err := strat.OnSecondBar(context.Background(), &strategyengine.SecondBar{
+		OpenTimeMs:  1_700_000_000_000,
+		CloseTimeMs: 1_700_000_000_999,
+		Open:        100.5,
+		High:        100.5,
+		Low:         100.5,
+		Close:       100.5,
+		Volume:      0,
+		IsFinal:     true,
+		Synthetic:   true,
+	}); err != nil {
+		t.Fatalf("OnSecondBar() error = %v", err)
+	}
+	svcCtx := &ServiceContext{
+		strategies: map[string]*strategyengine.TrendFollowingStrategy{
+			"BTCUSDT": strat,
+		},
+	}
+	got, ok := svcCtx.LatestSecondBarStatus("BTCUSDT")
+	if !ok {
+		t.Fatal("LatestSecondBarStatus() ok = false, want true")
+	}
+	if !got.Synthetic || got.Source != "depth_fallback" || got.Close != 100.5 || !got.IsFinal {
+		t.Fatalf("LatestSecondBarStatus() = %+v, want synthetic depth fallback snapshot", got)
+	}
+}
+
 func TestStrategyWarmupStatusUsesRuntimeThenCache(t *testing.T) {
 	svcCtx := &ServiceContext{
 		strategies:     map[string]*strategyengine.TrendFollowingStrategy{},
@@ -397,8 +502,9 @@ func TestUpsertStrategyLockedLoadsWarmupHistoryFromDisk(t *testing.T) {
 
 	svcCtx := &ServiceContext{
 		Config: config.Config{
-			SignalLogDir: "data/signal",
-			KlineLogDir:  baseDir,
+			SignalLogDir:    "data/signal",
+			KlineLogDir:     "data/kline",
+			SharedWarmupDir: baseDir,
 		},
 		strategies:     map[string]*strategyengine.TrendFollowingStrategy{},
 		strategyWarmup: map[string]strategyWarmupState{},
@@ -486,7 +592,7 @@ func TestEnsureStrategyWarmupLoadedLockedFallsBackToDiskWhenClickHouseFails(t *t
 
 	svcCtx := &ServiceContext{
 		Config: config.Config{
-			KlineLogDir: baseDir,
+			SharedWarmupDir: baseDir,
 			ClickHouse: config.ClickHouseConfig{
 				Enabled:  true,
 				Endpoint: "http://127.0.0.1:1",
@@ -499,8 +605,74 @@ func TestEnsureStrategyWarmupLoadedLockedFallsBackToDiskWhenClickHouseFails(t *t
 	svcCtx.ensureStrategyWarmupLoadedLocked("ETHUSDT")
 
 	state := svcCtx.strategyWarmup["ETHUSDT"]
-	if !strategyWarmupStateIsComplete(state) {
-		t.Fatalf("strategyWarmupState = %+v, want disk fallback to complete warmup", state)
+	if len(state.Klines4h) != 1 || len(state.Klines1h) != 1 || len(state.Klines15m) != 1 || len(state.Klines1m) != 1 {
+		t.Fatalf(
+			"strategyWarmupState lengths = 4h:%d 1h:%d 15m:%d 1m:%d, want disk fallback to restore one interval per file",
+			len(state.Klines4h),
+			len(state.Klines1h),
+			len(state.Klines15m),
+			len(state.Klines1m),
+		)
+	}
+}
+
+func TestEnsureStrategyWarmupLoadedLockedSupplementsPartialClickHouseWarmupFromDisk(t *testing.T) {
+	baseDir := t.TempDir()
+	writeWarmupLogForTest(t, baseDir, "BNBUSDT", "4h", "2026-05-03.jsonl", []string{
+		`{"symbol":"BNBUSDT","interval":"4h","openTime":"2026-05-03T20:00:00.000Z","closeTime":"2026-05-03T23:59:59.999Z","eventTime":"2026-05-04T00:04:00.000Z","isClosed":true,"open":619.76,"high":622.74,"low":618.20,"close":618.40,"volume":36509.70,"quoteVolume":22654132.66,"takerBuyVolume":18282.10,"takerBuyQuote":11345684.56,"isDirty":false,"dirtyReason":"final_tradable","isTradable":true,"isFinal":true,"ema21":619.03,"ema55":622.09,"rsi":47.05,"atr":3.46}`,
+	})
+	writeWarmupLogForTest(t, baseDir, "BNBUSDT", "4h", "2026-05-04.jsonl", []string{
+		`{"symbol":"BNBUSDT","interval":"4h","openTime":"2026-05-04T00:00:00.000Z","closeTime":"2026-05-04T03:59:59.999Z","eventTime":"2026-05-04T04:06:59.993Z","isClosed":true,"open":626.56,"high":627.10,"low":624.17,"close":626.64,"volume":32026.22,"quoteVolume":20038050.77,"takerBuyVolume":14847.43,"takerBuyQuote":9289623.22,"isDirty":true,"dirtyReason":"incomplete_bucket","isTradable":false,"isFinal":false,"ema21":620.07,"ema55":622.39,"rsi":61.82,"atr":4.19}`,
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, err := ioReadAllForTest(r)
+		if err != nil {
+			t.Fatalf("read request body error = %v", err)
+		}
+		query := string(bodyBytes)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(query, "interval = '4h'"):
+			fmt.Fprintln(w, `{"symbol":"BNBUSDT","interval":"4h","open_time_ms":"1777852800000","close_time_ms":"1777867199999","event_time_ms":"1777867619993","open":626.56,"high":627.10,"low":624.17,"close":626.64,"volume":32026.22,"quote_volume":20038050.77,"taker_buy_volume":14847.43,"is_closed":1,"is_dirty":1,"dirty_reason":"incomplete_bucket","is_tradable":0,"is_final":0,"ema21":620.07,"ema55":622.39,"rsi":61.82,"atr":4.19}`)
+		case strings.Contains(query, "interval = '1h'"):
+			fmt.Fprintln(w, `{"symbol":"BNBUSDT","interval":"1h","open_time_ms":"1777867200000","close_time_ms":"1777870799999","event_time_ms":"1777870820000","open":633.17,"high":633.40,"low":632.60,"close":632.76,"volume":100,"quote_volume":1000,"taker_buy_volume":50,"is_closed":1,"is_dirty":0,"dirty_reason":"final_tradable","is_tradable":1,"is_final":1,"ema21":622.35,"ema55":620.11,"rsi":80.76,"atr":3.08}`)
+		case strings.Contains(query, "interval = '15m'"):
+			fmt.Fprintln(w, `{"symbol":"BNBUSDT","interval":"15m","open_time_ms":"1777871700000","close_time_ms":"1777872599999","event_time_ms":"1777872600000","open":632.76,"high":633.10,"low":632.65,"close":632.76,"volume":100,"quote_volume":1000,"taker_buy_volume":50,"is_closed":1,"is_dirty":0,"dirty_reason":"final_tradable","is_tradable":1,"is_final":1,"ema21":628.60,"ema55":624.13,"rsi":67.10,"atr":2.19}`)
+		case strings.Contains(query, "interval = '1m'"):
+			fmt.Fprintln(w, `{"symbol":"BNBUSDT","interval":"1m","open_time_ms":"1777872900000","close_time_ms":"1777872959999","event_time_ms":"1777872960000","open":633.00,"high":633.10,"low":632.90,"close":633.05,"volume":10,"quote_volume":100,"taker_buy_volume":5,"is_closed":1,"is_dirty":0,"dirty_reason":"final_tradable","is_tradable":1,"is_final":1,"ema21":0,"ema55":0,"rsi":0,"atr":0}`)
+		default:
+			t.Fatalf("unexpected query: %s", query)
+		}
+	}))
+	defer server.Close()
+
+	svcCtx := &ServiceContext{
+		Config: config.Config{
+			SharedWarmupDir: baseDir,
+			ClickHouse: config.ClickHouseConfig{
+				Enabled:  true,
+				Endpoint: server.URL,
+				Database: "exchange_analytics",
+			},
+		},
+		strategyWarmup: map[string]strategyWarmupState{},
+	}
+
+	svcCtx.ensureStrategyWarmupLoadedLocked("BNBUSDT")
+
+	state := svcCtx.strategyWarmup["BNBUSDT"]
+	if len(state.Klines4h) != 2 {
+		t.Fatalf("len(Klines4h) = %d, want ClickHouse + disk merged into 2", len(state.Klines4h))
+	}
+	if len(state.Klines1h) != 1 || len(state.Klines15m) != 1 || len(state.Klines1m) != 1 {
+		t.Fatalf("unexpected other interval lengths: 1h=%d 15m=%d 1m=%d", len(state.Klines1h), len(state.Klines15m), len(state.Klines1m))
+	}
+	if got := state.Klines4h[0].OpenTime; got != time.Date(2026, 5, 3, 20, 0, 0, 0, time.UTC).UnixMilli() {
+		t.Fatalf("oldest 4h openTime = %d, want 2026-05-03T20:00:00Z", got)
+	}
+	if got := state.Klines4h[1].OpenTime; got != time.Date(2026, 5, 4, 0, 0, 0, 0, time.UTC).UnixMilli() {
+		t.Fatalf("latest 4h openTime = %d, want 2026-05-04T00:00:00Z", got)
 	}
 }
 

@@ -24,6 +24,7 @@ type Config struct {
 		Topics        struct {
 			Kline             string
 			Depth             string
+			Trade             string
 			Signal            string
 			HarvestPathSignal string
 		}
@@ -31,8 +32,9 @@ type Config struct {
 
 	Execution zrpc.RpcClientConf
 
-	KlineLogDir  string
-	SignalLogDir string
+	KlineLogDir     string
+	SharedWarmupDir string `json:",default=runtime/shared/kline/warmup"`
+	SignalLogDir    string
 
 	Strategies []StrategyConfig
 	Templates  map[string]map[string]float64

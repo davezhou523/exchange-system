@@ -5,6 +5,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,8 +23,6 @@ type IntervalDef struct {
 // Standard intervals aggregated from 1m klines.
 var StandardIntervals = []IntervalDef{
 	{Name: "1m", Duration: 1 * time.Minute},
-	{Name: "3m", Duration: 3 * time.Minute},
-	{Name: "5m", Duration: 5 * time.Minute},
 	{Name: "15m", Duration: 15 * time.Minute},
 	{Name: "1h", Duration: 1 * time.Hour},
 	{Name: "4h", Duration: 4 * time.Hour},
@@ -79,7 +78,6 @@ type IntervalIndicatorConfig struct {
 type Metrics struct {
 	Received1m       atomic.Int64
 	Emitted1m        atomic.Int64
-	Emitted3m        atomic.Int64
 	Emitted15m       atomic.Int64
 	Emitted1h        atomic.Int64
 	Emitted4h        atomic.Int64
@@ -97,6 +95,7 @@ type KlineAggregator struct {
 	producer        KafkaProducer
 	metrics         Metrics
 	klineLogDir     string
+	sharedWarmupDir string
 	watermarkDelay  time.Duration
 	indicatorParams IndicatorParams
 	// intervalIndicators 为每个周期独立配置指标参数，实现"指标按周期计算"
@@ -212,6 +211,46 @@ func NewKlineAggregator(intervals []IntervalDef, producer KafkaProducer, klineLo
 	a.asyncSenderWg.Add(1)
 	go a.asyncKafkaSender()
 	return a
+}
+
+// SetSharedWarmupDir 设置 warmup 共享目录，供其他服务读取启动恢复所需的预热快照。
+func (a *KlineAggregator) SetSharedWarmupDir(dir string) {
+	if a == nil {
+		return
+	}
+	a.sharedWarmupDir = dir
+}
+
+// EnsureWarmupForSymbols 在服务启动阶段主动创建指定交易对的 worker，并立即触发历史预热。
+// 这样无需等待首条 websocket K 线到来，就能先把 warmup 快照落到共享目录。
+func (a *KlineAggregator) EnsureWarmupForSymbols(symbols []string) {
+	if a == nil {
+		return
+	}
+	for _, symbol := range normalizeWarmupSymbols(symbols) {
+		a.getOrCreateWorker(symbol)
+	}
+}
+
+// normalizeWarmupSymbols 统一清洗交易对列表，避免启动预热时因空值、大小写或重复导致重复创建 worker。
+func normalizeWarmupSymbols(symbols []string) []string {
+	if len(symbols) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(symbols))
+	seen := make(map[string]struct{}, len(symbols))
+	for _, symbol := range symbols {
+		normalized := strings.ToUpper(strings.TrimSpace(symbol))
+		if normalized == "" {
+			continue
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		result = append(result, normalized)
+	}
+	return result
 }
 
 // SetIntervalIndicators 设置每个周期的独立指标参数。
@@ -459,7 +498,6 @@ func (a *KlineAggregator) GetMetrics() Metrics {
 	m := Metrics{}
 	m.Received1m.Store(a.metrics.Received1m.Load())
 	m.Emitted1m.Store(a.metrics.Emitted1m.Load())
-	m.Emitted3m.Store(a.metrics.Emitted3m.Load())
 	m.Emitted15m.Store(a.metrics.Emitted15m.Load())
 	m.Emitted1h.Store(a.metrics.Emitted1h.Load())
 	m.Emitted4h.Store(a.metrics.Emitted4h.Load())
@@ -776,8 +814,9 @@ func (w *symbolWorker) processKline(k *market.Kline) {
 			} else if w.agg.watermarkDelay > 0 {
 				// 优化：如果当前 watermark 已经过了这个 bucket 的 closeTime，
 				// 直接 emit 而不推入 watermark 堆，避免多等一轮 1m K线。
-				// 典型场景：3m bucket 在 07:57 的 1m 到来时 flush，
-				// closeTime=07:56:59.999，watermark=07:57:57.999，
+				// 典型场景：15m bucket 在 07:45 这一桶完成后，
+				// 等到 08:00 的 1m 到来时触发 flush，
+				// closeTime=07:59:59.999，watermark=08:00:57.999，
 				// 已过 closeTime，无需等待。
 				if b.CloseTime <= watermark {
 					w.agg.emitKline(context.Background(), w.symbol, iv.Name, b)

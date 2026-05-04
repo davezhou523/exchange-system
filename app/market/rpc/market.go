@@ -100,7 +100,7 @@ func main() {
 }
 
 func cleanupMarketDataDirs(c config.Config) error {
-	dirs := []string{c.KlineLogDir}
+	dirs := []string{c.KlineLogDir, c.SharedWarmupDir}
 	if c.UniversePool.LogDir != "" {
 		dirs = append(dirs, c.UniversePool.LogDir)
 	}

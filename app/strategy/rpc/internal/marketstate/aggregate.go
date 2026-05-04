@@ -77,10 +77,14 @@ func Aggregate(now time.Time, analyses map[string]regimejudge.Analysis, results 
 		out.Confidence = bestConfidenceSum / float64(stateCounts[bestState])
 	}
 	if bestMatchCount > 0 {
+		// dominant_match_surface 表示本轮全局状态优先由统一判势命中面主导，
+		// 即健康且新鲜的 analysis 中，某类形态（趋势/震荡/突破）的命中数量最多，
+		// 因此全局状态不是单纯看最终 result 落点，而是优先跟随“命中面最强”的状态。
 		out.Reason = "dominant_match_surface"
 		out.DominantSymbols = matchSymbols[bestState]
 		return out
 	}
+	// dominant_state 表示没有明显命中面优势时，退回按最终 result 状态分布选主导状态。
 	out.Reason = "dominant_state"
 	out.DominantSymbols = stateSymbols[bestState]
 	return out

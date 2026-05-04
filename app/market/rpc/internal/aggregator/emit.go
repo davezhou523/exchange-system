@@ -132,8 +132,6 @@ func (a *KlineAggregator) asyncKafkaSender() {
 			switch k.Interval {
 			case "1m":
 				a.metrics.Emitted1m.Add(1)
-			case "3m":
-				a.metrics.Emitted3m.Add(1)
 			case "15m":
 				a.metrics.Emitted15m.Add(1)
 			case "1h":
@@ -156,8 +154,6 @@ func (a *KlineAggregator) asyncKafkaSender() {
 					switch k.Interval {
 					case "1m":
 						a.metrics.Emitted1m.Add(1)
-					case "3m":
-						a.metrics.Emitted3m.Add(1)
 					case "15m":
 						a.metrics.Emitted15m.Add(1)
 					case "1h":
@@ -222,10 +218,6 @@ func (a *KlineAggregator) emitKline(ctx context.Context, symbol, interval string
 		k.Open, k.High, k.Low, k.Close,
 		k.Volume, k.QuoteVolume, k.TakerBuyVolume, k.TakerBuyQuote, k.FirstTradeId, k.LastTradeId, k.NumTrades,
 		k.IsDirty, b.dirtyReasonText(), k.IsTradable, k.IsFinal, indicatorStr)
-	if k.Interval == "5m" {
-		log.Printf("[aggregated 5m emit] symbol=%s closeTime=%s eventTime=%s isDirty=%v isFinal=%v ema21=%.2f ema55=%.2f rsi=%.2f atr=%.4f",
-			k.Symbol, closeStr, eventStr, k.IsDirty, k.IsFinal, k.Ema21, k.Ema55, k.Rsi, k.Atr)
-	}
 
 	// Persist to jsonl file for verification
 	a.writeKlineLog(k, b.dirtyReasonText())
@@ -261,7 +253,7 @@ func formatIndicatorFloat(f float64) float64 {
 }
 
 // writeKlineLog appends an aggregated kline as JSON line to a daily log file.
-// Format: data/kline/ETHUSDT/3m/2026-04-11.jsonl
+// Format: data/kline/ETHUSDT/15m/2026-04-11.jsonl
 func (a *KlineAggregator) writeKlineLog(k *market.Kline, dirtyReason string) {
 	if a.klineLogDir == "" {
 		return

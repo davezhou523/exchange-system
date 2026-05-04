@@ -24,10 +24,23 @@ type Consumer struct {
 	klineLogDir  string
 	klineLogMu   sync.Mutex
 	klineLogDate map[string]*os.File
+	streamLogMu  sync.Mutex
+	streamLogAt  map[string]time.Time
+	tradeSummary map[string]tradeLogSummary
+}
+
+type tradeLogSummary struct {
+	WindowStartedAt time.Time
+	Count           int
+	TotalQty        float64
+	LastPrice       float64
+	LastTradeTime   int64
+	LastBuyerMaker  bool
 }
 
 type MarketDataHandler func(kline *market.Kline) error
 type DepthHandler func(depth *market.Depth) error
+type TradeHandler func(trade *market.Trade) error
 
 func NewConsumer(brokers []string, groupID string, topic string, klineLogDir string, initialOffset string) (*Consumer, error) {
 	if groupID == "" {
@@ -52,6 +65,8 @@ func NewConsumer(brokers []string, groupID string, topic string, klineLogDir str
 		groupID:      groupID,
 		klineLogDir:  klineLogDir,
 		klineLogDate: make(map[string]*os.File),
+		streamLogAt:  make(map[string]time.Time),
+		tradeSummary: make(map[string]tradeLogSummary),
 	}, nil
 }
 
@@ -129,6 +144,20 @@ func (c *Consumer) StartConsumingDepth(ctx context.Context, handler DepthHandler
 	return nil
 }
 
+// StartConsumingTrade 启动 trade 主题消费循环，并把每条成交消息交给上层处理。
+func (c *Consumer) StartConsumingTrade(ctx context.Context, handler TradeHandler) error {
+	if c == nil || c.group == nil {
+		return fmt.Errorf("consumer group not initialized")
+	}
+	if handler == nil {
+		return fmt.Errorf("trade handler is nil")
+	}
+
+	h := &marketTradeGroupHandler{handler: handler, groupID: c.groupID, topic: c.topic, consumer: c}
+	go c.consumeLoop(ctx, h)
+	return nil
+}
+
 func (c *Consumer) consumeLoop(ctx context.Context, handler sarama.ConsumerGroupHandler) {
 	attempt := 0
 	for {
@@ -179,6 +208,13 @@ type marketDepthGroupHandler struct {
 	topic   string
 }
 
+type marketTradeGroupHandler struct {
+	handler  TradeHandler
+	groupID  string
+	topic    string
+	consumer *Consumer
+}
+
 func (h *marketKlineGroupHandler) Setup(s sarama.ConsumerGroupSession) error {
 	log.Printf("kafka consumer-group setup group=%s topic=%s member=%s generation=%d claims=%v", h.groupID, h.topic, s.MemberID(), s.GenerationID(), s.Claims())
 	return nil
@@ -196,6 +232,18 @@ func (h *marketDepthGroupHandler) Setup(s sarama.ConsumerGroupSession) error {
 
 func (h *marketDepthGroupHandler) Cleanup(s sarama.ConsumerGroupSession) error {
 	log.Printf("kafka depth consumer-group cleanup group=%s topic=%s member=%s generation=%d", h.groupID, h.topic, s.MemberID(), s.GenerationID())
+	return nil
+}
+
+// Setup 记录 trade consumer-group 建立会话时的基础上下文，便于排查订阅状态。
+func (h *marketTradeGroupHandler) Setup(s sarama.ConsumerGroupSession) error {
+	log.Printf("kafka trade consumer-group setup group=%s topic=%s member=%s generation=%d claims=%v", h.groupID, h.topic, s.MemberID(), s.GenerationID(), s.Claims())
+	return nil
+}
+
+// Cleanup 记录 trade consumer-group 退出会话的现场信息，方便定位重平衡问题。
+func (h *marketTradeGroupHandler) Cleanup(s sarama.ConsumerGroupSession) error {
+	log.Printf("kafka trade consumer-group cleanup group=%s topic=%s member=%s generation=%d", h.groupID, h.topic, s.MemberID(), s.GenerationID())
 	return nil
 }
 
@@ -265,6 +313,118 @@ func (h *marketDepthGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSessi
 		session.MarkMessage(msg, "")
 	}
 	return nil
+}
+
+// ConsumeClaim 顺序消费 trade 消息，并在反序列化后转交给业务层做秒级聚合。
+func (h *marketTradeGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	for msg := range claim.Messages() {
+		if msg == nil {
+			continue
+		}
+		var trade market.Trade
+		if err := json.Unmarshal(msg.Value, &trade); err != nil {
+			log.Printf("kafka trade unmarshal failed group=%s topic=%s partition=%d offset=%d err=%v", h.groupID, msg.Topic, msg.Partition, msg.Offset, err)
+			session.MarkMessage(msg, "")
+			continue
+		}
+		if h.shouldLogTradeSample(&trade) {
+			tradeTime := time.UnixMilli(trade.Timestamp).Format("15:04:05.000")
+			log.Printf("[kafka trade][sampled] symbol=%s tradeId=%d tradeTime=%s price=%.6f qty=%.6f buyerMaker=%v partition=%d offset=%d",
+				trade.Symbol,
+				trade.TradeId,
+				tradeTime,
+				trade.Price,
+				trade.Quantity,
+				trade.IsBuyerMaker,
+				msg.Partition,
+				msg.Offset,
+			)
+		}
+		h.recordTradeSummary(&trade)
+		if err := h.handler(&trade); err != nil {
+			log.Printf("kafka trade handler failed group=%s topic=%s partition=%d offset=%d symbol=%s trade_id=%d err=%v", h.groupID, msg.Topic, msg.Partition, msg.Offset, trade.Symbol, trade.TradeId, err)
+		}
+		session.MarkMessage(msg, "")
+	}
+	return nil
+}
+
+// shouldLogTradeSample 对高频 trade 打样本日志，避免活跃币对逐笔成交刷满控制台。
+func (h *marketTradeGroupHandler) shouldLogTradeSample(trade *market.Trade) bool {
+	if h == nil || h.consumer == nil || trade == nil || strings.TrimSpace(trade.GetSymbol()) == "" {
+		return false
+	}
+	return h.consumer.shouldLogStreamSample("trade", trade.GetSymbol(), 5*time.Second)
+}
+
+// recordTradeSummary 聚合最近一个时间窗内的 trade 数量、累计量和最新价格，便于线上快速判断流量是否正常。
+func (h *marketTradeGroupHandler) recordTradeSummary(trade *market.Trade) {
+	if h == nil || h.consumer == nil || trade == nil || strings.TrimSpace(trade.GetSymbol()) == "" {
+		return
+	}
+	h.consumer.recordTradeSummary(trade, 5*time.Second)
+}
+
+// shouldLogStreamSample 按 streamType+symbol 做简单时间节流，用一条样本日志代表一段高频流量。
+func (c *Consumer) shouldLogStreamSample(streamType, symbol string, interval time.Duration) bool {
+	if c == nil || interval <= 0 {
+		return false
+	}
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	streamType = strings.TrimSpace(streamType)
+	if symbol == "" || streamType == "" {
+		return false
+	}
+	now := time.Now()
+	key := streamType + ":" + symbol
+	c.streamLogMu.Lock()
+	defer c.streamLogMu.Unlock()
+	lastAt := c.streamLogAt[key]
+	if !lastAt.IsZero() && now.Sub(lastAt) < interval {
+		return false
+	}
+	c.streamLogAt[key] = now
+	return true
+}
+
+// recordTradeSummary 按 symbol 聚合一段时间内的 trade 摘要，窗口结束时输出一条 summary 日志。
+func (c *Consumer) recordTradeSummary(trade *market.Trade, interval time.Duration) {
+	if c == nil || trade == nil || interval <= 0 {
+		return
+	}
+	symbol := strings.ToUpper(strings.TrimSpace(trade.GetSymbol()))
+	if symbol == "" {
+		return
+	}
+	now := time.Now()
+	c.streamLogMu.Lock()
+	defer c.streamLogMu.Unlock()
+	if c.tradeSummary == nil {
+		c.tradeSummary = make(map[string]tradeLogSummary)
+	}
+	summary := c.tradeSummary[symbol]
+	if summary.WindowStartedAt.IsZero() {
+		summary.WindowStartedAt = now
+	}
+	summary.Count++
+	summary.TotalQty += trade.GetQuantity()
+	summary.LastPrice = trade.GetPrice()
+	summary.LastTradeTime = trade.GetTimestamp()
+	summary.LastBuyerMaker = trade.GetIsBuyerMaker()
+	if now.Sub(summary.WindowStartedAt) >= interval {
+		log.Printf("[kafka trade][summary] symbol=%s window_start=%s window_sec=%.0f trades=%d total_qty=%.6f last_price=%.6f last_trade_time=%s buyer_maker_last=%v",
+			symbol,
+			summary.WindowStartedAt.UTC().Format("15:04:05"),
+			interval.Seconds(),
+			summary.Count,
+			summary.TotalQty,
+			summary.LastPrice,
+			time.UnixMilli(summary.LastTradeTime).UTC().Format("15:04:05.000"),
+			summary.LastBuyerMaker,
+		)
+		summary = tradeLogSummary{}
+	}
+	c.tradeSummary[symbol] = summary
 }
 
 func (c *Consumer) Close() error {

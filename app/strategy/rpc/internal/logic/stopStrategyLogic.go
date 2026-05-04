@@ -29,9 +29,12 @@ func (l *StopStrategyLogic) StopStrategy(in *strategy.StrategyRequest) (*strateg
 	strategyId := in.GetStrategyId()
 	l.svcCtx.StopStrategy(strategyId)
 	return &strategy.StrategyStatus{
-		StrategyId: strategyId,
-		Status:     "STOPPED",
-		Message:    "stopped",
-		LastUpdate: time.Now().UnixMilli(),
+		StrategyId:  strategyId,
+		Status:      "STOPPED",
+		StatusDesc:  describeServiceStatus("STOPPED"),
+		Message:     statusMessageSummary("stopped"),
+		MessageCode: "stopped",
+		MessageDesc: describeStatusMessage("stopped"),
+		LastUpdate:  time.Now().UnixMilli(),
 	}, nil
 }

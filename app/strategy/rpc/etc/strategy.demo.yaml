@@ -15,6 +15,7 @@ Kafka:
   Topics:
     Kline: kline
     Depth: ""
+    Trade: trade
     Signal: signal
     HarvestPathSignal: harvest_path_signal
 
@@ -73,6 +74,8 @@ Templates:
     1m_rsi_bias_short: 44
     1m_min_holding_bars: 6
     1m_ema_exit_buffer_atr: 0.35
+    exit_emergency_1s_synthetic_drop_mult: 1.5
+    exit_emergency_1s_synthetic_reduce_pct: 0.35
     harvest_path_model_enabled: 1
     harvest_path_publish_threshold: 0.60
     harvest_path_lookback: 20
@@ -123,6 +126,8 @@ Templates:
     1m_rsi_bias_short: 43
     1m_min_holding_bars: 6
     1m_ema_exit_buffer_atr: 0.28
+    exit_emergency_1s_synthetic_drop_mult: 1.5
+    exit_emergency_1s_synthetic_reduce_pct: 0.35
     harvest_path_model_enabled: 1
     harvest_path_publish_threshold: 0.60
     harvest_path_lookback: 20
@@ -173,6 +178,8 @@ Templates:
     1m_rsi_bias_short: 45
     1m_min_holding_bars: 5
     1m_ema_exit_buffer_atr: 0.30
+    exit_emergency_1s_synthetic_drop_mult: 1.5
+    exit_emergency_1s_synthetic_reduce_pct: 0.35
     harvest_path_model_enabled: 1
     harvest_path_publish_threshold: 0.60
     harvest_path_lookback: 20
@@ -223,6 +230,8 @@ Templates:
     1m_rsi_bias_short: 43
     1m_min_holding_bars: 7
     1m_ema_exit_buffer_atr: 0.40
+    exit_emergency_1s_synthetic_drop_mult: 1.5
+    exit_emergency_1s_synthetic_reduce_pct: 0.35
     harvest_path_model_enabled: 1
     harvest_path_publish_threshold: 0.60
     harvest_path_lookback: 20
@@ -273,6 +282,8 @@ Templates:
     1m_rsi_bias_short: 42
     1m_min_holding_bars: 8
     1m_ema_exit_buffer_atr: 0.50
+    exit_emergency_1s_synthetic_drop_mult: 1.5
+    exit_emergency_1s_synthetic_reduce_pct: 0.35
     harvest_path_model_enabled: 1
     harvest_path_publish_threshold: 0.60
     harvest_path_lookback: 20
@@ -319,6 +330,8 @@ Templates:
     1m_rsi_bias_short: 44
     1m_min_holding_bars: 5
     1m_ema_exit_buffer_atr: 0.30
+    exit_emergency_1s_synthetic_drop_mult: 1.5
+    exit_emergency_1s_synthetic_reduce_pct: 0.35
     strategy_variant: 1
     breakout_volume_ratio_min: 1.2
     breakout_entry_buffer_atr: 0.1
@@ -371,6 +384,8 @@ Templates:
     1m_rsi_bias_short: 48
     1m_min_holding_bars: 4
     1m_ema_exit_buffer_atr: 0.25
+    exit_emergency_1s_synthetic_drop_mult: 1.5
+    exit_emergency_1s_synthetic_reduce_pct: 0.35
     strategy_variant: 2
     range_target_atr_multiplier: 1.2
     range_h1_adx_period: 14
@@ -410,23 +425,23 @@ Strategies:
     template: eth-core
   - name: trend-following
     symbol: BTCUSDT
-    enabled: true
+    enabled: false
     template: btc-core
   - name: trend-following
     symbol: BNBUSDT
-    enabled: true
+    enabled: false
     template: high-beta
   - name: trend-following
     symbol: SOLUSDT
-    enabled: true
+    enabled: false
     template: high-beta
   - name: trend-following
     symbol: DOGEUSDT
-    enabled: true
+    enabled: false
     template: high-beta
   - name: trend-following
     symbol: PEPEUSDT
-    enabled: true
+    enabled: false
     template: high-beta
 
 Universe:
@@ -441,19 +456,9 @@ Universe:
   RequireClean: true
   CandidateSymbols:
     - ETHUSDT
-    - BTCUSDT
-    - BNBUSDT
-    - SOLUSDT
-    - DOGEUSDT
-    - PEPEUSDT
   RouterConfig:
     StaticTemplateMap:
       ETHUSDT: eth-core
-      BTCUSDT: btc-core
-      BNBUSDT: high-beta
-      SOLUSDT: high-beta
-      DOGEUSDT: high-beta
-      PEPEUSDT: high-beta
     RangeTemplate: range-core
     BreakoutTemplate: breakout-core
     BTCTrendTemplate: btc-trend
@@ -513,4 +518,5 @@ HarvestPathLSTM:
   TimeoutMs: 2500
 
 KlineLogDir: data/kline
+SharedWarmupDir: runtime/shared/kline/warmup
 SignalLogDir: data/signal

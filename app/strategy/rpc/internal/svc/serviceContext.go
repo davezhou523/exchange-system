@@ -43,10 +43,14 @@ type ServiceContext struct {
 	harvestPathLSTMPredictor *harvestpathmodel.LSTMPredictor
 	marketConsumer           *kafka.Consumer
 	depthConsumer            *kafka.Consumer
+	tradeConsumer            *kafka.Consumer
 	executionCli             executionservice.ExecutionService
 
 	mu                  sync.RWMutex
 	strategies          map[string]*strategyengine.TrendFollowingStrategy
+	secondBarAssemblers map[string]*SecondBarAssembler
+	secondBarLogMu      sync.Mutex
+	secondBarLogAt      map[string]time.Time
 	strategyConfigs     map[string]config.StrategyConfig
 	universeSelector    *universe.Selector
 	marketStateDetector marketstate.Detector
@@ -90,6 +94,8 @@ type strategyWarmupState struct {
 	Klines1m  []market.Kline
 }
 
+const secondBarDepthFallbackParam = "exit_emergency_1s_depth_fallback"
+
 // StrategyWarmupStatusView 汇总状态查询需要的多周期 warmup 长度，并标记数据来源。
 type StrategyWarmupStatusView struct {
 	HistoryLen4h      int32
@@ -99,6 +105,20 @@ type StrategyWarmupStatusView struct {
 	Source            string
 	Status            string
 	IncompleteReasons []string
+}
+
+// LatestSecondBarStatusView 汇总最近一条秒级行情的来源与关键价格，供状态接口直接确认 fallback 是否在工作。
+type LatestSecondBarStatusView struct {
+	OpenTimeMs  int64
+	CloseTimeMs int64
+	Open        float64
+	High        float64
+	Low         float64
+	Close       float64
+	Volume      float64
+	IsFinal     bool
+	Synthetic   bool
+	Source      string
 }
 
 // resolveStrategyParameters 合并模板参数、显式参数和 overrides，生成最终策略参数。
@@ -497,7 +517,7 @@ func strategyWarmupLimit(interval string) int {
 	}
 }
 
-// ensureStrategyWarmupLoadedLocked 在创建策略实例前按需从本地 K 线日志恢复最近多周期快照。
+// ensureStrategyWarmupLoadedLocked 在创建策略实例前按需从 ClickHouse 和共享 warmup 目录恢复最近多周期快照。
 func (s *ServiceContext) ensureStrategyWarmupLoadedLocked(symbol string) {
 	if s == nil || symbol == "" || s.strategyWarmup == nil {
 		return
@@ -517,35 +537,47 @@ func (s *ServiceContext) ensureStrategyWarmupLoadedLocked(symbol string) {
 	}
 
 	if !strategyWarmupStateIsComplete(state) {
-		diskLoaded, diskErr := loadStrategyWarmupStateFromDisk(s.Config.KlineLogDir, symbol)
+		diskLoaded, diskErr := loadStrategyWarmupStateFromDisk(s.Config.SharedWarmupDir, symbol)
 		if diskErr != nil {
-			log.Printf("[strategy-warmup] restore symbol=%s source=disk failed: %v", symbol, diskErr)
+			log.Printf(
+				"[strategy-warmup] restore symbol=%s source=shared_warmup shared_dir=%s failed: %v",
+				symbol,
+				formatStrategyWarmupSharedDir(s.Config.SharedWarmupDir),
+				diskErr,
+			)
 		} else if strategyWarmupStateHasData(diskLoaded) {
 			state = mergeStrategyWarmupState(state, diskLoaded)
-			sources = append(sources, "disk")
+			sources = append(sources, "shared_warmup")
 		}
 	}
 
 	if !strategyWarmupStateHasData(state) {
-		log.Printf("[strategy-warmup] restore symbol=%s skipped reason=no_clickhouse_or_local_history", symbol)
+		log.Printf(
+			"[strategy-warmup] restore symbol=%s shared_dir=%s skipped reason=no_clickhouse_or_shared_warmup_history",
+			symbol,
+			formatStrategyWarmupSharedDir(s.Config.SharedWarmupDir),
+		)
 		return
 	}
 
 	s.strategyWarmup[symbol] = state
 	source := strings.Join(sources, "+")
+	sharedDir := formatStrategyWarmupSharedDir(s.Config.SharedWarmupDir)
+	restoredFromShared := strategyWarmupRestoredFromShared(source)
 	log.Printf(
-		"[strategy-warmup] symbol=%s interval=all source=%s severity=info event=restore_count restored_4h=%d restored_1h=%d restored_15m=%d restored_1m=%d",
+		"[strategy-warmup] symbol=%s interval=all source=%s severity=info event=restore_count shared_dir=%s restored_from_shared=%t %s",
 		symbol,
 		source,
-		len(state.Klines4h),
-		len(state.Klines1h),
-		len(state.Klines15m),
-		len(state.Klines1m),
+		sharedDir,
+		restoredFromShared,
+		formatStrategyWarmupCountFields(state),
 	)
 	log.Printf(
-		"[strategy-warmup] symbol=%s interval=all source=%s severity=info event=restore_sync %s",
+		"[strategy-warmup] symbol=%s interval=all source=%s severity=info event=restore_sync shared_dir=%s restored_from_shared=%t %s",
 		symbol,
 		source,
+		sharedDir,
+		restoredFromShared,
 		formatStrategyWarmupSyncFields(state, clickhouseLoaded),
 	)
 	logStrategyWarmupDeltaEvent(symbol, source, "4h", state.Klines4h, clickhouseLoaded.Klines4h)
@@ -826,6 +858,25 @@ func strategyWarmupStateHasData(state strategyWarmupState) bool {
 		len(state.Klines1m) > 0
 }
 
+// formatStrategyWarmupSharedDir 统一输出共享 warmup 目录，未配置时给出占位值，方便日志采集稳定取值。
+func formatStrategyWarmupSharedDir(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return "n/a"
+	}
+	return dir
+}
+
+// strategyWarmupRestoredFromShared 判断本次恢复是否实际使用了共享 warmup 目录，便于线上快速确认 fallback 是否生效。
+func strategyWarmupRestoredFromShared(source string) bool {
+	for _, item := range strings.Split(strings.TrimSpace(source), "+") {
+		if strings.TrimSpace(item) == "shared_warmup" {
+			return true
+		}
+	}
+	return false
+}
+
 // latestStrategyWarmupOpenTime 返回某个周期当前恢复到的最新开盘时间，便于启动日志核对。
 func latestStrategyWarmupOpenTime(klines []market.Kline) string {
 	if len(klines) == 0 {
@@ -838,35 +889,49 @@ func latestStrategyWarmupOpenTime(klines []market.Kline) string {
 	return formatAnalyticsTime(time.UnixMilli(latest))
 }
 
-// formatStrategyWarmupSyncFields 按固定周期顺序输出 latest_open、delta、sync 三元字段，方便日志采集复用统一模板。
-func formatStrategyWarmupSyncFields(restored, clickhouse strategyWarmupState) string {
-	parts := []string{
-		fmt.Sprintf(
-			"latest_open_4h=%s delta_vs_clickhouse_4h_min=%s sync_4h=%s",
-			latestStrategyWarmupOpenTime(restored.Klines4h),
-			strategyWarmupOpenDeltaMinutes(restored.Klines4h, clickhouse.Klines4h),
-			strategyWarmupOpenDeltaStatus(restored.Klines4h, clickhouse.Klines4h),
-		),
-		fmt.Sprintf(
-			"latest_open_1h=%s delta_vs_clickhouse_1h_min=%s sync_1h=%s",
-			latestStrategyWarmupOpenTime(restored.Klines1h),
-			strategyWarmupOpenDeltaMinutes(restored.Klines1h, clickhouse.Klines1h),
-			strategyWarmupOpenDeltaStatus(restored.Klines1h, clickhouse.Klines1h),
-		),
-		fmt.Sprintf(
-			"latest_open_15m=%s delta_vs_clickhouse_15m_min=%s sync_15m=%s",
-			latestStrategyWarmupOpenTime(restored.Klines15m),
-			strategyWarmupOpenDeltaMinutes(restored.Klines15m, clickhouse.Klines15m),
-			strategyWarmupOpenDeltaStatus(restored.Klines15m, clickhouse.Klines15m),
-		),
-		fmt.Sprintf(
-			"latest_open_1m=%s delta_vs_clickhouse_1m_min=%s sync_1m=%s",
-			latestStrategyWarmupOpenTime(restored.Klines1m),
-			strategyWarmupOpenDeltaMinutes(restored.Klines1m, clickhouse.Klines1m),
-			strategyWarmupOpenDeltaStatus(restored.Klines1m, clickhouse.Klines1m),
-		),
+type strategyWarmupIntervalSpec struct {
+	name        string
+	selectKline func(strategyWarmupState) []market.Kline
+}
+
+var strategyWarmupIntervalSpecs = []strategyWarmupIntervalSpec{
+	{name: "4h", selectKline: func(state strategyWarmupState) []market.Kline { return state.Klines4h }},
+	{name: "1h", selectKline: func(state strategyWarmupState) []market.Kline { return state.Klines1h }},
+	{name: "15m", selectKline: func(state strategyWarmupState) []market.Kline { return state.Klines15m }},
+	{name: "1m", selectKline: func(state strategyWarmupState) []market.Kline { return state.Klines1m }},
+}
+
+// renderStrategyWarmupFields 按固定周期顺序渲染 warmup 日志字段，避免多处手工维护字段顺序。
+func renderStrategyWarmupFields(render func(spec strategyWarmupIntervalSpec) string) string {
+	parts := make([]string, 0, len(strategyWarmupIntervalSpecs))
+	for _, spec := range strategyWarmupIntervalSpecs {
+		parts = append(parts, render(spec))
 	}
 	return strings.Join(parts, " ")
+}
+
+// formatStrategyWarmupSyncFields 按固定周期顺序输出 latest_open、delta、sync 三元字段，方便日志采集复用统一模板。
+func formatStrategyWarmupSyncFields(restored, clickhouse strategyWarmupState) string {
+	return renderStrategyWarmupFields(func(spec strategyWarmupIntervalSpec) string {
+		restoredKlines := spec.selectKline(restored)
+		clickhouseKlines := spec.selectKline(clickhouse)
+		return fmt.Sprintf(
+			"latest_open_%s=%s delta_vs_clickhouse_%s_min=%s sync_%s=%s",
+			spec.name,
+			latestStrategyWarmupOpenTime(restoredKlines),
+			spec.name,
+			strategyWarmupOpenDeltaMinutes(restoredKlines, clickhouseKlines),
+			spec.name,
+			strategyWarmupOpenDeltaStatus(restoredKlines, clickhouseKlines),
+		)
+	})
+}
+
+// formatStrategyWarmupCountFields 按固定周期顺序输出恢复数量字段，方便与 restore_sync 使用同一套模板思路。
+func formatStrategyWarmupCountFields(state strategyWarmupState) string {
+	return renderStrategyWarmupFields(func(spec strategyWarmupIntervalSpec) string {
+		return fmt.Sprintf("restored_%s=%d", spec.name, len(spec.selectKline(state)))
+	})
 }
 
 // latestStrategyWarmupOpenTimeMillis 返回某个周期当前恢复到的最新开盘时间戳。
@@ -963,30 +1028,57 @@ func strategyWarmupIntervalDurationMillis(interval string) int64 {
 	}
 }
 
-// strategyWarmupStateIsComplete 判断 warmup 是否已覆盖策略依赖的全部周期。
+// strategyWarmupStateIsComplete 判断 warmup 是否已经达到各周期目标窗口，避免只拿到少量高周期历史就提前停止 fallback。
 func strategyWarmupStateIsComplete(state strategyWarmupState) bool {
-	return len(state.Klines4h) > 0 &&
-		len(state.Klines1h) > 0 &&
-		len(state.Klines15m) > 0 &&
-		len(state.Klines1m) > 0
+	return len(state.Klines4h) >= strategyWarmupLimit("4h") &&
+		len(state.Klines1h) >= strategyWarmupLimit("1h") &&
+		len(state.Klines15m) >= strategyWarmupLimit("15m") &&
+		len(state.Klines1m) >= strategyWarmupLimit("1m")
 }
 
-// mergeStrategyWarmupState 优先保留内存中的较新缓存，只用磁盘数据补齐缺失周期。
+// mergeStrategyWarmupState 以当前缓存为主，按 openTime 合并补齐不足窗口，避免 ClickHouse 已有少量数据时跳过本地历史补足。
 func mergeStrategyWarmupState(current, loaded strategyWarmupState) strategyWarmupState {
-	merged := current
-	if len(merged.Klines4h) == 0 {
-		merged.Klines4h = loaded.Klines4h
+	return strategyWarmupState{
+		Klines4h:  mergeStrategyWarmupKlines(current.Klines4h, loaded.Klines4h, strategyWarmupLimit("4h")),
+		Klines1h:  mergeStrategyWarmupKlines(current.Klines1h, loaded.Klines1h, strategyWarmupLimit("1h")),
+		Klines15m: mergeStrategyWarmupKlines(current.Klines15m, loaded.Klines15m, strategyWarmupLimit("15m")),
+		Klines1m:  mergeStrategyWarmupKlines(current.Klines1m, loaded.Klines1m, strategyWarmupLimit("1m")),
 	}
-	if len(merged.Klines1h) == 0 {
-		merged.Klines1h = loaded.Klines1h
+}
+
+// mergeStrategyWarmupKlines 合并两路 warmup K 线，按 openTime 去重并保留更完整的版本，再截取最近窗口。
+func mergeStrategyWarmupKlines(current, loaded []market.Kline, limit int) []market.Kline {
+	switch {
+	case limit <= 0:
+		return nil
+	case len(current) == 0:
+		return sortStrategyWarmupKlines(strategyWarmupBestByOpenTime(loaded), limit)
+	case len(loaded) == 0 && len(current) <= limit:
+		return current
 	}
-	if len(merged.Klines15m) == 0 {
-		merged.Klines15m = loaded.Klines15m
+
+	bestByOpenTime := strategyWarmupBestByOpenTime(current)
+	for i := range loaded {
+		item := loaded[i]
+		existing, ok := bestByOpenTime[item.OpenTime]
+		if !ok || shouldReplaceStrategyWarmupKline(existing, item) {
+			bestByOpenTime[item.OpenTime] = item
+		}
 	}
-	if len(merged.Klines1m) == 0 {
-		merged.Klines1m = loaded.Klines1m
+	return sortStrategyWarmupKlines(bestByOpenTime, limit)
+}
+
+// strategyWarmupBestByOpenTime 以 openTime 为键整理一组 K 线，并优先保留更完整的同周期版本。
+func strategyWarmupBestByOpenTime(klines []market.Kline) map[int64]market.Kline {
+	bestByOpenTime := make(map[int64]market.Kline, len(klines))
+	for i := range klines {
+		item := klines[i]
+		existing, ok := bestByOpenTime[item.OpenTime]
+		if !ok || shouldReplaceStrategyWarmupKline(existing, item) {
+			bestByOpenTime[item.OpenTime] = item
+		}
 	}
-	return merged
+	return bestByOpenTime
 }
 
 // strategyWarmupClickHouseClient 负责从 ClickHouse 查询策略启动恢复所需的 K 线快照。
@@ -1686,6 +1778,40 @@ func (s *ServiceContext) StrategyWarmupStatus(symbol string) StrategyWarmupStatu
 	)
 }
 
+// LatestSecondBarStatus 返回某个 symbol 最近一条秒级行情视图，供状态接口和测试统一读取。
+func (s *ServiceContext) LatestSecondBarStatus(symbol string) (LatestSecondBarStatusView, bool) {
+	if s == nil || symbol == "" {
+		return LatestSecondBarStatusView{}, false
+	}
+	s.mu.RLock()
+	strat := s.strategies[symbol]
+	s.mu.RUnlock()
+	if strat == nil {
+		return LatestSecondBarStatusView{}, false
+	}
+	bars := strat.RecentSecondBars(1)
+	if len(bars) == 0 {
+		return LatestSecondBarStatusView{}, false
+	}
+	bar := bars[0]
+	view := LatestSecondBarStatusView{
+		OpenTimeMs:  bar.OpenTimeMs,
+		CloseTimeMs: bar.CloseTimeMs,
+		Open:        bar.Open,
+		High:        bar.High,
+		Low:         bar.Low,
+		Close:       bar.Close,
+		Volume:      bar.Volume,
+		IsFinal:     bar.IsFinal,
+		Synthetic:   bar.Synthetic,
+		Source:      "trade",
+	}
+	if bar.Synthetic {
+		view.Source = "depth_fallback"
+	}
+	return view, true
+}
+
 // buildStrategyWarmupStatusView 基于多周期历史长度生成统一 warmup 判定，供 RPC 和网关直接透出恢复状态。
 func buildStrategyWarmupStatusView(historyLen4h, historyLen1h, historyLen15m, historyLen1m int32, source string) StrategyWarmupStatusView {
 	view := StrategyWarmupStatusView{
@@ -1736,6 +1862,19 @@ func (s *ServiceContext) RecordStrategyWarmupStatus(symbol string, status Strate
 		Klines15m: make([]market.Kline, int(status.HistoryLen15m)),
 		Klines1m:  make([]market.Kline, int(status.HistoryLen1m)),
 	}
+}
+
+// RecordStrategyInstance 写入某个运行中策略实例，供测试和状态查询复用运行时视图。
+func (s *ServiceContext) RecordStrategyInstance(symbol string, strat *strategyengine.TrendFollowingStrategy) {
+	if s == nil || symbol == "" || strat == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.strategies == nil {
+		s.strategies = make(map[string]*strategyengine.TrendFollowingStrategy)
+	}
+	s.strategies[symbol] = strat
 }
 
 // LatestWeightRecommendation 返回某个 symbol 最近一轮的权重建议快照。
@@ -1859,6 +1998,7 @@ func (s *ServiceContext) applyUniverseDecision(now time.Time, decision universe.
 
 func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	ctx, cancel := context.WithCancel(context.Background())
+	c.SharedWarmupDir = resolveSharedWarmupDir(c.SharedWarmupDir)
 
 	signalProducer, err := kafka.NewProducerWithContext(ctx, c.Kafka.Addrs, c.Kafka.Topics.Signal)
 	if err != nil {
@@ -1906,6 +2046,23 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 			return nil, err
 		}
 	}
+	var tradeConsumer *kafka.Consumer
+	if c.Kafka.Topics.Trade != "" {
+		tradeGroupID := groupID + "-trade"
+		tradeConsumer, err = kafka.NewConsumer(c.Kafka.Addrs, tradeGroupID, c.Kafka.Topics.Trade, "", c.Kafka.InitialOffset)
+		if err != nil {
+			if depthConsumer != nil {
+				_ = depthConsumer.Close()
+			}
+			_ = marketConsumer.Close()
+			if harvestPathProducer != nil {
+				_ = harvestPathProducer.Close()
+			}
+			_ = signalProducer.Close()
+			cancel()
+			return nil, err
+		}
+	}
 
 	executionCli := executionservice.NewExecutionService(zrpc.MustNewClient(c.Execution))
 	harvestPathLSTMPredictor := harvestpathmodel.NewLSTMPredictor(harvestpathmodel.LSTMPredictorConfig{
@@ -1918,6 +2075,9 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	})
 	analyticsWriter, err := newStrategyClickHouseWriter(ctx, c.ClickHouse)
 	if err != nil {
+		if tradeConsumer != nil {
+			_ = tradeConsumer.Close()
+		}
 		if depthConsumer != nil {
 			_ = depthConsumer.Close()
 		}
@@ -1938,8 +2098,11 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		harvestPathLSTMPredictor: harvestPathLSTMPredictor,
 		marketConsumer:           marketConsumer,
 		depthConsumer:            depthConsumer,
+		tradeConsumer:            tradeConsumer,
 		executionCli:             executionCli,
 		strategies:               make(map[string]*strategyengine.TrendFollowingStrategy),
+		secondBarAssemblers:      make(map[string]*SecondBarAssembler),
+		secondBarLogAt:           make(map[string]time.Time),
 		strategyConfigs:          make(map[string]config.StrategyConfig),
 		marketStateDetector:      marketstate.NewDetector(marketStateCfg),
 		marketStateConfig:        marketStateCfg,
@@ -1969,6 +2132,9 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		}
 		params, err := resolveStrategyParameters(c.Templates, sc)
 		if err != nil {
+			if tradeConsumer != nil {
+				_ = tradeConsumer.Close()
+			}
 			_ = marketConsumer.Close()
 			if depthConsumer != nil {
 				_ = depthConsumer.Close()
@@ -1998,7 +2164,13 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	empty := len(svcCtx.strategies) == 0
 	svcCtx.mu.RUnlock()
 	if empty {
+		if tradeConsumer != nil {
+			_ = tradeConsumer.Close()
+		}
 		_ = marketConsumer.Close()
+		if depthConsumer != nil {
+			_ = depthConsumer.Close()
+		}
 		if harvestPathProducer != nil {
 			_ = harvestPathProducer.Close()
 		}
@@ -2032,20 +2204,30 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	}
 	if depthConsumer != nil {
 		if err := depthConsumer.StartConsumingDepth(ctx, func(depth *market.Depth) error {
-			if depth == nil || depth.Symbol == "" {
-				return nil
-			}
-			svcCtx.mu.RLock()
-			strat := svcCtx.strategies[depth.Symbol]
-			svcCtx.mu.RUnlock()
-			if strat == nil {
-				return nil
-			}
-			strat.OnDepth(depth)
-			return nil
+			return svcCtx.dispatchDepthToStrategy(ctx, depth)
 		}); err != nil {
 			_ = marketConsumer.Close()
 			_ = depthConsumer.Close()
+			if tradeConsumer != nil {
+				_ = tradeConsumer.Close()
+			}
+			if harvestPathProducer != nil {
+				_ = harvestPathProducer.Close()
+			}
+			_ = signalProducer.Close()
+			cancel()
+			return nil, err
+		}
+	}
+	if tradeConsumer != nil {
+		if err := tradeConsumer.StartConsumingTrade(ctx, func(trade *market.Trade) error {
+			return svcCtx.dispatchTradeToStrategy(ctx, trade)
+		}); err != nil {
+			_ = marketConsumer.Close()
+			if depthConsumer != nil {
+				_ = depthConsumer.Close()
+			}
+			_ = tradeConsumer.Close()
 			if harvestPathProducer != nil {
 				_ = harvestPathProducer.Close()
 			}
@@ -2062,6 +2244,45 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	}
 
 	return svcCtx, nil
+}
+
+// resolveSharedWarmupDir 把相对 SharedWarmupDir 解析到仓库根目录，避免 strategy 从错误的工作目录读取 warmup 快照。
+func resolveSharedWarmupDir(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return ""
+	}
+	if filepath.IsAbs(dir) {
+		return filepath.Clean(dir)
+	}
+	if repoRoot, ok := findExchangeSystemRepoRoot(); ok {
+		return filepath.Join(repoRoot, filepath.Clean(dir))
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return filepath.Clean(dir)
+}
+
+// findExchangeSystemRepoRoot 从当前工作目录向上查找 go.mod，定位 exchange-system 仓库根目录。
+func findExchangeSystemRepoRoot() (string, bool) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	dir := wd
+	for {
+		goModPath := filepath.Join(dir, "go.mod")
+		content, readErr := os.ReadFile(goModPath)
+		if readErr == nil && strings.Contains(string(content), "module exchange-system") {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
 }
 
 func (s *ServiceContext) reconcileStrategyPosition(ctx context.Context, strat *strategyengine.TrendFollowingStrategy, kline *market.Kline) {
@@ -2102,6 +2323,110 @@ func (s *ServiceContext) reconcileStrategyPosition(ctx context.Context, strat *s
 	strat.ReconcilePositionWithExchange(longQty, shortQty)
 }
 
+// dispatchDepthToStrategy 把 depth 更新同时喂给订单簿快照和秒级兜底聚合，确保运行时和测试共用一条链路。
+func (s *ServiceContext) dispatchDepthToStrategy(ctx context.Context, depth *market.Depth) error {
+	if s == nil || depth == nil || depth.Symbol == "" {
+		return nil
+	}
+	s.mu.RLock()
+	strat := s.strategies[depth.Symbol]
+	assembler := s.secondBarAssemblers[depth.Symbol]
+	s.mu.RUnlock()
+	if assembler != nil {
+		for _, bar := range assembler.OnDepth(depth) {
+			if bar == nil || strat == nil {
+				continue
+			}
+			if err := strat.OnSecondBar(ctx, bar); err != nil {
+				return err
+			}
+			s.logSecondBarDispatch(depth.Symbol, bar)
+		}
+	}
+	if strat == nil {
+		return nil
+	}
+	strat.OnDepth(depth)
+	return nil
+}
+
+// dispatchTradeToStrategy 把 trade 聚合成 final SecondBar 后转给策略，避免回调闭包和测试重复装配逻辑。
+func (s *ServiceContext) dispatchTradeToStrategy(ctx context.Context, trade *market.Trade) error {
+	if s == nil || trade == nil || trade.Symbol == "" {
+		return nil
+	}
+	s.mu.RLock()
+	strat := s.strategies[trade.Symbol]
+	assembler := s.secondBarAssemblers[trade.Symbol]
+	s.mu.RUnlock()
+	if strat == nil || assembler == nil {
+		return nil
+	}
+	for _, bar := range assembler.OnTrade(trade) {
+		if bar == nil {
+			continue
+		}
+		if err := strat.OnSecondBar(ctx, bar); err != nil {
+			return err
+		}
+		s.logSecondBarDispatch(trade.Symbol, bar)
+	}
+	return nil
+}
+
+// logSecondBarDispatch 输出秒级行情的调试日志，synthetic 条目强提示，真实成交条目按采样频率输出。
+func (s *ServiceContext) logSecondBarDispatch(symbol string, bar *strategyengine.SecondBar) {
+	if s == nil || bar == nil || symbol == "" {
+		return
+	}
+	if !bar.Synthetic && !s.shouldLogSecondBarSample(symbol, 5*time.Second) {
+		return
+	}
+	level := "sampled"
+	source := "trade"
+	if bar.Synthetic {
+		level = "synthetic"
+		source = "depth_fallback"
+	}
+	log.Printf(
+		"[second-bar][%s] symbol=%s source=%s synthetic=%t open_time=%s close_time=%s open=%.6f high=%.6f low=%.6f close=%.6f volume=%.6f",
+		level,
+		strings.ToUpper(strings.TrimSpace(symbol)),
+		source,
+		bar.Synthetic,
+		time.UnixMilli(bar.OpenTimeMs).UTC().Format("15:04:05.000"),
+		time.UnixMilli(bar.CloseTimeMs).UTC().Format("15:04:05.000"),
+		bar.Open,
+		bar.High,
+		bar.Low,
+		bar.Close,
+		bar.Volume,
+	)
+}
+
+// shouldLogSecondBarSample 对真实成交生成的秒条按 symbol 做节流，避免 1s 连续日志过密。
+func (s *ServiceContext) shouldLogSecondBarSample(symbol string, interval time.Duration) bool {
+	if s == nil || interval <= 0 {
+		return false
+	}
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		return false
+	}
+	now := time.Now()
+	s.secondBarLogMu.Lock()
+	defer s.secondBarLogMu.Unlock()
+	if s.secondBarLogAt == nil {
+		s.secondBarLogAt = make(map[string]time.Time)
+	}
+	lastAt := s.secondBarLogAt[symbol]
+	if !lastAt.IsZero() && now.Sub(lastAt) < interval {
+		return false
+	}
+	s.secondBarLogAt[symbol] = now
+	return true
+}
+
 func (s *ServiceContext) UpsertStrategy(cfg *strategypb.StrategyConfig) {
 	if s == nil || cfg == nil {
 		return
@@ -2117,6 +2442,7 @@ func (s *ServiceContext) upsertStrategyLocked(cfg *strategypb.StrategyConfig) {
 	}
 	if !cfg.Enabled {
 		delete(s.strategies, cfg.Symbol)
+		delete(s.secondBarAssemblers, cfg.Symbol)
 		return
 	}
 	opts := &strategyengine.RuntimeOptions{
@@ -2125,6 +2451,7 @@ func (s *ServiceContext) upsertStrategyLocked(cfg *strategypb.StrategyConfig) {
 		AnalyticsWriter:          s.analyticsWriter,
 	}
 	if current, ok := s.strategies[cfg.Symbol]; ok && current != nil {
+		s.ensureSecondBarAssemblerLocked(cfg.Symbol, cfg.Parameters)
 		current.UpdateRuntimeConfig(cfg.Parameters, s.Config.SignalLogDir, opts)
 		return
 	}
@@ -2139,6 +2466,40 @@ func (s *ServiceContext) upsertStrategyLocked(cfg *strategypb.StrategyConfig) {
 	)
 	s.hydrateStrategyWarmupLocked(cfg.Symbol, strat)
 	s.strategies[cfg.Symbol] = strat
+	s.ensureSecondBarAssemblerLocked(cfg.Symbol, cfg.Parameters)
+}
+
+// ensureSecondBarAssemblerLocked 确保每个运行中的交易对都拥有独立的秒级聚合器，避免共享状态串扰。
+func (s *ServiceContext) ensureSecondBarAssemblerLocked(symbol string, params map[string]float64) *SecondBarAssembler {
+	if s == nil || symbol == "" {
+		return nil
+	}
+	cfg := buildSecondBarAssemblerConfig(params)
+	if s.secondBarAssemblers == nil {
+		s.secondBarAssemblers = make(map[string]*SecondBarAssembler)
+	}
+	if assembler, ok := s.secondBarAssemblers[symbol]; ok && assembler != nil {
+		assembler.UpdateConfig(cfg)
+		return assembler
+	}
+	assembler := NewSecondBarAssembler(symbol, cfg)
+	s.secondBarAssemblers[symbol] = assembler
+	return assembler
+}
+
+// buildSecondBarAssemblerConfig 从策略参数中提取秒级装配器所需开关，避免 service 层散落魔法字符串判断。
+func buildSecondBarAssemblerConfig(params map[string]float64) SecondBarAssemblerConfig {
+	return SecondBarAssemblerConfig{
+		EnableDepthMidFallback: paramEnabled(params, secondBarDepthFallbackParam),
+	}
+}
+
+// paramEnabled 把 float64 风格参数统一映射为布尔开关，保持和现有策略参数约定一致。
+func paramEnabled(params map[string]float64, key string) bool {
+	if len(params) == 0 || key == "" {
+		return false
+	}
+	return params[key] > 0
 }
 
 func (s *ServiceContext) StopStrategy(strategyID string) {
@@ -2180,6 +2541,11 @@ func (s *ServiceContext) Close() error {
 	}
 	if s.depthConsumer != nil {
 		if err := s.depthConsumer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if s.tradeConsumer != nil {
+		if err := s.tradeConsumer.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

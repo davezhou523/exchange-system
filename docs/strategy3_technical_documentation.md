@@ -17,6 +17,7 @@ go-zero RPC/API 服务编排
 ./kafka-topics.sh --create --topic kline --bootstrap-server kafka1:9092
 ./kafka-topics.sh --create --topic signal --bootstrap-server kafka1:9092
 ./kafka-topics.sh --create --topic order --bootstrap-server kafka1:9092
+./kafka-topics.sh --create --topic trade --bootstrap-server kafka1:9092
 docker exec -it kafka1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka1:9092 --create --if-not-exists --topic harvest_path_signal --partitions 1 --replication-factor 1
 ./kafka-topics.sh --list --bootstrap-server kafka1:9092
 
@@ -356,7 +357,7 @@ EMA破位条件：
 - 当模型判断收割路径风险高时，可用于延迟追价、缩小仓位、放宽确认条件或主动规避
 
 ### 模型输入
-- K线结构数据：1m、5m、15m K线的高低点、收盘价、成交量、ATR
+- K线结构数据：1m、15m K线的高低点、收盘价、成交量、ATR
 - 订单簿数据：买一到买N、卖一到卖N 的挂单量、价差、撤单变化
 - 成交明细数据：主动买卖成交量、成交方向失衡、短时成交密度
 - 时间因子：整点、半点、开盘时段、资金费率结算前后、重要事件窗口
@@ -510,7 +511,7 @@ trigger_score =
 - 4H 继续判断大方向，不由插针模型替代
 - 1H 继续判断回调健康度
 - 15M 继续给出趋势入场信号
-- 插针模型作为 1m/5m 级别的微观结构过滤器，为 15M 入场增加一层保护
+- 插针模型作为 1m/15m 级别的微观结构过滤器，为 15M 入场增加一层保护
 
 #### 推荐接入点
 - strategy-service：负责计算三层模型分数并输出增强信号
@@ -865,7 +866,7 @@ app/strategy/rpc/internal/
 - 对外暴露统一接口，如 `Evaluate(ctx HarvestPathContext) (*HarvestPathSignal, error)`
 
 #### 3. serviceContext 依赖建议
-- 持有最近一段时间的 1m/5m/15m K线缓存
+- 持有最近一段时间的 1m/15m K线缓存
 - 持有最新订单簿快照缓存
 - 持有最近成交缓存
 - 持有 `harvest_path_signal` producer

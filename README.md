@@ -191,12 +191,16 @@ go run app/api/gateway/main.go -f app/api/gateway/etc/gateway.yaml
 - 全部服务都使用 `*.demo.yaml`
 - `execution/order` 切换到 `demo-fapi` 与 Demo API Key
 - `gateway.demo.yaml` 默认使用 `8889`，避免和本地 `sim` 的 `8888` 冲突
+- `market.demo.yaml` 默认 `SharedWarmupDir: runtime/shared/kline/warmup`
+- `market.demo.yaml` 默认 `WarmupCleanupOnStartup: true`，每次启动会先清空共享 warmup 目录，再生成本轮快照
 - 可以在 Binance Demo 页面验证真实下单结果
 
 ### prod
 - 作为真实运行模板
 - 默认关闭 `debug_skip_*`
 - `execution.prod.yaml` 默认切回真实 Binance endpoint 模板
+- `market.prod.yaml` 默认继续使用 `runtime/shared/kline/warmup` 作为共享 warmup 目录
+- `market.prod.yaml` 默认 `WarmupCleanupOnStartup: false`，启动时保留上一轮 warmup 快照，降低 warmup 失败时的恢复风险
 - 所有敏感配置需自行注入，不建议把密钥写回仓库
 
 ## 常用命令
@@ -259,7 +263,7 @@ grep '"action":"selector_decision"' \
 - 看 `ws / aggregator / universepool`
 
 ```bash
-grep '\[ws\]\|\[aggregated\]\|\[aggregated 5m emit\]\|\[universepool\]' \
+grep '\[ws\]\|\[aggregated\]\|\[universepool\]' \
   app/market/rpc/logs/market.log | tail -n 50
 ```
 

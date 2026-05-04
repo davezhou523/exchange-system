@@ -85,6 +85,8 @@ message PositionAllocatorStatus {
   double position_budget = 10;  // 当前 symbol 的最终仓位预算
   bool trading_paused = 11;     // 当前轮是否被 allocator 暂停交易
   string pause_reason = 12;     // allocator 暂停原因
+  string route_reason_desc = 13; // route_reason 的中文说明，供前端直接展示
+  string pause_reason_desc = 14; // pause_reason 的中文说明，供前端直接展示
 }
 
 message RegimeFrameStatus {
@@ -96,6 +98,8 @@ message RegimeFrameStatus {
   int64 last_update = 6;        // 该周期最近一次更新时间
   bool healthy = 7;             // 该周期特征是否健康
   bool fresh = 8;               // 该周期特征是否在 freshness window 内
+  string reason_desc = 9;       // reason 的中文说明，供前端直接展示
+  string route_reason_desc = 10; // route_reason 的中文说明，供前端直接展示
 }
 
 message RegimeFusionStatus {
@@ -107,6 +111,7 @@ message RegimeFusionStatus {
   double primary_weight = 6;    // 主状态权重，当前默认 0.7
   double confirm_weight = 7;    // 辅助状态权重，当前默认 0.3
   int64 last_update = 8;        // 融合结果更新时间
+  string fused_reason_desc = 9; // fused_reason 的中文说明，供前端直接展示
 }
 
 message StrategyWarmupStatus {
@@ -117,6 +122,19 @@ message StrategyWarmupStatus {
   string source = 5;            // 长度来源：runtime / cache / empty
   string status = 6;            // warmup_complete / warmup_incomplete，直接表示当前恢复是否完整
   repeated string incomplete_reasons = 7; // 当恢复不完整时列出缺项，如 insufficient_1h_history
+}
+
+message LatestSecondBarStatus {
+  int64 open_time_ms = 1;  // 最近一条秒级行情的起始毫秒时间
+  int64 close_time_ms = 2; // 最近一条秒级行情的结束毫秒时间
+  double open = 3;         // 最近一条秒级行情开盘价
+  double high = 4;         // 最近一条秒级行情最高价
+  double low = 5;          // 最近一条秒级行情最低价
+  double close = 6;        // 最近一条秒级行情收盘价
+  double volume = 7;       // 最近一条秒级行情累计成交量
+  bool is_final = 8;       // 最近一条秒级行情是否已封口
+  bool synthetic = 9;      // 是否来自盘口兜底而非真实成交
+  string source = 10;      // trade / depth_fallback
 }
 
 message StrategyRouteRuntimeStatus {
@@ -133,15 +151,22 @@ message StrategyRouteRuntimeStatus {
   bool has_open_position = 11;  // 当前是否仍持有未平仓位
   RegimeFusionStatus regime_fusion = 12; // Universe 最近一轮 1H/15M 多周期融合判态
   StrategyWarmupStatus warmup = 13; // 当前实例或缓存中的多周期历史长度，便于判断冷启动恢复是否完整
+  string target_reason_desc = 14; // target_reason 的中文说明，供前端直接展示
+  string apply_gate_reason_desc = 15; // apply_gate_reason 的中文说明，供前端直接展示
+  string apply_action_desc = 16; // apply_action 的中文说明，供前端直接展示
+  LatestSecondBarStatus latest_second_bar = 17; // 最近一条 1s 输入行情，便于确认 synthetic fallback 是否生效
 }
 
 message StrategyStatus {
   string strategy_id = 1;
   string status = 2; // RUNNING, STOPPED, ERROR
-  string message = 3;
+  string message = 3; // 人类可读短消息，避免承载需要机器解析的长串
   int64 last_update = 4;
   PositionAllocatorStatus allocator = 5; // 结构化 allocator 视角，便于外部直接消费
   StrategyRouteRuntimeStatus router = 6; // Universe 当前轮路由与运行时目标视角
+  string status_desc = 7; // status 的中文说明，供前端直接展示
+  string message_code = 8; // message 的稳定英文码，供前端直接判断
+  string message_desc = 9; // message_code 的中文说明，供前端直接展示
 }
 
 service StrategyService {

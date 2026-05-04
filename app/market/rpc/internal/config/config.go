@@ -23,8 +23,12 @@ type Config struct {
 		Intervals    []string
 		Proxy        string
 	}
-	KlineLogDir    string        `json:",default=data/kline"`
-	WatermarkDelay time.Duration `json:",default=2s"`
+	KlineLogDir     string `json:",default=data/kline"`
+	SharedWarmupDir string `json:",default=runtime/shared/kline/warmup"`
+	// WarmupCleanupOnStartup 控制服务启动时是否先清空共享 warmup 目录。
+	// demo 环境建议开启，确保每次排查都基于本轮新快照；prod 环境建议关闭，避免 warmup 失败时失去上一轮可用快照。
+	WarmupCleanupOnStartup bool          `json:",default=false"`
+	WatermarkDelay         time.Duration `json:",default=2s"`
 
 	// 指标默认参数（向后兼容，如果某周期未单独配置则使用此默认值）
 	Indicators struct {
@@ -75,7 +79,6 @@ type Config struct {
 	// 更多页 = 更多历史数据 = 递推指标更接近交易所真实值。
 	// 默认 3 页（3×1500=4500根），例如：
 	//   - 15m: 4500 × 15min ≈ 46.9 天
-	//   - 3m:  4500 × 3min  ≈ 9.4 天
 	//   - 1h:  4500 × 1h    ≈ 187.5 天
 	WarmupPages int `json:",default=3"`
 

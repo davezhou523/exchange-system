@@ -14,7 +14,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -25,7 +27,7 @@ import (
 // 为什么需要预热？
 // EMA21 需要 ≥21 根K线才能初始化，EMA55 需要 ≥55 根。
 // 如果不预热，从空 buffer 开始：
-//   - 前 55 根3m K线（≈3小时）的 EMA55 值都是错的
+//   - 前 55 根15m K线（≈13.75小时）的 EMA55 值都是错的
 //   - RSI/ATR 同理
 //   - 导致策略在启动后数小时内产生错误信号
 //
@@ -33,14 +35,14 @@ import (
 type HistoryWarmupper interface {
 	// FetchKlines 从交易所拉取最近的历史K线数据。
 	// symbol: 交易对（如 "ETHUSDT"）
-	// interval: K线周期（如 "3m", "15m", "1h", "4h"）
+	// interval: K线周期（如 "15m", "1h", "4h"）
 	// limit: 拉取数量（Binance 最多 1500）
 	// 返回按时间升序排列的 K 线数据，每根包含 [openTime, open, high, low, close, volume, closeTime, ...]
 	FetchKlines(ctx context.Context, symbol, interval string, limit int) ([][]interface{}, error)
 
 	// FetchKlinesRange 从交易所拉取指定时间范围的历史K线数据。
 	// symbol: 交易对（如 "ETHUSDT"）
-	// interval: K线周期（如 "3m", "15m", "1h", "4h"）
+	// interval: K线周期（如 "15m", "1h", "4h"）
 	// startTime: 起始时间戳（毫秒），包含
 	// endTime: 结束时间戳（毫秒），包含
 	// limit: 单次拉取上限（Binance 最多 1500）
@@ -157,7 +159,7 @@ func (a *KlineAggregator) WarmupHistory(ctx context.Context, symbol string) erro
 
 	// 启动时清理旧的预热数据和聚合K线数据，确保指标从干净状态重新计算
 	// 1. warmup 目录：旧预热原始数据（可能因预热页数/参数变化而失效）
-	// 2. 聚合K线目录（3m/5m/15m/1h/4h等）：旧指标值（基于旧预热数据计算）
+	// 2. 聚合K线目录（15m/1h/4h等）：旧指标值（基于旧预热数据计算）
 	// 3. 保留 1m 原始K线数据（WebSocket 直传，不经过指标计算）
 	a.cleanupHistoricalData(symbol)
 
@@ -175,7 +177,7 @@ func (a *KlineAggregator) WarmupHistory(ctx context.Context, symbol string) erro
 
 // cleanupHistoricalData 启动时清理旧的历史数据文件，确保指标从干净状态重新计算。
 // 删除内容：
-//   - warmup 目录：旧预热原始数据（klineLogDir/warmup/SYMBOL/）
+//   - warmup 目录：旧预热原始数据（sharedWarmupDir/SYMBOL/ 或 klineLogDir/warmup/SYMBOL/）
 //   - 所有周期K线目录（含1m）：避免1m数据无限积累占用磁盘
 //
 // 保留内容：
@@ -186,11 +188,14 @@ func (a *KlineAggregator) cleanupHistoricalData(symbol string) {
 	}
 
 	// 清理 warmup 目录
-	warmupDir := filepath.Join(a.klineLogDir, "warmup", symbol)
-	if err := os.RemoveAll(warmupDir); err != nil {
-		log.Printf("[warmup] WARN: failed to remove warmup dir %s: %v", warmupDir, err)
-	} else {
-		log.Printf("[warmup] cleaned up warmup dir: %s", warmupDir)
+	warmupBaseDir := a.warmupRootDir()
+	if warmupBaseDir != "" {
+		warmupDir := filepath.Join(warmupBaseDir, symbol)
+		if err := os.RemoveAll(warmupDir); err != nil {
+			log.Printf("[warmup] WARN: shared_dir=%s failed to remove warmup dir %s: %v", formatWarmupSharedDir(warmupBaseDir), warmupDir, err)
+		} else {
+			log.Printf("[warmup] shared_dir=%s cleaned up warmup dir: %s", formatWarmupSharedDir(warmupBaseDir), warmupDir)
+		}
 	}
 
 	// 清理所有周期K线目录（含1m），避免1m数据无限积累占用磁盘
@@ -220,7 +225,6 @@ func (a *KlineAggregator) warmupInterval(ctx context.Context, symbol string, iv 
 	// 预热页数：更多页 = 更多历史数据 = 指标更接近 Binance 真实值
 	// 5 页 × 1500 = 7500 根K线：
 	//   - 15m: 7500 × 15min ≈ 78.1 天
-	//   - 3m:  7500 × 3min  ≈ 15.6 天
 	//   - 1h:  7500 × 1h    ≈ 312.5 天
 	pages := a.warmupPages
 	if pages <= 0 {
@@ -229,6 +233,11 @@ func (a *KlineAggregator) warmupInterval(ctx context.Context, symbol string, iv 
 
 	log.Printf("[warmup] fetching up to %d pages × %d %s klines for %s (max ~%d klines) ...",
 		pages, pageLimit, iv.Name, symbol, pages*pageLimit)
+
+	intervalMs := iv.Duration.Milliseconds()
+	if intervalMs <= 0 {
+		return fmt.Errorf("invalid interval duration for %s", iv.Name)
+	}
 
 	// 第1页：拉取最近 pageLimit 根K线
 	firstPage, err := a.warmupper.FetchKlines(ctx, symbol, iv.Name, pageLimit)
@@ -243,14 +252,23 @@ func (a *KlineAggregator) warmupInterval(ctx context.Context, symbol string, iv 
 	var allRawKlines [][]interface{}
 	allRawKlines = append(allRawKlines, firstPage...)
 
-	// 第2页及之后：以当前最早K线的 openTime 之前1ms 为 endTime，继续往前拉取
+	// 第2页及之后：用显式 startTime/endTime 向前翻页，避免 startTime=0 时跳回到交易对最早历史。
 	for p := 2; p <= pages; p++ {
 		// 当前最早K线的 openTime
 		earliestOpenTime := int64(allRawKlines[0][0].(float64))
-		// endTime 设为最早 openTime 之前1ms，避免重复
-		endTime := earliestOpenTime - 1
+		// endTime 取“当前最早K线的前一根”的 openTime，避免和上一页重复。
+		endTime := earliestOpenTime - intervalMs
+		if endTime < 0 {
+			log.Printf("[warmup] %s %s page %d: reached history floor, stopping pagination", symbol, iv.Name, p)
+			break
+		}
+		// startTime 反推完整一页窗口，保证每一页都紧邻上一页。
+		startTime := endTime - int64(pageLimit-1)*intervalMs
+		if startTime < 0 {
+			startTime = 0
+		}
 
-		pageKlines, err := a.warmupper.FetchKlinesRange(ctx, symbol, iv.Name, 0, endTime, pageLimit)
+		pageKlines, err := a.warmupper.FetchKlinesRange(ctx, symbol, iv.Name, startTime, endTime, pageLimit)
 		if err != nil {
 			log.Printf("[warmup] WARN: %s %s page %d fetch failed: %v (using %d klines so far)",
 				symbol, iv.Name, p, err, len(allRawKlines))
@@ -278,7 +296,20 @@ func (a *KlineAggregator) warmupInterval(ctx context.Context, symbol string, iv 
 		}
 	}
 
+	allRawKlines, continuity := normalizeWarmupPages(allRawKlines, intervalMs)
 	log.Printf("[warmup] %s %s: total raw klines = %d", symbol, iv.Name, len(allRawKlines))
+	log.Printf(
+		"[warmup] %s %s continuity range=%s ~ %s step_ms=%d total=%d duplicates=%d gaps=%d continuous=%v",
+		symbol,
+		iv.Name,
+		formatWarmupOpenTime(continuity.FirstOpenTime),
+		formatWarmupOpenTime(continuity.LastOpenTime),
+		intervalMs,
+		continuity.Total,
+		continuity.DuplicateCount,
+		continuity.GapCount,
+		continuity.GapCount == 0,
+	)
 
 	// 解析全部K线数据到临时数组（用于指标初始化）
 	// 指标初始化需要尽可能多的历史数据来确保递推收敛
@@ -294,7 +325,7 @@ func (a *KlineAggregator) warmupInterval(ctx context.Context, symbol string, iv 
 	}
 
 	// 保存预热原始数据到文件，方便核对与调试
-	// 格式：data/warmup/SYMBOL/INTERVAL/YYYY-MM-DD.jsonl
+	// 格式：sharedWarmupDir/SYMBOL/INTERVAL/YYYY-MM-DD.jsonl
 	// 每次启动会覆盖当天同路径文件（因为预热数据可能不同）
 	a.saveWarmupData(symbol, iv.Name, allRawKlines)
 
@@ -430,6 +461,80 @@ func parseFloat(v interface{}) float64 {
 	}
 }
 
+// warmupContinuityStats 汇总 warmup 原始K线在时间轴上的连续性，便于启动日志快速定位跳页、重复和缺口。
+type warmupContinuityStats struct {
+	FirstOpenTime  int64
+	LastOpenTime   int64
+	Total          int
+	DuplicateCount int
+	GapCount       int
+}
+
+// normalizeWarmupPages 对分页结果按 openTime 排序并去重，同时统计重复和缺口数量。
+func normalizeWarmupPages(klines [][]interface{}, intervalMs int64) ([][]interface{}, warmupContinuityStats) {
+	stats := warmupContinuityStats{}
+	if len(klines) == 0 || intervalMs <= 0 {
+		return klines, stats
+	}
+
+	sort.Slice(klines, func(i, j int) bool {
+		return warmupOpenTime(klines[i]) < warmupOpenTime(klines[j])
+	})
+
+	normalized := make([][]interface{}, 0, len(klines))
+	var prevOpenTime int64
+	for _, k := range klines {
+		openTime := warmupOpenTime(k)
+		if openTime <= 0 {
+			continue
+		}
+		if len(normalized) == 0 {
+			normalized = append(normalized, k)
+			prevOpenTime = openTime
+			continue
+		}
+		if openTime == prevOpenTime {
+			stats.DuplicateCount++
+			continue
+		}
+		if openTime > prevOpenTime+intervalMs {
+			stats.GapCount += int((openTime-prevOpenTime)/intervalMs) - 1
+		}
+		normalized = append(normalized, k)
+		prevOpenTime = openTime
+	}
+
+	stats.Total = len(normalized)
+	if len(normalized) > 0 {
+		stats.FirstOpenTime = warmupOpenTime(normalized[0])
+		stats.LastOpenTime = warmupOpenTime(normalized[len(normalized)-1])
+	}
+	return normalized, stats
+}
+
+// warmupOpenTime 提取 Binance 原始K线数组中的 openTime，避免多处手写断言转换。
+func warmupOpenTime(k []interface{}) int64 {
+	if len(k) == 0 {
+		return 0
+	}
+	switch v := k[0].(type) {
+	case float64:
+		return int64(v)
+	case int64:
+		return v
+	default:
+		return 0
+	}
+}
+
+// formatWarmupOpenTime 把 warmup continuity 日志中的毫秒时间戳转成可读 UTC 时间。
+func formatWarmupOpenTime(ts int64) string {
+	if ts <= 0 {
+		return "n/a"
+	}
+	return time.UnixMilli(ts).UTC().Format("2006-01-02T15:04:05")
+}
+
 // SetWarmupper 设置历史数据预热器。
 // 必须在 OnKline 之前调用。
 // 设置后，每个新 symbol 的 worker 创建时会自动预热历史数据。
@@ -457,17 +562,28 @@ type warmupLogEntry struct {
 }
 
 // saveWarmupData 保存预热拉取的原始K线数据到 jsonl 文件。
-// 路径格式：data/warmup/SYMBOL/INTERVAL/YYYY-MM-DD.jsonl
+// 路径格式：sharedWarmupDir/SYMBOL/INTERVAL/YYYY-MM-DD.jsonl
 // 每次启动覆盖当天文件（因为预热数据可能因启动时间不同而变化）。
 // 保存失败仅打日志，不影响预热流程。
 func (a *KlineAggregator) saveWarmupData(symbol, interval string, klines [][]interface{}) {
-	if a.klineLogDir == "" || len(klines) == 0 {
+	if len(klines) == 0 {
 		return
 	}
 
-	dir := filepath.Join(a.klineLogDir, "warmup", symbol, interval)
+	warmupBaseDir := a.warmupRootDir()
+	if warmupBaseDir == "" {
+		return
+	}
+	dir := filepath.Join(warmupBaseDir, symbol, interval)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		log.Printf("[warmup] failed to create dir %s: %v", dir, err)
+		log.Printf(
+			"[warmup] symbol=%s interval=%s shared_dir=%s failed_to=create_dir path=%s err=%v",
+			symbol,
+			interval,
+			formatWarmupSharedDir(warmupBaseDir),
+			dir,
+			err,
+		)
 		return
 	}
 
@@ -479,7 +595,14 @@ func (a *KlineAggregator) saveWarmupData(symbol, interval string, klines [][]int
 	// 覆盖写入（每次启动预热数据可能不同）
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
-		log.Printf("[warmup] failed to open %s: %v", path, err)
+		log.Printf(
+			"[warmup] symbol=%s interval=%s shared_dir=%s failed_to=open_file path=%s err=%v",
+			symbol,
+			interval,
+			formatWarmupSharedDir(warmupBaseDir),
+			path,
+			err,
+		)
 		return
 	}
 	defer f.Close()
@@ -496,10 +619,47 @@ func (a *KlineAggregator) saveWarmupData(symbol, interval string, klines [][]int
 			CloseTime: time.UnixMilli(int64(k[6].(float64))).UTC().Format("2006-01-02T15:04:05.000Z"),
 		}
 		if err := encoder.Encode(entry); err != nil {
-			log.Printf("[warmup] encode failed: %v", err)
+			log.Printf(
+				"[warmup] symbol=%s interval=%s shared_dir=%s failed_to=encode_file path=%s err=%v",
+				symbol,
+				interval,
+				formatWarmupSharedDir(warmupBaseDir),
+				path,
+				err,
+			)
 			return
 		}
 	}
 
-	log.Printf("[warmup] saved %d raw klines to %s", len(klines), path)
+	log.Printf(
+		"[warmup] symbol=%s interval=%s shared_dir=%s saved_raw_klines=%d path=%s",
+		symbol,
+		interval,
+		formatWarmupSharedDir(warmupBaseDir),
+		len(klines),
+		path,
+	)
+}
+
+// warmupRootDir 返回 warmup 持久化根目录，优先使用共享目录，未配置时回退旧目录结构。
+func (a *KlineAggregator) warmupRootDir() string {
+	if a == nil {
+		return ""
+	}
+	if dir := strings.TrimSpace(a.sharedWarmupDir); dir != "" {
+		return dir
+	}
+	if dir := strings.TrimSpace(a.klineLogDir); dir != "" {
+		return filepath.Join(dir, "warmup")
+	}
+	return ""
+}
+
+// formatWarmupSharedDir 统一输出 warmup 共享目录，未配置时提供占位值，方便日志 grep 和采集。
+func formatWarmupSharedDir(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return "n/a"
+	}
+	return dir
 }

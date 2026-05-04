@@ -72,7 +72,7 @@ type rangeStats struct {
 	TakeProfitMethod      string
 }
 
-// checkRangeEntryConditions 执行 15M 震荡变体开仓判定。
+// 执行 15M 震荡变体开仓判定。
 func (s *TrendFollowingStrategy) checkRangeEntryConditions(ctx context.Context, k *marketpb.Kline) error {
 	if !s.checkRiskLimits() {
 		s.writeDecisionLogIfEnabled("entry", "skip", "risk_limits_block", k, nil)
@@ -872,6 +872,7 @@ func (s *TrendFollowingStrategy) openRangePosition(ctx context.Context, k *marke
 	)
 	signalReason.Range = signalReasonRangePayloadFromStats(stats)
 
+	exitPolicy, exitState := s.initializeExitPolicyState(snap.Close, plan.StopLoss)
 	s.pos = position{
 		side:          sideLong,
 		entryPrice:    snap.Close,
@@ -884,6 +885,8 @@ func (s *TrendFollowingStrategy) openRangePosition(ctx context.Context, k *marke
 		hitTP1:        false,
 		partialClosed: false,
 		maxProfit:     0,
+		exitPolicy:    exitPolicy,
+		exitState:     exitState,
 	}
 	if entry == entryShort {
 		s.pos.side = sideShort
