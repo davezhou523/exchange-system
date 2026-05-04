@@ -52,8 +52,9 @@
 │                                                                                                  │
 │  ┌────────────────────┐  ┌────────────────────┐  ┌────────────────────┐  ┌────────────────────┐ │
 │  │  Market Service    │  │  Strategy Service  │  │  Execution Service │  │   Order Service    │ │
-│  │  (market.yaml)     │  │ (strategy.demo/    │  │  (execution.yaml)  │  │  (order.yaml)      │ │
-│  │                    │  │  strategy.prod)    │  │                    │  │                    │ │
+│  │ (market.demo/      │  │ (strategy.demo/    │  │  (execution.yaml)  │  │  (order.yaml)      │ │
+│  │  market.prod)      │  │  strategy.prod)    │  │                    │  │                    │ │
+│  │                    │  │                    │  │                    │  │                    │ │
 │  │                    │  │                    │  │                    │  │                    │ │
 │  │ • WebSocket Client │  │ • Trend Following  │  │ • Exchange Router  │  │ • Order Query      │ │
 │  │ • Kline Aggregator │  │ • HarvestPath LSTM │  │ • Risk Manager     │  │ • Position Query   │ │
@@ -1595,7 +1596,7 @@ Features
 | 服务名称 | 配置文件 | 端口类型 | 主要功能 |
 |---------|---------|---------|---------|
 | **API Gateway** | gateway.yaml | HTTP REST | 路由分发、请求聚合、认证鉴权 |
-| **Market Service** | market.yaml | gRPC | 行情数据聚合、技术指标计算、WebSocket客户端 |
+| **Market Service** | market.demo.yaml / market.prod.yaml | gRPC | 行情数据聚合、技术指标计算、WebSocket客户端 |
 | **Strategy Service** | strategy.demo.yaml / strategy.prod.yaml | gRPC | 策略引擎、信号生成、风控管理 |
 | **Execution Service** | execution.yaml | gRPC | 订单执行、交易所路由、仓位管理 |
 | **Order Service** | order.yaml | gRPC | 订单查询、历史记录、收益统计 |
@@ -4753,7 +4754,7 @@ LSTM模型:
 ### 7.1 Market Service 配置
 
 ```yaml
-# market.yaml
+# market.demo.yaml / market.prod.yaml
 Name: market.rpc
 ListenOn: 0.0.0.0:8081
 Etcd:

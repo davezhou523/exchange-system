@@ -104,6 +104,9 @@ type Config struct {
 
 	// ClickHouse 配置聚合后的 K 线分析库。
 	ClickHouse ClickHouseConfig
+
+	// Postgres 配置聚合数据扩展落库。
+	Postgres PostgresConfig
 }
 
 // IndicatorConfig 每个周期的指标配置
@@ -125,4 +128,25 @@ type ClickHouseConfig struct {
 	Timeout       time.Duration `json:",default=3s"`
 	QueueSize     int           `json:",default=2048"`
 	FlushInterval time.Duration `json:",default=1s"`
+	Recovery      RecoveryConfig
+}
+
+// RecoveryConfig 定义 market 启动时基于 ClickHouse 的断点补齐参数。
+type RecoveryConfig struct {
+	Enabled           bool          `json:",default=true"`
+	QueryTimeout      time.Duration `json:",default=15s"`
+	WarmupWaitTimeout time.Duration `json:",default=2m"`
+	PageLimit         int           `json:",default=1500"`
+	DeleteOverlap     bool          `json:",default=true"`
+	OverlapWindow     time.Duration `json:",default=3m"`
+}
+
+// PostgresConfig 定义 PostgreSQL 连接与写入参数。
+type PostgresConfig struct {
+	Enabled         bool          `json:",default=false"`
+	DSN             string        `json:",optional"`
+	AccountID       string        `json:",optional"`
+	MaxOpenConns    int           `json:",default=10"`
+	MaxIdleConns    int           `json:",default=5"`
+	ConnMaxLifetime time.Duration `json:",default=30m"`
 }

@@ -15,6 +15,25 @@ Kafka:
 Execution:
   Target: execution:9082
 
+ClickHouse:
+  Enabled: true
+  Endpoint: http://127.0.0.1:8123
+  Database: exchange_analytics
+  Username: default
+  Password: ""
+  Source: strategy-rpc
+  Timeout: 3s
+  QueueSize: 2048
+  FlushInterval: 1s
+
+Postgres:
+  Enabled: false
+  DSN: "postgres://exchange:exchange@postgres:5432/exchange_core?sslmode=disable"
+  AccountID: exchange-prod
+  MaxOpenConns: 10
+  MaxIdleConns: 5
+  ConnMaxLifetime: 30m
+
 Templates:
   btc-core:
     risk_per_trade: 0.025

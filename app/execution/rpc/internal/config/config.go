@@ -38,6 +38,9 @@ type Config struct {
 
 	// ClickHouse 配置执行分析数据落库。
 	ClickHouse ClickHouseConfig
+
+	// Postgres 配置执行业务数据扩展落库。
+	Postgres PostgresConfig
 }
 
 // ExchangeConfig 交易所路由配置
@@ -112,4 +115,14 @@ type ClickHouseConfig struct {
 	Timeout       time.Duration `json:",default=3s"`
 	QueueSize     int           `json:",default=2048"`
 	FlushInterval time.Duration `json:",default=1s"`
+}
+
+// PostgresConfig 定义 PostgreSQL 连接与写入参数。
+type PostgresConfig struct {
+	Enabled         bool          `json:",default=false"`
+	DSN             string        `json:",optional"`
+	AccountID       string        `json:",optional"`
+	MaxOpenConns    int           `json:",default=10"`
+	MaxIdleConns    int           `json:",default=5"`
+	ConnMaxLifetime time.Duration `json:",default=30m"`
 }

@@ -44,3 +44,29 @@ Binance:
   Intervals:
     - 1m
   Proxy: ""
+
+ClickHouse:
+  Enabled: true
+  Endpoint: http://127.0.0.1:8123
+  Database: exchange_analytics
+  Username: default
+  Password: ""
+  Source: market-rpc
+  Timeout: 3s
+  QueueSize: 2048
+  FlushInterval: 1s
+  Recovery:
+    Enabled: true
+    QueryTimeout: 15s
+    WarmupWaitTimeout: 2m
+    PageLimit: 1500
+    DeleteOverlap: true
+    OverlapWindow: 3m
+
+Postgres:
+  Enabled: false
+  DSN: "postgres://exchange:exchange@postgres:5432/exchange_core?sslmode=disable"
+  AccountID: exchange-prod
+  MaxOpenConns: 10
+  MaxIdleConns: 5
+  ConnMaxLifetime: 30m

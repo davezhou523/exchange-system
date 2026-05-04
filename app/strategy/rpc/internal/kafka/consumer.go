@@ -319,6 +319,11 @@ func formatFloat(f float64) float64 {
 	return float64(int64(f*100+0.5)) / 100
 }
 
+// formatIndicatorFloat 保留指标字段 6 位小数，避免本地 warmup 恢复时精度回退。
+func formatIndicatorFloat(f float64) float64 {
+	return float64(int64(f*1_000_000+0.5)) / 1_000_000
+}
+
 func shouldPersistKlineLog(k *market.Kline) bool {
 	if k == nil || !k.IsClosed {
 		return false
@@ -370,7 +375,7 @@ func (c *Consumer) writeKlineLog(k *market.Kline) {
 		return
 	}
 
-	// Round float fields to 2 decimal places for cleaner logs
+	// 价格与成交量字段保留 2 位便于排查，技术指标统一保留 6 位给 warmup 恢复复用。
 	k.Volume = formatFloat(k.Volume)
 	k.QuoteVolume = formatFloat(k.QuoteVolume)
 	k.TakerBuyVolume = formatFloat(k.TakerBuyVolume)
@@ -379,10 +384,10 @@ func (c *Consumer) writeKlineLog(k *market.Kline) {
 	k.High = formatFloat(k.High)
 	k.Low = formatFloat(k.Low)
 	k.Close = formatFloat(k.Close)
-	k.Ema21 = formatFloat(k.Ema21)
-	k.Ema55 = formatFloat(k.Ema55)
-	k.Rsi = formatFloat(k.Rsi)
-	k.Atr = formatFloat(k.Atr)
+	k.Ema21 = formatIndicatorFloat(k.Ema21)
+	k.Ema55 = formatIndicatorFloat(k.Ema55)
+	k.Rsi = formatIndicatorFloat(k.Rsi)
+	k.Atr = formatIndicatorFloat(k.Atr)
 
 	dateStr := time.UnixMilli(k.CloseTime).UTC().Format("2006-01-02")
 	dir := filepath.Join(c.klineLogDir, k.Symbol, k.Interval)

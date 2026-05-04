@@ -1858,11 +1858,11 @@ func (o *orderedSignalIndicators) MarshalJSON() ([]byte, error) {
 		if i > 0 {
 			buf.WriteByte(',')
 		}
-		keyJSON, err := json.Marshal(key)
+		keyJSON, err := marshalJSONNoHTMLEscape(key)
 		if err != nil {
 			return nil, err
 		}
-		valJSON, err := json.Marshal(o.values[key])
+		valJSON, err := marshalJSONNoHTMLEscape(o.values[key])
 		if err != nil {
 			return nil, err
 		}
@@ -2224,11 +2224,11 @@ func (o *orderedDecisionExtras) MarshalJSON() ([]byte, error) {
 		if i > 0 {
 			buf.WriteByte(',')
 		}
-		keyJSON, err := json.Marshal(key)
+		keyJSON, err := marshalJSONNoHTMLEscape(key)
 		if err != nil {
 			return nil, err
 		}
-		valJSON, err := json.Marshal(o.values[key])
+		valJSON, err := marshalJSONNoHTMLEscape(o.values[key])
 		if err != nil {
 			return nil, err
 		}
@@ -2527,11 +2527,22 @@ func marshalAnalyticsJSON(v interface{}) string {
 	if v == nil {
 		return "{}"
 	}
-	data, err := json.Marshal(v)
+	data, err := marshalJSONNoHTMLEscape(v)
 	if err != nil {
 		return "{}"
 	}
 	return string(data)
+}
+
+// marshalJSONNoHTMLEscape 使用标准 JSON 编码，但保留 >、<、& 原字符，便于日志直读。
+func marshalJSONNoHTMLEscape(v interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 // buildSignalAnalyticsID 生成 signal_fact 使用的稳定信号ID。

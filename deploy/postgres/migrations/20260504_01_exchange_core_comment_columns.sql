@@ -1,16 +1,5 @@
-CREATE SCHEMA IF NOT EXISTS exchange_core;
-
-CREATE TABLE IF NOT EXISTS exchange_core.strategy_template
-(
-    id            BIGSERIAL PRIMARY KEY,
-    template_code TEXT NOT NULL UNIQUE,
-    template_name TEXT NOT NULL,
-    bucket        TEXT NOT NULL,
-    enabled       BOOLEAN NOT NULL DEFAULT TRUE,
-    description   TEXT NOT NULL DEFAULT '',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+-- 为已存在的 exchange_core 表补充表备注与字段备注。
+-- 该脚本用于增量迁移，不替代初始化脚本。
 
 COMMENT ON TABLE exchange_core.strategy_template IS '策略模板主表';
 COMMENT ON COLUMN exchange_core.strategy_template.id IS '主键 ID';
@@ -22,20 +11,6 @@ COMMENT ON COLUMN exchange_core.strategy_template.description IS '模板描述';
 COMMENT ON COLUMN exchange_core.strategy_template.created_at IS '创建时间';
 COMMENT ON COLUMN exchange_core.strategy_template.updated_at IS '更新时间';
 
-CREATE TABLE IF NOT EXISTS exchange_core.strategy_param_version
-(
-    id            BIGSERIAL PRIMARY KEY,
-    template_code TEXT NOT NULL REFERENCES exchange_core.strategy_template(template_code),
-    version       INTEGER NOT NULL,
-    params_json   JSONB NOT NULL,
-    published_by  TEXT NOT NULL DEFAULT '',
-    published_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    remark        TEXT NOT NULL DEFAULT '',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_strategy_param_version UNIQUE (template_code, version)
-);
-
 COMMENT ON TABLE exchange_core.strategy_param_version IS '策略参数版本表';
 COMMENT ON COLUMN exchange_core.strategy_param_version.id IS '主键 ID';
 COMMENT ON COLUMN exchange_core.strategy_param_version.template_code IS '关联模板编码';
@@ -46,31 +21,6 @@ COMMENT ON COLUMN exchange_core.strategy_param_version.published_at IS '发布�
 COMMENT ON COLUMN exchange_core.strategy_param_version.remark IS '版本备注';
 COMMENT ON COLUMN exchange_core.strategy_param_version.created_at IS '创建时间';
 COMMENT ON COLUMN exchange_core.strategy_param_version.updated_at IS '更新时间';
-
-CREATE INDEX IF NOT EXISTS idx_strategy_param_version_template
-    ON exchange_core.strategy_param_version (template_code, version DESC);
-
-CREATE TABLE IF NOT EXISTS exchange_core.orders
-(
-    id                BIGSERIAL PRIMARY KEY,
-    account_id        TEXT NOT NULL,
-    symbol            TEXT NOT NULL,
-    order_id          TEXT NOT NULL,
-    client_order_id   TEXT NOT NULL DEFAULT '',
-    strategy_id       TEXT NOT NULL DEFAULT '',
-    position_cycle_id TEXT NOT NULL DEFAULT '',
-    side              TEXT NOT NULL,
-    type              TEXT NOT NULL,
-    price             NUMERIC(20, 8) NOT NULL DEFAULT 0,
-    quantity          NUMERIC(20, 8) NOT NULL DEFAULT 0,
-    executed_quantity NUMERIC(20, 8) NOT NULL DEFAULT 0,
-    status            TEXT NOT NULL,
-    reduce_only       BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_orders_account_order UNIQUE (account_id, order_id),
-    CONSTRAINT uq_orders_account_client_order UNIQUE (account_id, client_order_id)
-);
 
 COMMENT ON TABLE exchange_core.orders IS '订单主表';
 COMMENT ON COLUMN exchange_core.orders.id IS '主键 ID';
@@ -90,29 +40,6 @@ COMMENT ON COLUMN exchange_core.orders.reduce_only IS '是否仅减仓';
 COMMENT ON COLUMN exchange_core.orders.created_at IS '创建时间';
 COMMENT ON COLUMN exchange_core.orders.updated_at IS '更新时间';
 
-CREATE INDEX IF NOT EXISTS idx_orders_symbol_status
-    ON exchange_core.orders (symbol, status);
-
-CREATE INDEX IF NOT EXISTS idx_orders_cycle
-    ON exchange_core.orders (position_cycle_id);
-
-CREATE TABLE IF NOT EXISTS exchange_core.trades
-(
-    id           BIGSERIAL PRIMARY KEY,
-    account_id   TEXT NOT NULL,
-    symbol       TEXT NOT NULL,
-    trade_id     TEXT NOT NULL,
-    order_id     TEXT NOT NULL,
-    price        NUMERIC(20, 8) NOT NULL,
-    qty          NUMERIC(20, 8) NOT NULL,
-    fee          NUMERIC(20, 8) NOT NULL DEFAULT 0,
-    fee_asset    TEXT NOT NULL DEFAULT '',
-    realized_pnl NUMERIC(20, 8) NOT NULL DEFAULT 0,
-    trade_time   TIMESTAMPTZ NOT NULL,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_trades_account_trade UNIQUE (account_id, trade_id)
-);
-
 COMMENT ON TABLE exchange_core.trades IS '成交明细表';
 COMMENT ON COLUMN exchange_core.trades.id IS '主键 ID';
 COMMENT ON COLUMN exchange_core.trades.account_id IS '账户标识';
@@ -127,27 +54,6 @@ COMMENT ON COLUMN exchange_core.trades.realized_pnl IS '已实现盈亏';
 COMMENT ON COLUMN exchange_core.trades.trade_time IS '成交时间';
 COMMENT ON COLUMN exchange_core.trades.created_at IS '创建时间';
 
-CREATE INDEX IF NOT EXISTS idx_trades_order_id
-    ON exchange_core.trades (order_id);
-
-CREATE INDEX IF NOT EXISTS idx_trades_symbol_time
-    ON exchange_core.trades (symbol, trade_time DESC);
-
-CREATE TABLE IF NOT EXISTS exchange_core.positions
-(
-    id             BIGSERIAL PRIMARY KEY,
-    account_id     TEXT NOT NULL,
-    symbol         TEXT NOT NULL,
-    position_side  TEXT NOT NULL,
-    position_amt   NUMERIC(20, 8) NOT NULL DEFAULT 0,
-    entry_price    NUMERIC(20, 8) NOT NULL DEFAULT 0,
-    mark_price     NUMERIC(20, 8) NOT NULL DEFAULT 0,
-    unrealized_pnl NUMERIC(20, 8) NOT NULL DEFAULT 0,
-    leverage       NUMERIC(10, 2) NOT NULL DEFAULT 1,
-    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_positions_account_symbol_side UNIQUE (account_id, symbol, position_side)
-);
-
 COMMENT ON TABLE exchange_core.positions IS '持仓快照表';
 COMMENT ON COLUMN exchange_core.positions.id IS '主键 ID';
 COMMENT ON COLUMN exchange_core.positions.account_id IS '账户标识';
@@ -159,24 +65,6 @@ COMMENT ON COLUMN exchange_core.positions.mark_price IS '标记价格';
 COMMENT ON COLUMN exchange_core.positions.unrealized_pnl IS '未实现盈亏';
 COMMENT ON COLUMN exchange_core.positions.leverage IS '杠杆倍数';
 COMMENT ON COLUMN exchange_core.positions.updated_at IS '更新时间';
-
-CREATE INDEX IF NOT EXISTS idx_positions_symbol
-    ON exchange_core.positions (symbol);
-
-CREATE TABLE IF NOT EXISTS exchange_core.api_audit_log
-(
-    id                BIGSERIAL PRIMARY KEY,
-    request_id        TEXT NOT NULL DEFAULT '',
-    user_id           TEXT NOT NULL DEFAULT '',
-    account_id        TEXT NOT NULL DEFAULT '',
-    path              TEXT NOT NULL,
-    method            TEXT NOT NULL,
-    action            TEXT NOT NULL DEFAULT '',
-    request_body_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-    response_code     INTEGER NOT NULL DEFAULT 0,
-    ip                TEXT NOT NULL DEFAULT '',
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
 
 COMMENT ON TABLE exchange_core.api_audit_log IS 'API 审计日志表';
 COMMENT ON COLUMN exchange_core.api_audit_log.id IS '主键 ID';
@@ -190,12 +78,3 @@ COMMENT ON COLUMN exchange_core.api_audit_log.request_body_json IS '请求体 JS
 COMMENT ON COLUMN exchange_core.api_audit_log.response_code IS '响应状态码';
 COMMENT ON COLUMN exchange_core.api_audit_log.ip IS '请求来源 IP';
 COMMENT ON COLUMN exchange_core.api_audit_log.created_at IS '创建时间';
-
-CREATE INDEX IF NOT EXISTS idx_api_audit_log_request_id
-    ON exchange_core.api_audit_log (request_id);
-
-CREATE INDEX IF NOT EXISTS idx_api_audit_log_created_at
-    ON exchange_core.api_audit_log (created_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_api_audit_log_account_id
-    ON exchange_core.api_audit_log (account_id);

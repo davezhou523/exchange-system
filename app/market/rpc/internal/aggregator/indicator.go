@@ -4,6 +4,7 @@ import (
 	"exchange-system/common/indicator/atr"
 	"exchange-system/common/indicator/ema"
 	"exchange-system/common/indicator/rsi"
+	"math"
 )
 
 // --- 指标计算（按周期计算，避免指标粒度错位）---
@@ -53,24 +54,24 @@ func (w *symbolWorker) calcBucketIndicators(b *bucket, intervalName string) {
 	// --- EMA 递推计算 ---
 	// ema = prevEma + α * (price - prevEma), α = 2/(period+1)
 	if params.Ema21Period > 0 {
-		b.Ema21 = w.computeEMAValue(history, b.Close, params.Ema21Period,
-			&history.state.ema21, &history.state.ema21Init, includeCurrent)
+		b.Ema21 = roundIndicatorValue(w.computeEMAValue(history, b.Close, params.Ema21Period,
+			&history.state.ema21, &history.state.ema21Init, includeCurrent))
 	}
 	if params.Ema55Period > 0 {
-		b.Ema55 = w.computeEMAValue(history, b.Close, params.Ema55Period,
-			&history.state.ema55, &history.state.ema55Init, includeCurrent)
+		b.Ema55 = roundIndicatorValue(w.computeEMAValue(history, b.Close, params.Ema55Period,
+			&history.state.ema55, &history.state.ema55Init, includeCurrent))
 	}
 
 	// --- RSI 递推计算（Wilder/RMA 平滑）---
 	// Wilder RSI: avgGain = (prevAvgGain*(period-1) + currentGain) / period
 	if params.RsiPeriod > 0 {
-		b.Rsi = w.computeRSIValue(history, b.Close, params.RsiPeriod, includeCurrent)
+		b.Rsi = roundIndicatorValue(w.computeRSIValue(history, b.Close, params.RsiPeriod, includeCurrent))
 	}
 
 	// --- ATR 递推计算（RMA/Wilder 平滑，与 Binance/TradingView 对齐）---
 	// ATR = (prevATR*(period-1) + currentTR) / period
 	if params.AtrPeriod > 0 {
-		b.Atr = w.computeATRValue(history, b.High, b.Low, params.AtrPeriod, includeCurrent)
+		b.Atr = roundIndicatorValue(w.computeATRValue(history, b.High, b.Low, params.AtrPeriod, includeCurrent))
 	}
 }
 
@@ -186,13 +187,13 @@ func (w *symbolWorker) advanceEMAState(history *klineRingBuffer, currentPrice fl
 			return // 数据不足，等待更多数据
 		}
 		// 初始化：SMA + 递推
-		*lastEma = ema.Init(closes, period)
+		*lastEma = roundIndicatorValue(ema.Init(closes, period))
 		*initialized = true
 		return
 	}
 
 	// 已初始化：递推一次
-	*lastEma = ema.Step(*lastEma, currentPrice, period)
+	*lastEma = roundIndicatorValue(ema.Step(*lastEma, currentPrice, period))
 }
 
 // ---------------------------------------------------------------------------
@@ -350,12 +351,21 @@ func (w *symbolWorker) advanceATRState(history *klineRingBuffer, currentHigh, cu
 
 		atrState := atr.InitRma(highs, lows, prevCloses, period)
 
-		state.atr = atrState.ATR
+		state.atr = roundIndicatorValue(atrState.ATR)
 		state.atrPeriod = period
 		state.atrInit = true
 		return
 	}
 
 	// 已初始化：RMA 递推
-	state.atr = atr.RmaStep(state.atr, tr, period)
+	state.atr = roundIndicatorValue(atr.RmaStep(state.atr, tr, period))
+}
+
+// roundIndicatorValue 把递推型指标统一收敛到 6 位小数，避免不同链路出现精度漂移。
+func roundIndicatorValue(v float64) float64 {
+	if v == 0 {
+		return 0
+	}
+	const scale = 1_000_000
+	return math.Round(v*scale) / scale
 }

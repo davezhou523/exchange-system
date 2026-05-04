@@ -62,6 +62,7 @@ func (d *klineDispatcher) OnKline(ctx context.Context, k *market.Kline) {
 	}
 }
 
+// NewServiceContext 初始化 market 服务依赖，并在启动 WebSocket 前完成预热与补数。
 func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -207,6 +208,19 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		}
 	}
 
+	if err := recoverKlineFactGap(ctx, c, agg, chWriter, warmupper); err != nil {
+		if chWriter != nil {
+			_ = chWriter.Close()
+		}
+		if depthProducer != nil {
+			_ = depthProducer.Close()
+		}
+		_ = producer.Close()
+		agg.Stop()
+		cancel()
+		return nil, err
+	}
+
 	wsClient.StartInBackground(ctx)
 	if universeMgr != nil {
 		go universeMgr.Start(ctx)
@@ -224,6 +238,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	}, nil
 }
 
+// Close 关闭 ServiceContext 持有的后台资源，尽量按依赖顺序释放。
 func (s *ServiceContext) Close() error {
 	if s == nil {
 		return nil
@@ -491,7 +506,7 @@ func cloneKline(k *market.Kline) *market.Kline {
 	return &out
 }
 
-// formatClickHouseDateTime64 把毫秒时间戳转换为 ClickHouse DateTime64(3) 字符串。
+// formatClickHouseDateTime64 把毫秒时间戳转换为固定 3 位小数的 ClickHouse 时间字符串。
 func formatClickHouseDateTime64(ms int64) string {
 	if ms <= 0 {
 		return ""

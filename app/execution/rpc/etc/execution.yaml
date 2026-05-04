@@ -70,14 +70,10 @@ Idempotent:
 SignalLogDir: data/signal       # 收到的策略信号日志
 OrderLogDir: data/order         # 订单执行结果日志
 
-ClickHouse:
-  Enabled: true
-  Endpoint: http://127.0.0.1:8123
-  Database: exchange_analytics
-  Username: default
-  Password: ""
+Postgres:
+  Enabled: false
+  DSN: "postgres://exchange:exchange@127.0.0.1:5432/exchange_core?sslmode=disable"
   AccountID: exchange-demo
-  Source: execution-rpc
-  Timeout: 3s
-  QueueSize: 2048
-  FlushInterval: 1s
+  MaxOpenConns: 10
+  MaxIdleConns: 5
+  ConnMaxLifetime: 30m

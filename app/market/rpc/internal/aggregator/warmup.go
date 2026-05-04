@@ -380,14 +380,14 @@ func (a *KlineAggregator) initIndicatorStateFromRawKlines(klines []warmupKline, 
 	// 标准 EMA：SMA(period) 初始化，然后逐根递推
 	// 数据越多，递推越久，EMA 值越接近 Binance 的真实值
 	if params.Ema21Period > 0 && n >= params.Ema21Period {
-		emaVal := ema.Init(closes, params.Ema21Period)
+		emaVal := roundIndicatorValue(ema.Init(closes, params.Ema21Period))
 		state.ema21 = emaVal
 		state.ema21Init = true
 		b.Ema21 = emaVal
 	}
 
 	if params.Ema55Period > 0 && n >= params.Ema55Period {
-		emaVal := ema.Init(closes, params.Ema55Period)
+		emaVal := roundIndicatorValue(ema.Init(closes, params.Ema55Period))
 		state.ema55 = emaVal
 		state.ema55Init = true
 		b.Ema55 = emaVal
@@ -401,7 +401,7 @@ func (a *KlineAggregator) initIndicatorStateFromRawKlines(klines []warmupKline, 
 		state.avgLoss = rsiState.AvgLoss
 		state.rsiPeriod = params.RsiPeriod
 		state.rsiInit = true
-		b.Rsi = rsi.FromAvgGainLoss(rsiState.AvgGain, rsiState.AvgLoss)
+		b.Rsi = roundIndicatorValue(rsi.FromAvgGainLoss(rsiState.AvgGain, rsiState.AvgLoss))
 	}
 
 	// --- ATR 初始化（RMA/Wilder 平滑，与 Binance/TradingView 对齐）---
@@ -410,10 +410,10 @@ func (a *KlineAggregator) initIndicatorStateFromRawKlines(klines []warmupKline, 
 	if params.AtrPeriod > 0 && n >= params.AtrPeriod {
 		prevCloses := indicator.PrevClosesFromCloses(closes)
 		atrState := atr.InitRma(highs, lows, prevCloses, params.AtrPeriod)
-		state.atr = atrState.ATR
+		state.atr = roundIndicatorValue(atrState.ATR)
 		state.atrPeriod = params.AtrPeriod
 		state.atrInit = true
-		b.Atr = atrState.ATR
+		b.Atr = state.atr
 	}
 }
 

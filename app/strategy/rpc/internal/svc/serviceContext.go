@@ -1,6 +1,7 @@
 package svc
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,6 +12,9 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -491,6 +495,755 @@ func strategyWarmupLimit(interval string) int {
 	default:
 		return 0
 	}
+}
+
+// ensureStrategyWarmupLoadedLocked 在创建策略实例前按需从本地 K 线日志恢复最近多周期快照。
+func (s *ServiceContext) ensureStrategyWarmupLoadedLocked(symbol string) {
+	if s == nil || symbol == "" || s.strategyWarmup == nil {
+		return
+	}
+	state, ok := s.strategyWarmup[symbol]
+	if ok && strategyWarmupStateIsComplete(state) {
+		return
+	}
+
+	sources := make([]string, 0, 2)
+	clickhouseLoaded, err := loadStrategyWarmupStateFromClickHouse(context.Background(), s.Config.ClickHouse, symbol)
+	if err != nil {
+		log.Printf("[strategy-warmup] restore symbol=%s source=clickhouse failed: %v", symbol, err)
+	} else if strategyWarmupStateHasData(clickhouseLoaded) {
+		state = mergeStrategyWarmupState(state, clickhouseLoaded)
+		sources = append(sources, "clickhouse")
+	}
+
+	if !strategyWarmupStateIsComplete(state) {
+		diskLoaded, diskErr := loadStrategyWarmupStateFromDisk(s.Config.KlineLogDir, symbol)
+		if diskErr != nil {
+			log.Printf("[strategy-warmup] restore symbol=%s source=disk failed: %v", symbol, diskErr)
+		} else if strategyWarmupStateHasData(diskLoaded) {
+			state = mergeStrategyWarmupState(state, diskLoaded)
+			sources = append(sources, "disk")
+		}
+	}
+
+	if !strategyWarmupStateHasData(state) {
+		log.Printf("[strategy-warmup] restore symbol=%s skipped reason=no_clickhouse_or_local_history", symbol)
+		return
+	}
+
+	s.strategyWarmup[symbol] = state
+	source := strings.Join(sources, "+")
+	log.Printf(
+		"[strategy-warmup] symbol=%s interval=all source=%s severity=info event=restore_count restored_4h=%d restored_1h=%d restored_15m=%d restored_1m=%d",
+		symbol,
+		source,
+		len(state.Klines4h),
+		len(state.Klines1h),
+		len(state.Klines15m),
+		len(state.Klines1m),
+	)
+	log.Printf(
+		"[strategy-warmup] symbol=%s interval=all source=%s severity=info event=restore_sync %s",
+		symbol,
+		source,
+		formatStrategyWarmupSyncFields(state, clickhouseLoaded),
+	)
+	logStrategyWarmupDeltaEvent(symbol, source, "4h", state.Klines4h, clickhouseLoaded.Klines4h)
+	logStrategyWarmupDeltaEvent(symbol, source, "1h", state.Klines1h, clickhouseLoaded.Klines1h)
+	logStrategyWarmupDeltaEvent(symbol, source, "15m", state.Klines15m, clickhouseLoaded.Klines15m)
+	logStrategyWarmupDeltaEvent(symbol, source, "1m", state.Klines1m, clickhouseLoaded.Klines1m)
+}
+
+// loadStrategyWarmupStateFromClickHouse 从 ClickHouse 的 kline_fact 恢复策略启动所需的最近多周期闭 K 线。
+func loadStrategyWarmupStateFromClickHouse(ctx context.Context, cfg config.ClickHouseConfig, symbol string) (strategyWarmupState, error) {
+	state := strategyWarmupState{}
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		return state, nil
+	}
+
+	client, err := newStrategyWarmupClickHouseClient(cfg)
+	if err != nil {
+		return state, err
+	}
+	if client == nil {
+		return state, nil
+	}
+
+	if state.Klines4h, err = client.queryLatestWarmupKlines(ctx, symbol, "4h", strategyWarmupLimit("4h")); err != nil {
+		return state, err
+	}
+	if state.Klines1h, err = client.queryLatestWarmupKlines(ctx, symbol, "1h", strategyWarmupLimit("1h")); err != nil {
+		return state, err
+	}
+	if state.Klines15m, err = client.queryLatestWarmupKlines(ctx, symbol, "15m", strategyWarmupLimit("15m")); err != nil {
+		return state, err
+	}
+	if state.Klines1m, err = client.queryLatestWarmupKlines(ctx, symbol, "1m", strategyWarmupLimit("1m")); err != nil {
+		return state, err
+	}
+	return state, nil
+}
+
+// loadStrategyWarmupStateFromDisk 从本地 K 线日志恢复策略启动所需的最近多周期闭 K 线。
+func loadStrategyWarmupStateFromDisk(baseDir, symbol string) (strategyWarmupState, error) {
+	state := strategyWarmupState{}
+	baseDir = strings.TrimSpace(baseDir)
+	symbol = strings.TrimSpace(symbol)
+	if baseDir == "" || symbol == "" {
+		return state, nil
+	}
+
+	var err error
+	if state.Klines4h, err = loadStrategyWarmupIntervalFromDisk(baseDir, symbol, "4h"); err != nil {
+		return state, err
+	}
+	if state.Klines1h, err = loadStrategyWarmupIntervalFromDisk(baseDir, symbol, "1h"); err != nil {
+		return state, err
+	}
+	if state.Klines15m, err = loadStrategyWarmupIntervalFromDisk(baseDir, symbol, "15m"); err != nil {
+		return state, err
+	}
+	if state.Klines1m, err = loadStrategyWarmupIntervalFromDisk(baseDir, symbol, "1m"); err != nil {
+		return state, err
+	}
+	return state, nil
+}
+
+// loadStrategyWarmupIntervalFromDisk 读取指定周期最近的本地 jsonl 日志，并按 openTime 去重保留最佳版本。
+func loadStrategyWarmupIntervalFromDisk(baseDir, symbol, interval string) ([]market.Kline, error) {
+	limit := strategyWarmupLimit(interval)
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	files, err := listStrategyWarmupFiles(baseDir, symbol, interval)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, nil
+	}
+
+	bestByOpenTime := make(map[int64]market.Kline, limit)
+	for fileIndex := len(files) - 1; fileIndex >= 0; fileIndex-- {
+		file, err := os.Open(files[fileIndex])
+		if err != nil {
+			return nil, fmt.Errorf("open warmup file %s: %w", files[fileIndex], err)
+		}
+
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			kline, ok, err := parseStrategyWarmupKlineLog(scanner.Bytes(), symbol, interval)
+			if err != nil {
+				_ = file.Close()
+				return nil, fmt.Errorf("parse warmup line %s: %w", files[fileIndex], err)
+			}
+			if !ok {
+				continue
+			}
+			existing, exists := bestByOpenTime[kline.OpenTime]
+			if !exists || shouldReplaceStrategyWarmupKline(existing, kline) {
+				bestByOpenTime[kline.OpenTime] = kline
+			}
+		}
+		scanErr := scanner.Err()
+		_ = file.Close()
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan warmup file %s: %w", files[fileIndex], scanErr)
+		}
+		if len(bestByOpenTime) >= limit {
+			break
+		}
+	}
+
+	if len(bestByOpenTime) == 0 {
+		return nil, nil
+	}
+
+	openTimes := make([]int64, 0, len(bestByOpenTime))
+	for openTime := range bestByOpenTime {
+		openTimes = append(openTimes, openTime)
+	}
+	sort.Slice(openTimes, func(i, j int) bool {
+		return openTimes[i] < openTimes[j]
+	})
+	if len(openTimes) > limit {
+		openTimes = openTimes[len(openTimes)-limit:]
+	}
+
+	result := make([]market.Kline, 0, len(openTimes))
+	for _, openTime := range openTimes {
+		result = append(result, bestByOpenTime[openTime])
+	}
+	return result, nil
+}
+
+// listStrategyWarmupFiles 返回指定 symbol/interval 的本地历史文件，并按日期升序排列。
+func listStrategyWarmupFiles(baseDir, symbol, interval string) ([]string, error) {
+	dir := filepath.Join(baseDir, symbol, interval)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read warmup dir %s: %w", dir, err)
+	}
+
+	files := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if filepath.Ext(entry.Name()) != ".jsonl" {
+			continue
+		}
+		files = append(files, filepath.Join(dir, entry.Name()))
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+// parseStrategyWarmupKlineLog 把本地 jsonl 日志还原为可回灌的 protobuf K 线对象。
+func parseStrategyWarmupKlineLog(line []byte, symbol, interval string) (market.Kline, bool, error) {
+	type klineLogEntry struct {
+		Symbol         string  `json:"symbol"`
+		Interval       string  `json:"interval"`
+		OpenTime       string  `json:"openTime"`
+		CloseTime      string  `json:"closeTime"`
+		EventTime      string  `json:"eventTime"`
+		IsClosed       bool    `json:"isClosed"`
+		Open           float64 `json:"open"`
+		High           float64 `json:"high"`
+		Low            float64 `json:"low"`
+		Close          float64 `json:"close"`
+		Volume         float64 `json:"volume"`
+		QuoteVolume    float64 `json:"quoteVolume"`
+		TakerBuyVolume float64 `json:"takerBuyVolume"`
+		TakerBuyQuote  float64 `json:"takerBuyQuote"`
+		IsDirty        bool    `json:"isDirty"`
+		DirtyReason    string  `json:"dirtyReason"`
+		IsTradable     bool    `json:"isTradable"`
+		IsFinal        bool    `json:"isFinal"`
+		Ema21          float64 `json:"ema21"`
+		Ema55          float64 `json:"ema55"`
+		Rsi            float64 `json:"rsi"`
+		Atr            float64 `json:"atr"`
+	}
+
+	var entry klineLogEntry
+	if err := json.Unmarshal(line, &entry); err != nil {
+		return market.Kline{}, false, err
+	}
+	if entry.Symbol != symbol || entry.Interval != interval || !entry.IsClosed {
+		return market.Kline{}, false, nil
+	}
+
+	openTime, err := time.Parse(time.RFC3339Nano, entry.OpenTime)
+	if err != nil {
+		return market.Kline{}, false, fmt.Errorf("parse openTime %q: %w", entry.OpenTime, err)
+	}
+	closeTime, err := time.Parse(time.RFC3339Nano, entry.CloseTime)
+	if err != nil {
+		return market.Kline{}, false, fmt.Errorf("parse closeTime %q: %w", entry.CloseTime, err)
+	}
+	eventTime, err := time.Parse(time.RFC3339Nano, entry.EventTime)
+	if err != nil {
+		return market.Kline{}, false, fmt.Errorf("parse eventTime %q: %w", entry.EventTime, err)
+	}
+
+	return market.Kline{
+		Symbol:         entry.Symbol,
+		Interval:       entry.Interval,
+		OpenTime:       openTime.UnixMilli(),
+		CloseTime:      closeTime.UnixMilli(),
+		EventTime:      eventTime.UnixMilli(),
+		IsClosed:       entry.IsClosed,
+		Open:           entry.Open,
+		High:           entry.High,
+		Low:            entry.Low,
+		Close:          entry.Close,
+		Volume:         entry.Volume,
+		QuoteVolume:    entry.QuoteVolume,
+		TakerBuyVolume: entry.TakerBuyVolume,
+		TakerBuyQuote:  entry.TakerBuyQuote,
+		IsDirty:        entry.IsDirty,
+		DirtyReason:    entry.DirtyReason,
+		IsTradable:     entry.IsTradable,
+		IsFinal:        entry.IsFinal,
+		Ema21:          entry.Ema21,
+		Ema55:          entry.Ema55,
+		Rsi:            entry.Rsi,
+		Atr:            entry.Atr,
+	}, true, nil
+}
+
+// shouldReplaceStrategyWarmupKline 比较同一根 K 线的多个版本，优先保留更完整、更可交易的快照。
+func shouldReplaceStrategyWarmupKline(current, candidate market.Kline) bool {
+	currentScore := scoreStrategyWarmupKline(current)
+	candidateScore := scoreStrategyWarmupKline(candidate)
+	if candidateScore != currentScore {
+		return candidateScore > currentScore
+	}
+	return candidate.EventTime >= current.EventTime
+}
+
+// scoreStrategyWarmupKline 为本地恢复挑选最佳快照打分，避免 1h/4h 非最终态覆盖最终态。
+func scoreStrategyWarmupKline(kline market.Kline) int {
+	score := 0
+	if kline.IsClosed {
+		score += 1
+	}
+	if kline.IsFinal {
+		score += 10
+	}
+	if kline.IsTradable {
+		score += 20
+	}
+	if !kline.IsDirty {
+		score += 5
+	}
+	if kline.Ema21 != 0 {
+		score += 2
+	}
+	if kline.Ema55 != 0 {
+		score += 2
+	}
+	if kline.Rsi != 0 {
+		score += 1
+	}
+	if kline.Atr != 0 {
+		score += 1
+	}
+	return score
+}
+
+// strategyWarmupStateHasData 判断磁盘恢复结果是否至少拿到一类周期数据。
+func strategyWarmupStateHasData(state strategyWarmupState) bool {
+	return len(state.Klines4h) > 0 ||
+		len(state.Klines1h) > 0 ||
+		len(state.Klines15m) > 0 ||
+		len(state.Klines1m) > 0
+}
+
+// latestStrategyWarmupOpenTime 返回某个周期当前恢复到的最新开盘时间，便于启动日志核对。
+func latestStrategyWarmupOpenTime(klines []market.Kline) string {
+	if len(klines) == 0 {
+		return ""
+	}
+	latest := latestStrategyWarmupOpenTimeMillis(klines)
+	if latest <= 0 {
+		return ""
+	}
+	return formatAnalyticsTime(time.UnixMilli(latest))
+}
+
+// formatStrategyWarmupSyncFields 按固定周期顺序输出 latest_open、delta、sync 三元字段，方便日志采集复用统一模板。
+func formatStrategyWarmupSyncFields(restored, clickhouse strategyWarmupState) string {
+	parts := []string{
+		fmt.Sprintf(
+			"latest_open_4h=%s delta_vs_clickhouse_4h_min=%s sync_4h=%s",
+			latestStrategyWarmupOpenTime(restored.Klines4h),
+			strategyWarmupOpenDeltaMinutes(restored.Klines4h, clickhouse.Klines4h),
+			strategyWarmupOpenDeltaStatus(restored.Klines4h, clickhouse.Klines4h),
+		),
+		fmt.Sprintf(
+			"latest_open_1h=%s delta_vs_clickhouse_1h_min=%s sync_1h=%s",
+			latestStrategyWarmupOpenTime(restored.Klines1h),
+			strategyWarmupOpenDeltaMinutes(restored.Klines1h, clickhouse.Klines1h),
+			strategyWarmupOpenDeltaStatus(restored.Klines1h, clickhouse.Klines1h),
+		),
+		fmt.Sprintf(
+			"latest_open_15m=%s delta_vs_clickhouse_15m_min=%s sync_15m=%s",
+			latestStrategyWarmupOpenTime(restored.Klines15m),
+			strategyWarmupOpenDeltaMinutes(restored.Klines15m, clickhouse.Klines15m),
+			strategyWarmupOpenDeltaStatus(restored.Klines15m, clickhouse.Klines15m),
+		),
+		fmt.Sprintf(
+			"latest_open_1m=%s delta_vs_clickhouse_1m_min=%s sync_1m=%s",
+			latestStrategyWarmupOpenTime(restored.Klines1m),
+			strategyWarmupOpenDeltaMinutes(restored.Klines1m, clickhouse.Klines1m),
+			strategyWarmupOpenDeltaStatus(restored.Klines1m, clickhouse.Klines1m),
+		),
+	}
+	return strings.Join(parts, " ")
+}
+
+// latestStrategyWarmupOpenTimeMillis 返回某个周期当前恢复到的最新开盘时间戳。
+func latestStrategyWarmupOpenTimeMillis(klines []market.Kline) int64 {
+	if len(klines) == 0 {
+		return 0
+	}
+	return klines[len(klines)-1].OpenTime
+}
+
+// strategyWarmupOpenDeltaMinutes 返回最终恢复结果与 ClickHouse 最新开盘时间的分钟差。
+func strategyWarmupOpenDeltaMinutes(restored, clickhouse []market.Kline) string {
+	restoredLatest := latestStrategyWarmupOpenTimeMillis(restored)
+	clickhouseLatest := latestStrategyWarmupOpenTimeMillis(clickhouse)
+	if restoredLatest <= 0 || clickhouseLatest <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d", (restoredLatest-clickhouseLatest)/int64(time.Minute/time.Millisecond))
+}
+
+// strategyWarmupOpenDeltaStatus 把恢复结果与 ClickHouse 的开盘时间差转成直观状态。
+func strategyWarmupOpenDeltaStatus(restored, clickhouse []market.Kline) string {
+	restoredLatest := latestStrategyWarmupOpenTimeMillis(restored)
+	clickhouseLatest := latestStrategyWarmupOpenTimeMillis(clickhouse)
+	switch {
+	case restoredLatest <= 0 || clickhouseLatest <= 0:
+		return ""
+	case restoredLatest == clickhouseLatest:
+		return "aligned"
+	case restoredLatest < clickhouseLatest:
+		return "behind"
+	default:
+		return "ahead"
+	}
+}
+
+// logStrategyWarmupDeltaEvent 按差值状态输出异常恢复日志，aligned 保持静默，便于线上聚焦异常周期。
+func logStrategyWarmupDeltaEvent(symbol, source, interval string, restored, clickhouse []market.Kline) {
+	status := strategyWarmupOpenDeltaStatus(restored, clickhouse)
+	switch status {
+	case "behind":
+		if !shouldWarnStrategyWarmupBehind(interval, restored, clickhouse) {
+			return
+		}
+		log.Printf(
+			"[strategy-warmup][WARN] symbol=%s interval=%s source=%s severity=warn event=restore_behind latest_open=%s clickhouse_latest_open=%s delta_min=%s",
+			symbol,
+			interval,
+			source,
+			latestStrategyWarmupOpenTime(restored),
+			latestStrategyWarmupOpenTime(clickhouse),
+			strategyWarmupOpenDeltaMinutes(restored, clickhouse),
+		)
+	case "ahead":
+		log.Printf(
+			"[strategy-warmup][INFO] symbol=%s interval=%s source=%s severity=info event=restore_ahead latest_open=%s clickhouse_latest_open=%s delta_min=%s",
+			symbol,
+			interval,
+			source,
+			latestStrategyWarmupOpenTime(restored),
+			latestStrategyWarmupOpenTime(clickhouse),
+			strategyWarmupOpenDeltaMinutes(restored, clickhouse),
+		)
+	}
+}
+
+// shouldWarnStrategyWarmupBehind 仅在恢复结果落后超过 1 根周期时输出 WARN，避免边界时刻的瞬时噪音。
+func shouldWarnStrategyWarmupBehind(interval string, restored, clickhouse []market.Kline) bool {
+	restoredLatest := latestStrategyWarmupOpenTimeMillis(restored)
+	clickhouseLatest := latestStrategyWarmupOpenTimeMillis(clickhouse)
+	if restoredLatest <= 0 || clickhouseLatest <= 0 || restoredLatest >= clickhouseLatest {
+		return false
+	}
+	threshold := strategyWarmupIntervalDurationMillis(interval)
+	if threshold <= 0 {
+		return true
+	}
+	return clickhouseLatest-restoredLatest > threshold
+}
+
+// strategyWarmupIntervalDurationMillis 返回各周期对应的毫秒长度，用于判断是否真的落后超过 1 根周期。
+func strategyWarmupIntervalDurationMillis(interval string) int64 {
+	switch strings.TrimSpace(interval) {
+	case "4h":
+		return int64(4 * time.Hour / time.Millisecond)
+	case "1h":
+		return int64(time.Hour / time.Millisecond)
+	case "15m":
+		return int64(15 * time.Minute / time.Millisecond)
+	case "1m":
+		return int64(time.Minute / time.Millisecond)
+	default:
+		return 0
+	}
+}
+
+// strategyWarmupStateIsComplete 判断 warmup 是否已覆盖策略依赖的全部周期。
+func strategyWarmupStateIsComplete(state strategyWarmupState) bool {
+	return len(state.Klines4h) > 0 &&
+		len(state.Klines1h) > 0 &&
+		len(state.Klines15m) > 0 &&
+		len(state.Klines1m) > 0
+}
+
+// mergeStrategyWarmupState 优先保留内存中的较新缓存，只用磁盘数据补齐缺失周期。
+func mergeStrategyWarmupState(current, loaded strategyWarmupState) strategyWarmupState {
+	merged := current
+	if len(merged.Klines4h) == 0 {
+		merged.Klines4h = loaded.Klines4h
+	}
+	if len(merged.Klines1h) == 0 {
+		merged.Klines1h = loaded.Klines1h
+	}
+	if len(merged.Klines15m) == 0 {
+		merged.Klines15m = loaded.Klines15m
+	}
+	if len(merged.Klines1m) == 0 {
+		merged.Klines1m = loaded.Klines1m
+	}
+	return merged
+}
+
+// strategyWarmupClickHouseClient 负责从 ClickHouse 查询策略启动恢复所需的 K 线快照。
+type strategyWarmupClickHouseClient struct {
+	endpoint string
+	database string
+	username string
+	password string
+	client   *http.Client
+}
+
+// strategyWarmupClickHouseRow 对应 ClickHouse 查询返回的 warmup 行结构。
+type strategyWarmupClickHouseRow struct {
+	Symbol         string          `json:"symbol"`
+	Interval       string          `json:"interval"`
+	OpenTimeMs     json.RawMessage `json:"open_time_ms"`
+	CloseTimeMs    json.RawMessage `json:"close_time_ms"`
+	EventTimeMs    json.RawMessage `json:"event_time_ms"`
+	Open           float64         `json:"open"`
+	High           float64         `json:"high"`
+	Low            float64         `json:"low"`
+	Close          float64         `json:"close"`
+	Volume         float64         `json:"volume"`
+	QuoteVolume    float64         `json:"quote_volume"`
+	TakerBuyVolume float64         `json:"taker_buy_volume"`
+	IsClosed       uint8           `json:"is_closed"`
+	IsDirty        uint8           `json:"is_dirty"`
+	DirtyReason    string          `json:"dirty_reason"`
+	IsTradable     uint8           `json:"is_tradable"`
+	IsFinal        uint8           `json:"is_final"`
+	Ema21          float64         `json:"ema21"`
+	Ema55          float64         `json:"ema55"`
+	Rsi            float64         `json:"rsi"`
+	Atr            float64         `json:"atr"`
+}
+
+// newStrategyWarmupClickHouseClient 创建 strategy 启动恢复使用的 ClickHouse 查询客户端。
+func newStrategyWarmupClickHouseClient(cfg config.ClickHouseConfig) (*strategyWarmupClickHouseClient, error) {
+	if !cfg.Enabled {
+		return nil, nil
+	}
+	endpoint := strings.TrimSpace(cfg.Endpoint)
+	if endpoint == "" {
+		return nil, nil
+	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	database := strings.TrimSpace(cfg.Database)
+	if database == "" {
+		database = "exchange_analytics"
+	}
+	return &strategyWarmupClickHouseClient{
+		endpoint: endpoint,
+		database: database,
+		username: strings.TrimSpace(cfg.Username),
+		password: cfg.Password,
+		client:   &http.Client{Timeout: timeout},
+	}, nil
+}
+
+// queryLatestWarmupKlines 查询指定交易对和周期最近的闭 K 线，并按 openTime 去重保留最佳版本。
+func (c *strategyWarmupClickHouseClient) queryLatestWarmupKlines(ctx context.Context, symbol, interval string, limit int) ([]market.Kline, error) {
+	if c == nil || symbol == "" || interval == "" || limit <= 0 {
+		return nil, nil
+	}
+
+	queryLimit := limit * 3
+	if queryLimit < limit {
+		queryLimit = limit
+	}
+	query := fmt.Sprintf(
+		"SELECT symbol, interval, toInt64(toUnixTimestamp64Milli(open_time)) AS open_time_ms, "+
+			"toInt64(toUnixTimestamp64Milli(close_time)) AS close_time_ms, toInt64(toUnixTimestamp64Milli(event_time)) AS event_time_ms, "+
+			"open, high, low, close, volume, quote_volume, taker_buy_volume, is_closed, is_dirty, dirty_reason, is_tradable, is_final, ema21, ema55, rsi, atr "+
+			"FROM %s.kline_fact WHERE symbol = %s AND interval = %s AND is_closed = 1 "+
+			"ORDER BY open_time DESC, event_time DESC LIMIT %d FORMAT JSONEachRow",
+		c.database,
+		quoteClickHouseString(strings.ToUpper(strings.TrimSpace(symbol))),
+		quoteClickHouseString(strings.TrimSpace(interval)),
+		queryLimit,
+	)
+
+	body, err := c.executeQuery(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, nil
+	}
+
+	bestByOpenTime := make(map[int64]market.Kline, limit)
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	scanner.Buffer(make([]byte, 0, 1024), 2*1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var row strategyWarmupClickHouseRow
+		if err := json.Unmarshal(line, &row); err != nil {
+			return nil, fmt.Errorf("decode warmup row: %w", err)
+		}
+		kline, ok, err := buildStrategyWarmupKlineFromClickHouseRow(row)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		existing, exists := bestByOpenTime[kline.OpenTime]
+		if !exists || shouldReplaceStrategyWarmupKline(existing, kline) {
+			bestByOpenTime[kline.OpenTime] = kline
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan warmup rows: %w", err)
+	}
+	return sortStrategyWarmupKlines(bestByOpenTime, limit), nil
+}
+
+// executeQuery 通过 ClickHouse HTTP 接口执行 warmup 恢复查询。
+func (c *strategyWarmupClickHouseClient) executeQuery(ctx context.Context, query string) ([]byte, error) {
+	if c == nil {
+		return nil, fmt.Errorf("clickhouse client is nil")
+	}
+	endpoint, err := url.Parse(c.endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("parse clickhouse endpoint: %w", err)
+	}
+	queryParams := endpoint.Query()
+	if c.database != "" {
+		queryParams.Set("database", c.database)
+	}
+	endpoint.RawQuery = queryParams.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), strings.NewReader(query))
+	if err != nil {
+		return nil, fmt.Errorf("build clickhouse request: %w", err)
+	}
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	if c.username != "" {
+		req.SetBasicAuth(c.username, c.password)
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("execute clickhouse request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read clickhouse response: %w", err)
+	}
+	if resp.StatusCode >= http.StatusBadRequest {
+		return nil, fmt.Errorf("clickhouse status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return body, nil
+}
+
+// buildStrategyWarmupKlineFromClickHouseRow 把 ClickHouse 查询结果转换为策略可回灌的 K 线对象。
+func buildStrategyWarmupKlineFromClickHouseRow(row strategyWarmupClickHouseRow) (market.Kline, bool, error) {
+	openTime, err := parseStrategyJSONInt64(row.OpenTimeMs)
+	if err != nil {
+		return market.Kline{}, false, fmt.Errorf("parse open_time_ms: %w", err)
+	}
+	closeTime, err := parseStrategyJSONInt64(row.CloseTimeMs)
+	if err != nil {
+		return market.Kline{}, false, fmt.Errorf("parse close_time_ms: %w", err)
+	}
+	eventTime, err := parseStrategyJSONInt64(row.EventTimeMs)
+	if err != nil {
+		return market.Kline{}, false, fmt.Errorf("parse event_time_ms: %w", err)
+	}
+	if openTime <= 0 || closeTime <= 0 || eventTime <= 0 || row.IsClosed == 0 {
+		return market.Kline{}, false, nil
+	}
+	return market.Kline{
+		Symbol:         strings.ToUpper(strings.TrimSpace(row.Symbol)),
+		Interval:       strings.TrimSpace(row.Interval),
+		OpenTime:       openTime,
+		CloseTime:      closeTime,
+		EventTime:      eventTime,
+		IsClosed:       row.IsClosed == 1,
+		Open:           row.Open,
+		High:           row.High,
+		Low:            row.Low,
+		Close:          row.Close,
+		Volume:         row.Volume,
+		QuoteVolume:    row.QuoteVolume,
+		TakerBuyVolume: row.TakerBuyVolume,
+		IsDirty:        row.IsDirty == 1,
+		DirtyReason:    strings.TrimSpace(row.DirtyReason),
+		IsTradable:     row.IsTradable == 1,
+		IsFinal:        row.IsFinal == 1,
+		Ema21:          row.Ema21,
+		Ema55:          row.Ema55,
+		Rsi:            row.Rsi,
+		Atr:            row.Atr,
+	}, true, nil
+}
+
+// sortStrategyWarmupKlines 把去重后的 K 线按时间升序整理，并截取最近 limit 根。
+func sortStrategyWarmupKlines(bestByOpenTime map[int64]market.Kline, limit int) []market.Kline {
+	if len(bestByOpenTime) == 0 || limit <= 0 {
+		return nil
+	}
+	openTimes := make([]int64, 0, len(bestByOpenTime))
+	for openTime := range bestByOpenTime {
+		openTimes = append(openTimes, openTime)
+	}
+	sort.Slice(openTimes, func(i, j int) bool {
+		return openTimes[i] < openTimes[j]
+	})
+	if len(openTimes) > limit {
+		openTimes = openTimes[len(openTimes)-limit:]
+	}
+
+	result := make([]market.Kline, 0, len(openTimes))
+	for _, openTime := range openTimes {
+		result = append(result, bestByOpenTime[openTime])
+	}
+	return result
+}
+
+// parseStrategyJSONInt64 兼容 ClickHouse JSONEachRow 返回的数字或字符串整型字段。
+func parseStrategyJSONInt64(value json.RawMessage) (int64, error) {
+	trimmed := strings.TrimSpace(string(value))
+	if trimmed == "" || trimmed == "null" {
+		return 0, nil
+	}
+	var number int64
+	if err := json.Unmarshal(value, &number); err == nil {
+		return number, nil
+	}
+	var text string
+	if err := json.Unmarshal(value, &text); err != nil {
+		return 0, fmt.Errorf("decode int64 raw value %s: %w", trimmed, err)
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return 0, nil
+	}
+	var parsed int64
+	if _, err := fmt.Sscan(text, &parsed); err != nil {
+		return 0, fmt.Errorf("scan int64 %q: %w", text, err)
+	}
+	return parsed, nil
+}
+
+// quoteClickHouseString 对字符串做最小转义，避免拼接 SQL 时破坏字面量。
+func quoteClickHouseString(value string) string {
+	escaped := strings.ReplaceAll(value, "\\", "\\\\")
+	escaped = strings.ReplaceAll(escaped, "'", "\\'")
+	return "'" + escaped + "'"
 }
 
 // evaluateUniverse 基于最新快照生成目标策略集合，并把 diff 应用到运行时。
@@ -1375,6 +2128,7 @@ func (s *ServiceContext) upsertStrategyLocked(cfg *strategypb.StrategyConfig) {
 		current.UpdateRuntimeConfig(cfg.Parameters, s.Config.SignalLogDir, opts)
 		return
 	}
+	s.ensureStrategyWarmupLoadedLocked(cfg.Symbol)
 	strat := strategyengine.NewTrendFollowingStrategy(
 		cfg.Symbol,
 		cfg.Parameters,

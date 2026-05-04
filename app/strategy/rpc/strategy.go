@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"exchange-system/app/strategy/rpc/internal/config"
 	"exchange-system/app/strategy/rpc/internal/server"
+	"exchange-system/app/strategy/rpc/internal/stdlog"
 	"exchange-system/app/strategy/rpc/internal/svc"
 	commonkafka "exchange-system/common/kafka"
 	marketpb "exchange-system/common/pb/market"
@@ -40,6 +41,13 @@ func main() {
 
 	var c config.Config
 	conf.MustLoad(*configFile, &c)
+	stdLoggerCloser, err := stdlog.Setup("logs")
+	if err != nil {
+		log.Fatalf("setup std logger failed: %v", err)
+	}
+	defer func() {
+		_ = stdLoggerCloser.Close()
+	}()
 	if *replayGroupSuffix != "" {
 		c.Kafka.Group = appendKafkaGroupSuffix(resolveKafkaGroupBase(c), *replayGroupSuffix)
 	}
@@ -76,7 +84,7 @@ func main() {
 	})
 	defer s.Stop()
 
-	fmt.Printf("Starting rpc server at %s...\n", c.ListenOn)
+	log.Printf("Starting rpc server at %s", c.ListenOn)
 	s.Start()
 }
 

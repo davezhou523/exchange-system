@@ -16,6 +16,7 @@ import (
 	"exchange-system/app/market/rpc/internal/config"
 	"exchange-system/app/market/rpc/internal/kafka"
 	"exchange-system/app/market/rpc/internal/server"
+	"exchange-system/app/market/rpc/internal/stdlog"
 	"exchange-system/app/market/rpc/internal/svc"
 	"exchange-system/common/pb/market"
 
@@ -51,6 +52,13 @@ func main() {
 
 	var c config.Config
 	conf.MustLoad(*configFile, &c)
+	stdLoggerCloser, err := stdlog.Setup("logs")
+	if err != nil {
+		log.Fatalf("setup std logger failed: %v", err)
+	}
+	defer func() {
+		_ = stdLoggerCloser.Close()
+	}()
 
 	if *mockKafka {
 		if err := runMockKafkaProducer(c, *mockCount, *mockInterval, *mockSymbol, *mockKlineTF); err != nil {
@@ -87,7 +95,7 @@ func main() {
 	})
 	defer s.Stop()
 
-	fmt.Printf("Starting rpc server at %s...\n", c.ListenOn)
+	log.Printf("Starting rpc server at %s", c.ListenOn)
 	s.Start()
 }
 

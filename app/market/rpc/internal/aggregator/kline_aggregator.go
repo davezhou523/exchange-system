@@ -146,6 +146,10 @@ type KlineAggregator struct {
 	// emitObserver 在聚合后 K 线真正发射时收到回调，可用于同步更新轻量观察缓存。
 	emitObserver func(*market.Kline)
 
+	// kafkaSendEnabled 控制 emit 后是否继续把 K 线异步发送到 Kafka。
+	// 断点补齐期间可临时关闭，避免把历史补数再次广播给下游实时链路。
+	kafkaSendEnabled atomic.Bool
+
 	mu      sync.Mutex
 	workers map[string]*symbolWorker // symbol -> worker
 	wg      sync.WaitGroup
@@ -202,6 +206,7 @@ func NewKlineAggregator(intervals []IntervalDef, producer KafkaProducer, klineLo
 		maxWorkerIdleTime:     30 * time.Minute,
 		asyncSendQueue:        make(chan *market.Kline, 4096),
 	}
+	a.kafkaSendEnabled.Store(true)
 
 	// 启动异步 Kafka 发送协程
 	a.asyncSenderWg.Add(1)
@@ -264,6 +269,14 @@ func (a *KlineAggregator) SetWorkerGC(gcInterval, maxIdleTime time.Duration) {
 	}
 }
 
+// SetKafkaSendEnabled 设置 emit 后是否继续异步发送 Kafka。
+func (a *KlineAggregator) SetKafkaSendEnabled(enabled bool) {
+	if a == nil {
+		return
+	}
+	a.kafkaSendEnabled.Store(enabled)
+}
+
 // calcHistoryBufferSize 根据指标参数动态计算 ring buffer 容量。
 func (a *KlineAggregator) calcHistoryBufferSize(intervalName string) int {
 	const minBufferSize = 200
@@ -295,6 +308,22 @@ func (a *KlineAggregator) calcHistoryBufferSize(intervalName string) int {
 
 // OnKline dispatches a closed 1m kline to the per-symbol worker goroutine.
 func (a *KlineAggregator) OnKline(ctx context.Context, k *market.Kline) {
+	a.feedKline(ctx, k, true)
+}
+
+// ReplayKline 以阻塞方式投递闭合 1m K 线，适用于启动补数等不能丢数据的场景。
+func (a *KlineAggregator) ReplayKline(ctx context.Context, k *market.Kline) {
+	a.feedKline(ctx, k, false)
+}
+
+// feedKline 按指定投递策略把闭合 1m K 线送入 symbol worker。
+func (a *KlineAggregator) feedKline(ctx context.Context, k *market.Kline, dropIfFull bool) {
+	if a == nil || k == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if k.Interval != "1m" || !k.IsClosed {
 		return
 	}
@@ -311,10 +340,21 @@ func (a *KlineAggregator) OnKline(ctx context.Context, k *market.Kline) {
 
 	a.startWorkerGCOnce()
 
+	if dropIfFull {
+		select {
+		case w.ch <- k:
+		default:
+			log.Printf("[aggregator] WARN: %s channel full, dropping 1m kline openTime=%d", k.Symbol, k.OpenTime)
+		}
+		return
+	}
+
 	select {
+	case <-a.ctx.Done():
+		return
+	case <-ctx.Done():
+		return
 	case w.ch <- k:
-	default:
-		log.Printf("[aggregator] WARN: %s channel full, dropping 1m kline openTime=%d", k.Symbol, k.OpenTime)
 	}
 }
 
