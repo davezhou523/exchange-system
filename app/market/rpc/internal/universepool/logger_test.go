@@ -162,6 +162,7 @@ func TestJSONLLoggerWriteMetaIncludesRankDetail(t *testing.T) {
 	logger.WriteMeta(now, stateSummary{
 		GlobalState:      "trend",
 		SnapshotInterval: "1m",
+		LastSnapshotAt:   now,
 		TrendCount:       2,
 		StateVotes: map[string]StateVoteDetail{
 			"BNBUSDT": {
