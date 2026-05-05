@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ type Manager struct {
 	cfg       Config
 	states    map[string]*SymbolRuntimeState
 	snapshots map[string]Snapshot
+	h4History map[string][]h4GateKline
 	selector  Selector
 	warmup    WarmupChecker
 	subCtrl   SubscriptionController
@@ -53,6 +55,7 @@ func NewManager(cfg Config, selector Selector, warmup WarmupChecker, subCtrl Sub
 		cfg:       cfg,
 		states:    make(map[string]*SymbolRuntimeState),
 		snapshots: make(map[string]Snapshot),
+		h4History: make(map[string][]h4GateKline),
 		selector:  selector,
 		warmup:    warmup,
 		subCtrl:   subCtrl,
@@ -443,12 +446,15 @@ func (m *Manager) UpdateSnapshotFromKline(k *market.Kline) {
 		return
 	}
 	expectedInterval := validationSnapshotIntervalName(m.cfg)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if k.Interval == "4h" {
+		m.updateRangeGateSnapshotLocked(k, "live")
+	}
 	if k.Interval != expectedInterval {
 		return
 	}
 	features := featureengine.BuildFromKline(k)
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	prev := m.snapshots[k.Symbol]
 	prev.Symbol = features.Symbol
 	prev.UpdatedAt = features.UpdatedAt
@@ -464,11 +470,85 @@ func (m *Manager) UpdateSnapshotFromKline(k *market.Kline) {
 	m.snapshots[k.Symbol] = prev
 }
 
+// HydrateRangeGateWarmup 把启动阶段恢复出的 4H 历史 K 线回灌到动态币池，用于冷启动时立即恢复 range gate。
+func (m *Manager) HydrateRangeGateWarmup(symbol string, klines []*market.Kline) int {
+	if m == nil || len(klines) == 0 {
+		return 0
+	}
+	normalizedSymbol := strings.ToUpper(strings.TrimSpace(symbol))
+	if normalizedSymbol == "" {
+		return 0
+	}
+	items := make([]*market.Kline, 0, len(klines))
+	for _, kline := range klines {
+		if kline == nil || !kline.IsClosed || !strings.EqualFold(strings.TrimSpace(kline.Interval), "4h") {
+			continue
+		}
+		items = append(items, kline)
+	}
+	if len(items) == 0 {
+		return 0
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].GetEventTime() < items[j].GetEventTime()
+	})
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	hydrated := 0
+	for _, kline := range items {
+		kline.Symbol = normalizedSymbol
+		m.updateRangeGateSnapshotLocked(kline, "warmup")
+		hydrated++
+	}
+	return hydrated
+}
+
+// RangeGateSnapshot 返回指定交易对当前缓存的 4H 震荡门禁快照，便于启动诊断和测试直接校验。
+func (m *Manager) RangeGateSnapshot(symbol string) (Snapshot, bool) {
+	if m == nil {
+		return Snapshot{}, false
+	}
+	normalizedSymbol := strings.ToUpper(strings.TrimSpace(symbol))
+	if normalizedSymbol == "" {
+		return Snapshot{}, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	snap, ok := m.snapshots[normalizedSymbol]
+	if !ok {
+		return Snapshot{}, false
+	}
+	return snap, true
+}
+
+// updateRangeGateSnapshotLocked 在收到 4H 闭合 K 线时更新对应 symbol 的 4H 震荡门禁结果。
+func (m *Manager) updateRangeGateSnapshotLocked(k *market.Kline, source string) {
+	if m == nil || k == nil || k.Symbol == "" {
+		return
+	}
+	history := appendH4GateHistory(m.h4History[k.Symbol], buildH4GateKline(k))
+	m.h4History[k.Symbol] = history
+	snap := m.snapshots[k.Symbol]
+	snap.Symbol = k.Symbol
+	snap.RangeGate4H = evaluateRangeGateFromHistory(time.UnixMilli(k.EventTime).UTC(), history, m.cfg)
+	snap.RangeGate4HSource = strings.TrimSpace(source)
+	m.snapshots[k.Symbol] = snap
+}
+
 // normalizeConfig 为骨架阶段补齐最小默认值，避免上层传入空配置时 loop 失效。
 func normalizeConfig(cfg Config) Config {
 	cfg = applyValidationModeDefaults(cfg)
 	if cfg.EvaluateInterval <= 0 {
 		cfg.EvaluateInterval = 30 * time.Second
+	}
+	if cfg.RangeGateH4AdxMax <= 0 {
+		cfg.RangeGateH4AdxMax = 20
+	}
+	if cfg.RangeGateH4EmaCloseMax <= 0 {
+		cfg.RangeGateH4EmaCloseMax = 0.005
+	}
+	if cfg.RangeGateH4ScoreMin <= 0 {
+		cfg.RangeGateH4ScoreMin = 2
 	}
 	return cfg
 }

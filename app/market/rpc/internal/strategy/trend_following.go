@@ -1913,6 +1913,7 @@ func (s *TrendFollowingStrategy) openPosition(ctx context.Context, k *marketpb.K
 	extras := map[string]interface{}{
 		"action":         action,
 		"side":           side,
+		"quantity":       quantity,
 		"entry_price":    m15.Close,
 		"stop_loss":      stopLoss,
 		"take_profits":   []float64{tp1, tp2},
@@ -2782,7 +2783,7 @@ func (s *TrendFollowingStrategy) latestWeightRecommendation() (weights.Recommend
 	return s.weightProvider(s.symbol)
 }
 
-// enrichDecisionExtrasWithRoute 把统一路由视角写入 decision extras，避免下游再从模板名反推 bucket。
+// enrichDecisionExtrasWithRoute 把统一路由视角和 allocator 预算快照写入 decision extras，避免排查时再跨日志回溯。
 func (s *TrendFollowingStrategy) enrichDecisionExtrasWithRoute(extras map[string]interface{}) map[string]interface{} {
 	if s == nil {
 		return extras
@@ -2810,6 +2811,8 @@ func (s *TrendFollowingStrategy) enrichDecisionExtrasWithRoute(extras map[string
 	if rec.Template != "" {
 		out["route_template"] = rec.Template
 	}
+	out["risk_scale"] = rec.RiskScale
+	out["position_budget"] = rec.PositionBudget
 	return out
 }
 
@@ -3491,8 +3494,8 @@ func (o *orderedDecisionExtras) Summary() string {
 func orderedDecisionExtraKeys(values map[string]interface{}) []string {
 	priority := []string{
 		"summary",
-		"action", "side", "entry_price", "stop_loss", "take_profits",
-		"route_bucket", "route_reason", "route_template",
+		"action", "side", "quantity", "entry_price", "stop_loss", "take_profits",
+		"route_bucket", "route_reason", "route_template", "risk_scale", "position_budget",
 		"trend", "pullback", "entry", "entry_mode",
 		"reject_codes", "reject_descs",
 		"price_in_range", "rsi_ok", "structure_ok", "ema_trend_ok",

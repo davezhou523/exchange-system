@@ -54,7 +54,24 @@ type AggregateResult struct {
 
 // Config 定义最小版状态识别器的阈值参数。
 type Config struct {
-	FreshnessWindow   time.Duration
-	RangeAtrPctMax    float64
-	BreakoutAtrPctMin float64
+	FreshnessWindow        time.Duration
+	RangeAtrPctMax         float64
+	BreakoutAtrPctMin      float64
+	RangeGateH4AdxMax      float64
+	RangeGateH4EmaCloseMax float64
+	RangeGateH4ScoreMin    int
+}
+
+// RangeGate 表示 4H 震荡门禁的结构化结果，供 selector 和 router 直接复用。
+type RangeGate struct {
+	Ready          bool
+	Passed         bool
+	Reason         string
+	Score          int
+	UpdatedAt      time.Time
+	Adx            float64
+	AdxOK          bool
+	EmaCloseness   float64
+	EmaClosenessOK bool
+	AtrFalling     bool
 }

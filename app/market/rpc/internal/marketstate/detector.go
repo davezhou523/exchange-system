@@ -40,6 +40,15 @@ func normalizeConfig(cfg Config) Config {
 	if cfg.BreakoutAtrPctMin <= 0 {
 		cfg.BreakoutAtrPctMin = 0.006
 	}
+	if cfg.RangeGateH4AdxMax <= 0 {
+		cfg.RangeGateH4AdxMax = 20
+	}
+	if cfg.RangeGateH4EmaCloseMax <= 0 {
+		cfg.RangeGateH4EmaCloseMax = 0.005
+	}
+	if cfg.RangeGateH4ScoreMin <= 0 {
+		cfg.RangeGateH4ScoreMin = 2
+	}
 	return cfg
 }
 

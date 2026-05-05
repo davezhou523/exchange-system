@@ -57,6 +57,7 @@ type Input struct {
 	Ema55          float64
 	MarketState    marketstate.MarketState
 	MarketAnalysis regimejudge.Analysis
+	RangeGate4H    marketstate.RangeGate
 }
 
 // Decision 表示一次模板与策略桶路由的结构化结果。
@@ -262,6 +263,12 @@ func RouteBucketForTemplate(template string) Bucket {
 
 // shouldRouteRange 判断当前输入是否应切到震荡模板；若 Analysis 已存在，则不再继续回退旧状态口径。
 func shouldRouteRange(in Input) (bool, string) {
+	if !in.RangeGate4H.Passed {
+		if in.RangeGate4H.Reason != "" {
+			return false, in.RangeGate4H.Reason
+		}
+		return false, ""
+	}
 	if reason := in.MarketAnalysis.RangeReason(); reason != "" {
 		return true, reason
 	}

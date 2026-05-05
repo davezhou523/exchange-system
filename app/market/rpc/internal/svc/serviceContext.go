@@ -52,6 +52,15 @@ type klineDispatcher struct {
 	strategyEngine *StrategyEngine
 }
 
+// resolveStrategySignalTopic 统一决定策略信号发送到哪个 Kafka topic，避免误发到 K 线 topic。
+func resolveStrategySignalTopic(c config.Config) string {
+	signalTopic := strings.TrimSpace(c.Kafka.Topics.Signal)
+	if signalTopic != "" {
+		return signalTopic
+	}
+	return "signal"
+}
+
 // OnKline 在不破坏现有聚合链路的前提下，同步更新动态币池快照缓存，同时将原始 1m K 线传给策略引擎。
 func (d *klineDispatcher) OnKline(ctx context.Context, k *market.Kline) {
 	if d == nil || k == nil {
@@ -194,6 +203,9 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 			BreakoutPreferredSymbols: append([]string(nil), c.UniversePool.BreakoutPreferredSymbols...),
 			BreakoutAtrPctMin:        c.UniversePool.BreakoutAtrPctMin,
 			BreakoutAtrPctExitMin:    c.UniversePool.BreakoutAtrPctExitMin,
+			RangeGateH4AdxMax:        c.StrategyEngine.MarketState.RangeGateH4AdxMax,
+			RangeGateH4EmaCloseMax:   c.StrategyEngine.MarketState.RangeGateH4EmaCloseMax,
+			RangeGateH4ScoreMin:      c.StrategyEngine.MarketState.RangeGateH4ScoreMin,
 			EvaluateInterval:         c.UniversePool.EvaluateInterval,
 			MinActiveDuration:        c.UniversePool.MinActiveDuration,
 			MinInactiveDuration:      c.UniversePool.MinInactiveDuration,
@@ -215,10 +227,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	// 初始化策略引擎
 	var strategyEngine *StrategyEngine
 	if c.StrategyEngine.Strategies != nil {
-		signalTopic := "signal"
-		if c.Kafka.Topics.Kline != "" {
-			signalTopic = c.Kafka.Topics.Kline
-		}
+		signalTopic := resolveStrategySignalTopic(c)
 		stratProducer, err := kafka.NewProducerWithContext(ctx, c.Kafka.Addrs, signalTopic)
 		if err != nil {
 			log.Printf("[策略引擎] 创建信号生产者失败: %v", err)
@@ -257,6 +266,11 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	// 启动阶段主动为已配置交易对创建 worker，并提前拉取 warmup 数据到共享目录。
 	// 这样 strategy 在 market 刚启动时就能读到预热快照，而不是等首条实时 K 线触发懒加载。
 	agg.EnsureWarmupForSymbols(buildBootstrapWarmupSymbols(c))
+	if universeMgr != nil {
+		if err := hydrateUniversePoolFromSharedWarmup(c, universeMgr); err != nil {
+			log.Printf("[universepool] 共享 warmup 回灌失败: %v", err)
+		}
+	}
 	if strategyEngine != nil {
 		if err := hydrateStrategyEngineFromSharedWarmup(c, strategyEngine); err != nil {
 			log.Printf("[策略引擎] 共享 warmup 回灌失败: %v", err)

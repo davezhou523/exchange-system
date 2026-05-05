@@ -13,8 +13,9 @@ type Config struct {
 	Kafka struct {
 		Addrs  []string
 		Topics struct {
-			Kline string
-			Depth string
+			Kline  string
+			Depth  string
+			Signal string
 		}
 	}
 	Binance struct {
@@ -134,9 +135,12 @@ type StrategyEngineConfig struct {
 	}
 	// 市场状态配置
 	MarketState struct {
-		FreshnessWindow   time.Duration `json:",default=3m"`
-		RangeAtrPctMax    float64       `json:",default=0.006"`
-		BreakoutAtrPctMin float64       `json:",default=0.0045"`
+		FreshnessWindow        time.Duration `json:",default=3m"`
+		RangeAtrPctMax         float64       `json:",default=0.006"`
+		BreakoutAtrPctMin      float64       `json:",default=0.0045"`
+		RangeGateH4AdxMax      float64       `json:",default=20"`
+		RangeGateH4EmaCloseMax float64       `json:",default=0.005"`
+		RangeGateH4ScoreMin    int           `json:",default=2"`
 	}
 	// 权重配置
 	Weights struct {

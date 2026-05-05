@@ -216,6 +216,60 @@ func TestWriteDecisionLogIncludesRouteContext(t *testing.T) {
 	}
 }
 
+// TestWriteDecisionLogIncludesAllocatorFields 验证 open_signal_sent 场景常用字段可直接在 decision extras 中读取。
+func TestWriteDecisionLogIncludesAllocatorFields(t *testing.T) {
+	dir := t.TempDir()
+	s := NewTrendFollowingStrategy("BTCUSDT", map[string]float64{
+		paramDecisionLogEnabled: 1,
+	}, nil, nil, dir, &RuntimeOptions{
+		WeightProvider: func(symbol string) (weights.Recommendation, bool) {
+			return weights.Recommendation{
+				Symbol:         symbol,
+				Template:       "breakout-core",
+				Bucket:         "breakout",
+				RouteReason:    "market_state_breakout",
+				RiskScale:      0.85,
+				PositionBudget: 0.35,
+			}, true
+		},
+	})
+	now := time.Now().UTC()
+	k := &marketpb.Kline{
+		Symbol:     "BTCUSDT",
+		Interval:   "15m",
+		OpenTime:   now.Add(-15 * time.Minute).UnixMilli(),
+		CloseTime:  now.UnixMilli(),
+		IsTradable: true,
+		IsFinal:    true,
+	}
+	s.writeDecisionLogIfEnabled("entry", "signal", "open_signal_sent", k, map[string]interface{}{
+		"action":       "BUY",
+		"side":         "LONG",
+		"quantity":     0.12,
+		"entry_price":  100000.0,
+		"stop_loss":    99000.0,
+		"take_profits": []float64{101000.0, 102000.0},
+	})
+
+	entry := readSingleJSONLine(t, filepath.Join(dir, "decision", "BTCUSDT", now.Format("2006-01-02")+".jsonl"))
+	extras, ok := entry["extras"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("extras = %#v, want object", entry["extras"])
+	}
+	if got := extras["quantity"]; got != float64(0.12) {
+		t.Fatalf("extras.quantity = %#v, want 0.12", got)
+	}
+	if got := extras["entry_price"]; got != float64(100000) {
+		t.Fatalf("extras.entry_price = %#v, want 100000", got)
+	}
+	if got := extras["risk_scale"]; got != float64(0.85) {
+		t.Fatalf("extras.risk_scale = %#v, want 0.85", got)
+	}
+	if got := extras["position_budget"]; got != float64(0.35) {
+		t.Fatalf("extras.position_budget = %#v, want 0.35", got)
+	}
+}
+
 // TestWriteDecisionLogSummaryIncludesRejectReasons 验证决策日志 summary 会把拒绝原因压缩成一行，方便直接扫日志。
 func TestWriteDecisionLogSummaryIncludesRejectReasons(t *testing.T) {
 	dir := t.TempDir()

@@ -239,6 +239,10 @@ func TestSelectorEvaluateRangeTemplateWithMarketState(t *testing.T) {
 			Atr:         0.2,
 			Ema21:       100.1,
 			Ema55:       100.0,
+			RangeGate4H: marketstate.RangeGate{
+				Passed: true,
+				Reason: "range_gate_h4_passed",
+			},
 			MarketState: marketstate.MarketStateRange,
 		},
 	})
@@ -248,6 +252,58 @@ func TestSelectorEvaluateRangeTemplateWithMarketState(t *testing.T) {
 	}
 	if !got[0].Enabled || got[0].BaseTemplate != "eth-core" || got[0].Template != "range-core" || got[0].Reason != "market_state_range" {
 		t.Fatalf("Evaluate() = %+v, want enabled base=eth-core template=range-core market_state_range", got[0])
+	}
+}
+
+func TestSelectorEvaluateRangeTemplateRequiresH4Gate(t *testing.T) {
+	now := time.Date(2026, 4, 26, 7, 0, 0, 0, time.UTC)
+	selector := NewSelector(Config{
+		CandidateSymbols: []string{"ETHUSDT"},
+		RouterConfig: strategyrouter.Config{
+			StaticTemplateMap: map[string]string{
+				"ETHUSDT": "eth-core",
+			},
+			RangeTemplate: "range-core",
+		},
+		FreshnessWindow: 3 * time.Minute,
+		RequireFinal:    true,
+		RequireTradable: true,
+		RequireClean:    true,
+	})
+
+	got := selector.Evaluate(now, map[string]Snapshot{
+		"ETHUSDT": {
+			Symbol:      "ETHUSDT",
+			UpdatedAt:   now.Add(-time.Minute),
+			IsTradable:  true,
+			IsFinal:     true,
+			IsDirty:     false,
+			LastEventMs: now.UnixMilli(),
+			Close:       100,
+			Atr:         0.2,
+			Ema21:       100.1,
+			Ema55:       100.0,
+			RangeGate4H: marketstate.RangeGate{
+				Passed: false,
+				Reason: "range_gate_h4_failed",
+			},
+			MarketState: marketstate.MarketStateRange,
+			MarketAnalysis: regimejudge.Analysis{
+				Healthy:    true,
+				Fresh:      true,
+				RangeMatch: true,
+				Features: featureengine.Features{
+					AtrPct: 0.002,
+				},
+			},
+		},
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("Evaluate() len = %d, want 1", len(got))
+	}
+	if !got[0].Enabled || got[0].Template != "eth-core" || got[0].Reason != "healthy_data" {
+		t.Fatalf("Evaluate() = %+v, want base template when h4 gate failed", got[0])
 	}
 }
 
@@ -280,6 +336,10 @@ func TestSelectorEvaluateUsesRegimeAnalysisWithoutMarketState(t *testing.T) {
 			LastEventMs: now.UnixMilli(),
 			Close:       100,
 			Atr:         0.2,
+			RangeGate4H: marketstate.RangeGate{
+				Passed: true,
+				Reason: "range_gate_h4_passed",
+			},
 			MarketAnalysis: regimejudge.Analysis{
 				Healthy:    true,
 				Fresh:      true,
@@ -340,6 +400,10 @@ func TestSelectorEvaluateUsesRouterConfigEntry(t *testing.T) {
 			IsFinal:     true,
 			IsDirty:     false,
 			LastEventMs: now.UnixMilli(),
+			RangeGate4H: marketstate.RangeGate{
+				Passed: true,
+				Reason: "range_gate_h4_passed",
+			},
 			MarketAnalysis: regimejudge.Analysis{
 				Healthy:    true,
 				Fresh:      true,

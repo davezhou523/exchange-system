@@ -3,7 +3,19 @@ package universepool
 import (
 	"testing"
 	"time"
+
+	"exchange-system/app/market/rpc/internal/marketstate"
 )
+
+// testPassedRangeGate 返回一个最小可用的 4H 震荡门禁结果，供 range 场景测试复用。
+func testPassedRangeGate() marketstate.RangeGate {
+	return marketstate.RangeGate{
+		Ready:  true,
+		Passed: true,
+		Reason: "range_gate_h4_passed",
+		Score:  2,
+	}
+}
 
 func TestBasicSelectorEvaluatePrefersTrendSymbols(t *testing.T) {
 	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
@@ -175,12 +187,53 @@ func TestBasicSelectorEvaluateValidationMode5mUsesSteadierThresholds(t *testing.
 	})
 
 	got := selector.Evaluate(now, map[string]Snapshot{
-		"BTCUSDT": {Symbol: "BTCUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true},
-		"ETHUSDT": {Symbol: "ETHUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0020, Healthy: true},
-		"XRPUSDT": {Symbol: "XRPUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true},
+		"BTCUSDT": {Symbol: "BTCUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true, RangeGate4H: testPassedRangeGate()},
+		"ETHUSDT": {Symbol: "ETHUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0020, Healthy: true, RangeGate4H: testPassedRangeGate()},
+		"XRPUSDT": {Symbol: "XRPUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true, RangeGate4H: testPassedRangeGate()},
 	})
 	if got.GlobalState != "range" || got.RangeCount != 3 {
 		t.Fatalf("global state = %s range=%d, want range/3", got.GlobalState, got.RangeCount)
+	}
+}
+
+// TestBasicSelectorEvaluateRangeRequiresH4Gate 验证动态币池判定 range 时也必须先通过 4H 震荡门禁。
+func TestBasicSelectorEvaluateRangeRequiresH4Gate(t *testing.T) {
+	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	selector := NewBasicSelector(Config{
+		ValidationMode:        "5m",
+		CandidateSymbols:      []string{"BTCUSDT", "ETHUSDT"},
+		RangePreferredSymbols: []string{"BTCUSDT"},
+		EvaluateInterval:      30 * time.Second,
+		AddScoreThreshold:     0.75,
+	})
+
+	got := selector.Evaluate(now, map[string]Snapshot{
+		"BTCUSDT": {
+			Symbol:      "BTCUSDT",
+			UpdatedAt:   now.Add(-5 * time.Second),
+			LastPrice:   100,
+			Ema21:       100.1,
+			Ema55:       100.0,
+			AtrPct:      0.0021,
+			Healthy:     true,
+			RangeGate4H: marketstate.RangeGate{Ready: true, Passed: false, Reason: "range_gate_h4_failed", Score: 1},
+		},
+		"ETHUSDT": {
+			Symbol:      "ETHUSDT",
+			UpdatedAt:   now.Add(-5 * time.Second),
+			LastPrice:   100,
+			Ema21:       100.1,
+			Ema55:       100.0,
+			AtrPct:      0.0020,
+			Healthy:     true,
+			RangeGate4H: marketstate.RangeGate{Ready: true, Passed: false, Reason: "range_gate_h4_failed", Score: 1},
+		},
+	})
+	if got.GlobalState == "range" || got.RangeCount != 0 {
+		t.Fatalf("global state = %s range=%d, want no range vote when h4 gate failed", got.GlobalState, got.RangeCount)
+	}
+	if got.StateVotes["BTCUSDT"].ClassifiedReason != "range_h4_gate_failed" {
+		t.Fatalf("BTCUSDT classified_reason = %s, want range_h4_gate_failed", got.StateVotes["BTCUSDT"].ClassifiedReason)
 	}
 }
 
@@ -240,18 +293,18 @@ func TestBasicSelectorEvaluateHoldsPreviousStateWhenFreshInputsRemain(t *testing
 	})
 
 	first := selector.Evaluate(now, map[string]Snapshot{
-		"BTCUSDT": {Symbol: "BTCUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true},
-		"ETHUSDT": {Symbol: "ETHUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0020, Healthy: true},
-		"XRPUSDT": {Symbol: "XRPUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true},
+		"BTCUSDT": {Symbol: "BTCUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true, RangeGate4H: testPassedRangeGate()},
+		"ETHUSDT": {Symbol: "ETHUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0020, Healthy: true, RangeGate4H: testPassedRangeGate()},
+		"XRPUSDT": {Symbol: "XRPUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true, RangeGate4H: testPassedRangeGate()},
 	})
 	if first.GlobalState != "range" {
 		t.Fatalf("first global state = %s, want range", first.GlobalState)
 	}
 
 	second := selector.Evaluate(now.Add(30*time.Second), map[string]Snapshot{
-		"BTCUSDT": {Symbol: "BTCUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0, Healthy: true},
-		"ETHUSDT": {Symbol: "ETHUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0, Healthy: true},
-		"XRPUSDT": {Symbol: "XRPUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0, Healthy: true},
+		"BTCUSDT": {Symbol: "BTCUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0, Healthy: true, RangeGate4H: testPassedRangeGate()},
+		"ETHUSDT": {Symbol: "ETHUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0, Healthy: true, RangeGate4H: testPassedRangeGate()},
+		"XRPUSDT": {Symbol: "XRPUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0, Healthy: true, RangeGate4H: testPassedRangeGate()},
 	})
 	if second.GlobalState != "range" {
 		t.Fatalf("second global state = %s, want held range", second.GlobalState)
@@ -272,20 +325,20 @@ func TestBasicSelectorEvaluateValidationMode5mUsesExitThresholdToHoldRange(t *te
 	})
 
 	first := selector.Evaluate(now, map[string]Snapshot{
-		"BTCUSDT": {Symbol: "BTCUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true},
-		"ETHUSDT": {Symbol: "ETHUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0020, Healthy: true},
-		"BNBUSDT": {Symbol: "BNBUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true},
-		"XRPUSDT": {Symbol: "XRPUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true},
+		"BTCUSDT": {Symbol: "BTCUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true, RangeGate4H: testPassedRangeGate()},
+		"ETHUSDT": {Symbol: "ETHUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0020, Healthy: true, RangeGate4H: testPassedRangeGate()},
+		"BNBUSDT": {Symbol: "BNBUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true, RangeGate4H: testPassedRangeGate()},
+		"XRPUSDT": {Symbol: "XRPUSDT", UpdatedAt: now.Add(-5 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true, RangeGate4H: testPassedRangeGate()},
 	})
 	if first.GlobalState != "range" || first.RangeCount != 4 {
 		t.Fatalf("first global state = %s range=%d, want range/4", first.GlobalState, first.RangeCount)
 	}
 
 	second := selector.Evaluate(now.Add(2*time.Minute), map[string]Snapshot{
-		"BTCUSDT": {Symbol: "BTCUSDT", UpdatedAt: now.Add(115 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0026, Healthy: true},
-		"ETHUSDT": {Symbol: "ETHUSDT", UpdatedAt: now.Add(115 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0025, Healthy: true},
-		"BNBUSDT": {Symbol: "BNBUSDT", UpdatedAt: now.Add(115 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0026, Healthy: true},
-		"XRPUSDT": {Symbol: "XRPUSDT", UpdatedAt: now.Add(115 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0026, Healthy: true},
+		"BTCUSDT": {Symbol: "BTCUSDT", UpdatedAt: now.Add(115 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0026, Healthy: true, RangeGate4H: testPassedRangeGate()},
+		"ETHUSDT": {Symbol: "ETHUSDT", UpdatedAt: now.Add(115 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0025, Healthy: true, RangeGate4H: testPassedRangeGate()},
+		"BNBUSDT": {Symbol: "BNBUSDT", UpdatedAt: now.Add(115 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0026, Healthy: true, RangeGate4H: testPassedRangeGate()},
+		"XRPUSDT": {Symbol: "XRPUSDT", UpdatedAt: now.Add(115 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0026, Healthy: true, RangeGate4H: testPassedRangeGate()},
 	})
 	if second.GlobalState != "range" || second.RangeCount != 4 {
 		t.Fatalf("second global state = %s range=%d, want held range/4 via exit threshold", second.GlobalState, second.RangeCount)
@@ -306,10 +359,10 @@ func TestBasicSelectorEvaluateValidationMode5mKeepsSnapshotsFreshPastNinetySecon
 	})
 
 	got := selector.Evaluate(now, map[string]Snapshot{
-		"BTCUSDT": {Symbol: "BTCUSDT", UpdatedAt: now.Add(-160 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true},
-		"ETHUSDT": {Symbol: "ETHUSDT", UpdatedAt: now.Add(-160 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0020, Healthy: true},
-		"BNBUSDT": {Symbol: "BNBUSDT", UpdatedAt: now.Add(-160 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true},
-		"XRPUSDT": {Symbol: "XRPUSDT", UpdatedAt: now.Add(-160 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true},
+		"BTCUSDT": {Symbol: "BTCUSDT", UpdatedAt: now.Add(-160 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true, RangeGate4H: testPassedRangeGate()},
+		"ETHUSDT": {Symbol: "ETHUSDT", UpdatedAt: now.Add(-160 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0020, Healthy: true, RangeGate4H: testPassedRangeGate()},
+		"BNBUSDT": {Symbol: "BNBUSDT", UpdatedAt: now.Add(-160 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true, RangeGate4H: testPassedRangeGate()},
+		"XRPUSDT": {Symbol: "XRPUSDT", UpdatedAt: now.Add(-160 * time.Second), LastPrice: 100, Ema21: 100.1, Ema55: 100.0, AtrPct: 0.0021, Healthy: true, RangeGate4H: testPassedRangeGate()},
 	})
 	if got.GlobalState != "range" || got.RangeCount != 4 {
 		t.Fatalf("global state = %s range=%d, want range/4 with 5m freshness window", got.GlobalState, got.RangeCount)

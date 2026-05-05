@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"exchange-system/app/market/rpc/internal/config"
+	"exchange-system/app/market/rpc/internal/universepool"
 )
 
 // TestBuildHydratedWarmupKlinesCalculatesIndicators 验证 shared warmup 原始 OHLCV 能重算出非零高周期指标。
@@ -117,6 +118,74 @@ func TestHydrateStrategyFromSharedWarmupDirHydratesEngine(t *testing.T) {
 	_, _, _, history4h := engine.KlineCount("ETHUSDT")
 	if history4h != 60 {
 		t.Fatalf("history4h = %d, want 60", history4h)
+	}
+}
+
+// TestHydrateUniversePoolFromSharedWarmup 验证 shared warmup 的 4H 历史会在启动阶段回灌到动态币池的 range gate 缓存。
+func TestHydrateUniversePoolFromSharedWarmup(t *testing.T) {
+	sharedWarmupDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(sharedWarmupDir, "ETHUSDT", "4h"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	baseTime := time.Date(2024, 4, 15, 8, 0, 0, 0, time.UTC)
+	filePath := filepath.Join(sharedWarmupDir, "ETHUSDT", "4h", "2024-04-15.jsonl")
+	file, err := os.Create(filePath)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	for i := 0; i < 80; i++ {
+		openTime := baseTime.Add(time.Duration(i) * 4 * time.Hour)
+		line := fmt.Sprintf(
+			"{\"openTime\":\"%s\",\"open\":%.2f,\"high\":%.2f,\"low\":%.2f,\"close\":%.2f,\"volume\":%.2f,\"closeTime\":\"%s\"}\n",
+			openTime.Format(time.RFC3339Nano),
+			3000+float64(i)*0.1,
+			3004+float64(i%3),
+			2996-float64(i%2),
+			3000+float64(i)*0.1,
+			100+float64(i),
+			openTime.Add(4*time.Hour-time.Millisecond).Format(time.RFC3339Nano),
+		)
+		if _, err := file.WriteString(line); err != nil {
+			_ = file.Close()
+			t.Fatalf("WriteString() error = %v", err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	manager := universepool.NewManager(universepool.Config{
+		Enabled:        true,
+		ValidationMode: "1m",
+		CandidateSymbols: []string{
+			"ETHUSDT",
+		},
+	}, nil, nil, nil, nil)
+	cfg := config.Config{
+		SharedWarmupDir: sharedWarmupDir,
+		Indicators: config.IndicatorConfig{
+			Ema21Period: 21,
+			Ema55Period: 55,
+			RsiPeriod:   14,
+			AtrPeriod:   14,
+		},
+	}
+	cfg.UniversePool.Enabled = true
+	cfg.UniversePool.CandidateSymbols = []string{"ETHUSDT"}
+
+	if err := hydrateUniversePoolFromSharedWarmup(cfg, manager); err != nil {
+		t.Fatalf("hydrateUniversePoolFromSharedWarmup() error = %v", err)
+	}
+	snap, ok := manager.RangeGateSnapshot("ETHUSDT")
+	if !ok {
+		t.Fatal("RangeGateSnapshot() missing for ETHUSDT")
+	}
+	if !snap.RangeGate4H.Ready {
+		t.Fatalf("range_gate = %+v, want ready after warmup hydrate", snap.RangeGate4H)
+	}
+	if snap.RangeGate4H.Reason == "" {
+		t.Fatalf("range_gate = %+v, want non-empty reason after warmup hydrate", snap.RangeGate4H)
 	}
 }
 

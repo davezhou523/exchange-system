@@ -44,9 +44,12 @@ func NewStrategyEngine(cfg *config.StrategyEngineConfig, signalProducer *kafka.P
 
 	// 初始化市场状态检测器
 	se.marketStateDetector = marketstate.NewDetector(marketstate.Config{
-		FreshnessWindow:   cfg.MarketState.FreshnessWindow,
-		RangeAtrPctMax:    cfg.MarketState.RangeAtrPctMax,
-		BreakoutAtrPctMin: cfg.MarketState.BreakoutAtrPctMin,
+		FreshnessWindow:        cfg.MarketState.FreshnessWindow,
+		RangeAtrPctMax:         cfg.MarketState.RangeAtrPctMax,
+		BreakoutAtrPctMin:      cfg.MarketState.BreakoutAtrPctMin,
+		RangeGateH4AdxMax:      cfg.MarketState.RangeGateH4AdxMax,
+		RangeGateH4EmaCloseMax: cfg.MarketState.RangeGateH4EmaCloseMax,
+		RangeGateH4ScoreMin:    cfg.MarketState.RangeGateH4ScoreMin,
 	})
 
 	// 初始化 HarvestPath LSTM 预测器

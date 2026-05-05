@@ -38,6 +38,12 @@ func TestJSONLLoggerWriteSelectorDecisionIncludesReasonZh(t *testing.T) {
 				BreakoutAtrPctMin:  0.0045,
 				RangeMatch:         true,
 				TrendMatch:         true,
+				RangeGateReady:     true,
+				RangeGatePassed:    false,
+				RangeGateReason:    "range_gate_h4_failed",
+				RangeGateScore:     1,
+				RangeGateUpdatedAt: now.Add(-4 * time.Hour),
+				RangeGateSource:    "warmup",
 				RankDetail: &RankDetail{
 					BaseScore:       0.82,
 					TrendScore:      0.70,
@@ -80,6 +86,9 @@ func TestJSONLLoggerWriteSelectorDecisionIncludesReasonZh(t *testing.T) {
 	if got := entry["reason"]; got != "state_filtered" {
 		t.Fatalf("reason = %v, want state_filtered", got)
 	}
+	if got := entry["timestamp_bj"]; got != "2026-05-01 09:02:03 CST" {
+		t.Fatalf("timestamp_bj = %v, want 2026-05-01 09:02:03 CST", got)
+	}
 	if got := entry["reason_zh"]; got != "状态过滤" {
 		t.Fatalf("reason_zh = %v, want 状态过滤", got)
 	}
@@ -88,6 +97,30 @@ func TestJSONLLoggerWriteSelectorDecisionIncludesReasonZh(t *testing.T) {
 	}
 	if got := entry["last_incomplete_reason_zh"]; got != "预热未完成" {
 		t.Fatalf("last_incomplete_reason_zh = %v, want 预热未完成", got)
+	}
+	if got := entry["range_gate_ready"]; got != true {
+		t.Fatalf("range_gate_ready = %v, want true", got)
+	}
+	if got := entry["range_gate_passed"]; got != false {
+		t.Fatalf("range_gate_passed = %v, want false", got)
+	}
+	if got := entry["range_gate_reason"]; got != "range_gate_h4_failed" {
+		t.Fatalf("range_gate_reason = %v, want range_gate_h4_failed", got)
+	}
+	if got := entry["range_gate_reason_zh"]; got != "4H 震荡门禁未通过" {
+		t.Fatalf("range_gate_reason_zh = %v, want 4H 震荡门禁未通过", got)
+	}
+	if got := entry["range_gate_score"]; got != float64(1) {
+		t.Fatalf("range_gate_score = %v, want 1", got)
+	}
+	if got := entry["range_gate_source"]; got != "warmup" {
+		t.Fatalf("range_gate_source = %v, want warmup", got)
+	}
+	if got := entry["range_gate_updated_at"]; got != "2026-04-30 21:02:03 UTC" {
+		t.Fatalf("range_gate_updated_at = %v, want 2026-04-30 21:02:03 UTC", got)
+	}
+	if got := entry["range_gate_updated_at_bj"]; got != "2026-05-01 05:02:03 CST" {
+		t.Fatalf("range_gate_updated_at_bj = %v, want 2026-05-01 05:02:03 CST", got)
 	}
 	stateVote, ok := entry["state_vote"].(map[string]any)
 	if !ok {
@@ -132,11 +165,17 @@ func TestJSONLLoggerWriteMetaIncludesRankDetail(t *testing.T) {
 		TrendCount:       2,
 		StateVotes: map[string]StateVoteDetail{
 			"BNBUSDT": {
-				ClassifiedState:  "trend",
-				ClassifiedReason: "trend_match",
-				Fresh:            true,
-				Healthy:          true,
-				AtrPct:           0.001234567,
+				ClassifiedState:    "trend",
+				ClassifiedReason:   "trend_match",
+				Fresh:              true,
+				Healthy:            true,
+				AtrPct:             0.001234567,
+				RangeGateReady:     true,
+				RangeGatePassed:    true,
+				RangeGateReason:    "range_gate_h4_passed",
+				RangeGateScore:     3,
+				RangeGateSource:    "live",
+				RangeGateUpdatedAt: now.Add(-4 * time.Hour),
 				RankDetail: &RankDetail{
 					BaseScore:       0.88,
 					TrendScore:      1,
@@ -164,6 +203,12 @@ func TestJSONLLoggerWriteMetaIncludesRankDetail(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &entry); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
+	if got := entry["timestamp_bj"]; got != "2026-05-01 09:02:03 CST" {
+		t.Fatalf("timestamp_bj = %v, want 2026-05-01 09:02:03 CST", got)
+	}
+	if got := entry["last_snapshot_at_bj"]; got != "2026-05-01 09:02:03 CST" {
+		t.Fatalf("last_snapshot_at_bj = %v, want 2026-05-01 09:02:03 CST", got)
+	}
 	stateVotes, ok := entry["state_votes"].(map[string]any)
 	if !ok {
 		t.Fatalf("state_votes = %T, want map", entry["state_votes"])
@@ -181,5 +226,37 @@ func TestJSONLLoggerWriteMetaIncludesRankDetail(t *testing.T) {
 	}
 	if got := rankDetail["base_score"]; got != "0.8800" {
 		t.Fatalf("state_votes.BNBUSDT.rank_detail.base_score = %v, want 0.8800", got)
+	}
+	if got := entry["range_gate_ready_count"]; got != float64(1) {
+		t.Fatalf("range_gate_ready_count = %v, want 1", got)
+	}
+	if got := entry["range_gate_passed_count"]; got != float64(1) {
+		t.Fatalf("range_gate_passed_count = %v, want 1", got)
+	}
+	if got := entry["range_gate_live_count"]; got != float64(1) {
+		t.Fatalf("range_gate_live_count = %v, want 1", got)
+	}
+	rangeGates, ok := entry["range_gates"].(map[string]any)
+	if !ok {
+		t.Fatalf("range_gates = %T, want map", entry["range_gates"])
+	}
+	bnbGate, ok := rangeGates["BNBUSDT"].(map[string]any)
+	if !ok {
+		t.Fatalf("range_gates.BNBUSDT = %T, want map", rangeGates["BNBUSDT"])
+	}
+	if got := bnbGate["reason"]; got != "range_gate_h4_passed" {
+		t.Fatalf("range_gates.BNBUSDT.reason = %v, want range_gate_h4_passed", got)
+	}
+	if got := bnbGate["reason_zh"]; got != "4H 震荡门禁通过" {
+		t.Fatalf("range_gates.BNBUSDT.reason_zh = %v, want 4H 震荡门禁通过", got)
+	}
+	if got := bnbGate["source"]; got != "live" {
+		t.Fatalf("range_gates.BNBUSDT.source = %v, want live", got)
+	}
+	if got := bnbGate["updated_at"]; got != "2026-04-30 21:02:03 UTC" {
+		t.Fatalf("range_gates.BNBUSDT.updated_at = %v, want 2026-04-30 21:02:03 UTC", got)
+	}
+	if got := bnbGate["updated_at_bj"]; got != "2026-05-01 05:02:03 CST" {
+		t.Fatalf("range_gates.BNBUSDT.updated_at_bj = %v, want 2026-05-01 05:02:03 CST", got)
 	}
 }

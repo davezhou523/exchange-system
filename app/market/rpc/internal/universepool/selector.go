@@ -171,7 +171,7 @@ func (s *BasicSelector) scoreSnapshot(now time.Time, symbol string, snap Snapsho
 			score += 0.10
 		}
 	case selectorMarketStateRange:
-		if analysis.RangeMatch {
+		if analysis.RangeMatch && snap.RangeGate4H.Passed {
 			score += 0.10
 		}
 	case selectorMarketStateBreakout:
@@ -320,6 +320,12 @@ func (s *BasicSelector) buildStateVoteDetail(now time.Time, snap Snapshot, stabl
 	detail.BreakoutMatch = analysis.BreakoutMatch
 	detail.RangeMatch = analysis.RangeMatch
 	detail.TrendMatch = s.trendMatchFromAnalysis(analysis, stableHint == selectorMarketStateTrend)
+	detail.RangeGateReady = snap.RangeGate4H.Ready
+	detail.RangeGatePassed = snap.RangeGate4H.Passed
+	detail.RangeGateReason = snap.RangeGate4H.Reason
+	detail.RangeGateScore = snap.RangeGate4H.Score
+	detail.RangeGateUpdatedAt = snap.RangeGate4H.UpdatedAt
+	detail.RangeGateSource = snap.RangeGate4HSource
 	switch {
 	case !detail.Healthy:
 		detail.ClassifiedReason = "unhealthy_snapshot"
@@ -329,6 +335,10 @@ func (s *BasicSelector) buildStateVoteDetail(now time.Time, snap Snapshot, stabl
 		detail.ClassifiedReasonZh = "快照不新鲜，未参与全局状态投票"
 	default:
 		detail.ClassifiedState, detail.ClassifiedReason, detail.ClassifiedReasonZh = s.resolveClassification(detail)
+		if detail.ClassifiedState == "" && detail.RangeMatch && !detail.RangeGatePassed {
+			detail.ClassifiedReason = s.rangeGateRejectedReason(detail)
+			detail.ClassifiedReasonZh = s.rangeGateRejectedReasonZh(detail)
+		}
 	}
 	return detail
 }
@@ -406,7 +416,7 @@ func (s *BasicSelector) resolveClassification(detail StateVoteDetail) (string, s
 				return string(selectorMarketStateTrend), "trend_match", "未命中 breakout/range，且均线满足趋势条件，判为 trend"
 			}
 		case selectorMarketStateRange:
-			if detail.RangeMatch {
+			if detail.RangeMatch && detail.RangeGatePassed {
 				if detail.TrendMatch {
 					return string(selectorMarketStateRange), "range_match_precedes_trend", "ATR 命中 range 阈值，按 breakout>range>trend 顺序优先判为 range"
 				}
@@ -415,6 +425,28 @@ func (s *BasicSelector) resolveClassification(detail StateVoteDetail) (string, s
 		}
 	}
 	return "", "no_state_match", "未命中 breakout/range/trend 规则"
+}
+
+// rangeGateRejectedReason 返回 range 被 4H 门禁拦截时的标准原因码，方便日志聚合定位。
+func (s *BasicSelector) rangeGateRejectedReason(detail StateVoteDetail) string {
+	if detail.RangeGateReady {
+		return "range_h4_gate_failed"
+	}
+	if detail.RangeGateReason != "" {
+		return detail.RangeGateReason
+	}
+	return "range_h4_gate_not_ready"
+}
+
+// rangeGateRejectedReasonZh 返回 range 被 4H 门禁拦截时的中文解释，方便直接从日志看懂为何未判成震荡。
+func (s *BasicSelector) rangeGateRejectedReasonZh(detail StateVoteDetail) string {
+	if detail.RangeGateReady {
+		return "低周期命中震荡条件，但 4H 震荡门禁未通过，未参与 range 投票"
+	}
+	if detail.RangeGateReason == "range_gate_h4_missing" {
+		return "低周期命中震荡条件，但缺少 4H 震荡门禁数据，未参与 range 投票"
+	}
+	return "低周期命中震荡条件，但 4H 震荡门禁未就绪，未参与 range 投票"
 }
 
 // stabilizeGlobalState 在本轮无法明确分类时，短暂沿用上一次稳定状态，减少 fresh snapshot 之间的抖动。

@@ -25,9 +25,11 @@ type Snapshot struct {
 	Kline1m        KlineFrame
 	Kline15m       KlineFrame
 	Kline1h        KlineFrame
+	Kline4h        KlineFrame
 	Regime15m      RegimeFrame
 	Regime1h       RegimeFrame
 	Fusion         RegimeFusion
+	RangeGate4H    marketstate.RangeGate
 	MarketState    marketstate.MarketState
 	MarketAnalysis regimejudge.Analysis
 }
@@ -91,7 +93,7 @@ func (s *Selector) Evaluate(now time.Time, snapshots map[string]Snapshot) []Desi
 			continue
 		}
 		if healthy, reason := s.isHealthy(now, snap); healthy {
-			decision := s.routeDecision(snap)
+			decision := s.routeDecision(now, snap)
 			if decision.Reason == "" {
 				decision.Reason = reason
 			}
@@ -126,7 +128,7 @@ func (s *Selector) baseTemplateFor(symbol string) string {
 }
 
 // routeDecision 把健康快照交给显式 Strategy Router，避免模板与策略桶映射散落在 UniverseSelector 中。
-func (s *Selector) routeDecision(snap Snapshot) strategyrouter.Decision {
+func (s *Selector) routeDecision(now time.Time, snap Snapshot) strategyrouter.Decision {
 	if s == nil || s.router == nil {
 		return strategyrouter.Decision{
 			BaseTemplate: "",
@@ -136,6 +138,21 @@ func (s *Selector) routeDecision(snap Snapshot) strategyrouter.Decision {
 			Reason:       "healthy_data",
 		}
 	}
+	rangeGate := snap.RangeGate4H
+	if !rangeGate.Ready && !snap.Kline4h.UpdatedAt.IsZero() {
+		rangeGate = marketstate.EvaluateRangeGate(now, marketstate.BuildFeaturesFromSnapshotValues(
+			snap.Symbol,
+			"4h",
+			snap.Kline4h.Close,
+			snap.Kline4h.Ema21,
+			snap.Kline4h.Ema55,
+			snap.Kline4h.Atr,
+			snap.Kline4h.IsDirty,
+			snap.Kline4h.IsTradable,
+			snap.Kline4h.IsFinal,
+			snap.Kline4h.UpdatedAt,
+		), marketstate.Features{}, marketstate.Config{})
+	}
 	return s.router.Route(strategyrouter.Input{
 		Symbol:         snap.Symbol,
 		Close:          snap.Close,
@@ -144,6 +161,7 @@ func (s *Selector) routeDecision(snap Snapshot) strategyrouter.Decision {
 		Ema55:          snap.Ema55,
 		MarketState:    snap.MarketState,
 		MarketAnalysis: snap.MarketAnalysis,
+		RangeGate4H:    rangeGate,
 	})
 }
 

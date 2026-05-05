@@ -3,6 +3,7 @@ package strategyrouter
 import (
 	"testing"
 
+	"exchange-system/app/market/rpc/internal/marketstate"
 	"exchange-system/common/featureengine"
 	"exchange-system/common/regimejudge"
 )
@@ -18,6 +19,10 @@ func TestRouteUsesAnalysisToSwitchRange(t *testing.T) {
 
 	got := router.Route(Input{
 		Symbol: "ETHUSDT",
+		RangeGate4H: marketstate.RangeGate{
+			Passed: true,
+			Reason: "range_gate_h4_passed",
+		},
 		MarketAnalysis: regimejudge.Analysis{
 			RangeMatch: true,
 			Features: featureengine.Features{
@@ -27,6 +32,33 @@ func TestRouteUsesAnalysisToSwitchRange(t *testing.T) {
 	})
 	if got.Template != "range-core" || got.Bucket != BucketRange || got.Reason != "market_state_range" {
 		t.Fatalf("route = %+v, want range-core/range/market_state_range", got)
+	}
+}
+
+// TestRouteRangeRequiresH4Gate 验证震荡模板切换必须先通过 4H 震荡门禁。
+func TestRouteRangeRequiresH4Gate(t *testing.T) {
+	router := New(Config{
+		StaticTemplateMap: map[string]string{
+			"ETHUSDT": "eth-core",
+		},
+		RangeTemplate: "range-core",
+	})
+
+	got := router.Route(Input{
+		Symbol: "ETHUSDT",
+		RangeGate4H: marketstate.RangeGate{
+			Passed: false,
+			Reason: "range_gate_h4_failed",
+		},
+		MarketAnalysis: regimejudge.Analysis{
+			RangeMatch: true,
+			Features: featureengine.Features{
+				AtrPct: 0.002,
+			},
+		},
+	})
+	if got.Template != "eth-core" || got.Bucket != BucketTrend || got.Reason != ReasonHealthyData {
+		t.Fatalf("route = %+v, want base template when h4 gate failed", got)
 	}
 }
 

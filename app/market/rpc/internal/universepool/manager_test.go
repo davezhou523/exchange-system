@@ -166,6 +166,158 @@ func TestManagerUpdateSnapshotFromKlineUses1mInValidationMode1m(t *testing.T) {
 	}
 }
 
+// TestManagerUpdateSnapshotFromKlineUpdatesRangeGateFrom4H 验证 manager 收到 4H 闭合 K 线后会同步刷新动态币池的 4H 震荡门禁。
+func TestManagerUpdateSnapshotFromKlineUpdatesRangeGateFrom4H(t *testing.T) {
+	mgr := NewManager(Config{
+		Enabled:        true,
+		ValidationMode: "1m",
+	}, nil, nil, nil, nil)
+
+	firstAt := time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC)
+	secondAt := firstAt.Add(4 * time.Hour)
+	mgr.UpdateSnapshotFromKline(&market.Kline{
+		Symbol:     "ETHUSDT",
+		Interval:   "4h",
+		High:       101,
+		Low:        99,
+		Close:      100,
+		Ema21:      100.2,
+		Ema55:      100,
+		Atr:        2,
+		IsClosed:   true,
+		IsDirty:    false,
+		IsTradable: true,
+		IsFinal:    true,
+		EventTime:  firstAt.UnixMilli(),
+	})
+	mgr.UpdateSnapshotFromKline(&market.Kline{
+		Symbol:     "ETHUSDT",
+		Interval:   "4h",
+		High:       100.8,
+		Low:        99.4,
+		Close:      100.1,
+		Ema21:      100.15,
+		Ema55:      100,
+		Atr:        1.5,
+		IsClosed:   true,
+		IsDirty:    false,
+		IsTradable: true,
+		IsFinal:    true,
+		EventTime:  secondAt.UnixMilli(),
+	})
+
+	got, ok := mgr.snapshots["ETHUSDT"]
+	if !ok {
+		t.Fatal("snapshot missing for ETHUSDT")
+	}
+	if !got.RangeGate4H.Ready || !got.RangeGate4H.Passed || got.RangeGate4H.Reason != "range_gate_h4_passed" {
+		t.Fatalf("range_gate = %+v, want ready+passed", got.RangeGate4H)
+	}
+}
+
+// TestManagerUpdateSnapshotFromKlineKeepsRangeGateAfterPrimarySnapshot 验证主评估周期更新不会覆盖已计算好的 4H 震荡门禁。
+func TestManagerUpdateSnapshotFromKlineKeepsRangeGateAfterPrimarySnapshot(t *testing.T) {
+	mgr := NewManager(Config{
+		Enabled:        true,
+		ValidationMode: "1m",
+	}, nil, nil, nil, nil)
+
+	gateAt := time.Date(2026, 5, 2, 4, 0, 0, 0, time.UTC)
+	mgr.UpdateSnapshotFromKline(&market.Kline{
+		Symbol:     "BNBUSDT",
+		Interval:   "4h",
+		High:       610,
+		Low:        600,
+		Close:      605,
+		Ema21:      605.2,
+		Ema55:      605,
+		Atr:        8,
+		IsClosed:   true,
+		IsDirty:    false,
+		IsTradable: true,
+		IsFinal:    true,
+		EventTime:  gateAt.Add(-4 * time.Hour).UnixMilli(),
+	})
+	mgr.UpdateSnapshotFromKline(&market.Kline{
+		Symbol:     "BNBUSDT",
+		Interval:   "4h",
+		High:       608,
+		Low:        602,
+		Close:      605.1,
+		Ema21:      605.1,
+		Ema55:      605,
+		Atr:        6.5,
+		IsClosed:   true,
+		IsDirty:    false,
+		IsTradable: true,
+		IsFinal:    true,
+		EventTime:  gateAt.UnixMilli(),
+	})
+	mgr.UpdateSnapshotFromKline(&market.Kline{
+		Symbol:     "BNBUSDT",
+		Interval:   "1m",
+		Close:      606,
+		Ema21:      605.8,
+		Ema55:      605.3,
+		Atr:        1.2,
+		Volume:     12345,
+		IsClosed:   true,
+		IsDirty:    false,
+		IsTradable: true,
+		IsFinal:    true,
+		EventTime:  gateAt.Add(time.Minute).UnixMilli(),
+	})
+
+	got := mgr.snapshots["BNBUSDT"]
+	if !got.RangeGate4H.Passed {
+		t.Fatalf("range_gate = %+v, want preserved after 1m snapshot update", got.RangeGate4H)
+	}
+	if got.LastReason != "fresh_1m" {
+		t.Fatalf("LastReason = %s, want fresh_1m", got.LastReason)
+	}
+}
+
+// TestManagerHydrateRangeGateWarmup 验证动态币池可以直接吃启动阶段恢复出的 4H 历史，避免冷启动时 range gate 为空。
+func TestManagerHydrateRangeGateWarmup(t *testing.T) {
+	mgr := NewManager(Config{
+		Enabled:        true,
+		ValidationMode: "1m",
+	}, nil, nil, nil, nil)
+
+	baseTime := time.Date(2026, 5, 3, 0, 0, 0, 0, time.UTC)
+	klines := make([]*market.Kline, 0, 40)
+	for i := 0; i < 40; i++ {
+		openTime := baseTime.Add(time.Duration(i) * 4 * time.Hour)
+		klines = append(klines, &market.Kline{
+			Symbol:     "ETHUSDT",
+			Interval:   "4h",
+			High:       3005 + float64(i%3),
+			Low:        2995 - float64(i%2),
+			Close:      3000 + float64(i)*0.1,
+			Ema21:      3000.2 + float64(i)*0.05,
+			Ema55:      3000,
+			Atr:        6 - float64(i)*0.05,
+			IsClosed:   true,
+			IsDirty:    false,
+			IsTradable: true,
+			IsFinal:    true,
+			EventTime:  openTime.UnixMilli(),
+		})
+	}
+
+	hydrated := mgr.HydrateRangeGateWarmup("ETHUSDT", klines)
+	if hydrated != len(klines) {
+		t.Fatalf("hydrated = %d, want %d", hydrated, len(klines))
+	}
+	snap, ok := mgr.RangeGateSnapshot("ETHUSDT")
+	if !ok {
+		t.Fatal("RangeGateSnapshot() missing for ETHUSDT")
+	}
+	if !snap.RangeGate4H.Ready || !snap.RangeGate4H.Passed {
+		t.Fatalf("range_gate = %+v, want ready and passed", snap.RangeGate4H)
+	}
+}
+
 func TestSummarizeStatesIncludesSnapshotMetadata(t *testing.T) {
 	now := time.Date(2026, 4, 27, 0, 10, 0, 0, time.UTC)
 	summary := summarizeStates(Config{ValidationMode: "5m"}, now, DesiredUniverse{}, map[string]Snapshot{

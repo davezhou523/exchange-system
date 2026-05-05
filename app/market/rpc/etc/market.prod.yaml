@@ -10,6 +10,7 @@ Kafka:
   Topics:
     Kline: kline
     Depth: depth
+    Signal: signal
 
 KlineLogDir: data/kline
 SharedWarmupDir: runtime/shared/kline/warmup

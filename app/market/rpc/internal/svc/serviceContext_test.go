@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"exchange-system/app/market/rpc/internal/config"
 	"exchange-system/common/pb/market"
 )
 
@@ -36,4 +37,26 @@ func TestKlineDispatcherOnKlineUpdatesUniverseBeforeAggregator(t *testing.T) {
 	if updater.last != k {
 		t.Fatal("dispatcher forwarded unexpected kline instance")
 	}
+}
+
+// TestResolveStrategySignalTopic 验证策略信号 topic 优先取显式配置，未配置时回退到 signal。
+func TestResolveStrategySignalTopic(t *testing.T) {
+	t.Run("configured signal topic", func(t *testing.T) {
+		var cfg config.Config
+		cfg.Kafka.Topics.Signal = "strategy-signal"
+		cfg.Kafka.Topics.Kline = "kline"
+
+		if got := resolveStrategySignalTopic(cfg); got != "strategy-signal" {
+			t.Fatalf("resolveStrategySignalTopic() = %q, want strategy-signal", got)
+		}
+	})
+
+	t.Run("fallback default signal topic", func(t *testing.T) {
+		var cfg config.Config
+		cfg.Kafka.Topics.Kline = "kline"
+
+		if got := resolveStrategySignalTopic(cfg); got != "signal" {
+			t.Fatalf("resolveStrategySignalTopic() = %q, want signal", got)
+		}
+	})
 }

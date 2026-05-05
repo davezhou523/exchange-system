@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"exchange-system/app/market/rpc/internal/config"
+	"exchange-system/app/market/rpc/internal/universepool"
 	"exchange-system/common/indicator/atr"
 	"exchange-system/common/indicator/ema"
 	"exchange-system/common/indicator/rsi"
@@ -66,6 +67,51 @@ func hydrateStrategyEngineFromSharedWarmup(cfg config.Config, engine *StrategyEn
 	return nil
 }
 
+// hydrateUniversePoolFromSharedWarmup 从共享 warmup 目录恢复 4H 历史，并回灌到动态币池的 range gate 缓存。
+func hydrateUniversePoolFromSharedWarmup(cfg config.Config, manager *universepool.Manager) error {
+	if manager == nil {
+		return nil
+	}
+	sharedWarmupDir := strings.TrimSpace(cfg.SharedWarmupDir)
+	if sharedWarmupDir == "" {
+		return nil
+	}
+	waitTimeout := resolveStrategyWarmupWaitTimeout(cfg)
+	seenSymbols := make(map[string]struct{})
+	for _, symbol := range buildBootstrapWarmupSymbols(cfg) {
+		symbol = strings.ToUpper(strings.TrimSpace(symbol))
+		if symbol == "" {
+			continue
+		}
+		if _, exists := seenSymbols[symbol]; exists {
+			continue
+		}
+		seenSymbols[symbol] = struct{}{}
+		if err := waitForStrategyWarmupIntervalReady(sharedWarmupDir, symbol, "4h", waitTimeout, 200*time.Millisecond); err != nil {
+			return err
+		}
+		klines, err := loadHydratedWarmupKlines(sharedWarmupDir, symbol, "4h", resolveStrategyIndicatorParams(cfg, "4h"))
+		if err != nil {
+			return fmt.Errorf("hydrate universepool shared warmup %s 4h: %w", symbol, err)
+		}
+		hydrated := manager.HydrateRangeGateWarmup(symbol, klines)
+		if snap, ok := manager.RangeGateSnapshot(symbol); ok {
+			log.Printf(
+				"[universepool] warmup回灌结果 | symbol=%s hydrated_4h=%d range_gate_ready=%t range_gate_passed=%t range_gate_reason=%s range_gate_score=%d",
+				symbol,
+				hydrated,
+				snap.RangeGate4H.Ready,
+				snap.RangeGate4H.Passed,
+				snap.RangeGate4H.Reason,
+				snap.RangeGate4H.Score,
+			)
+			continue
+		}
+		log.Printf("[universepool] warmup回灌结果 | symbol=%s hydrated_4h=%d range_gate_ready=false range_gate_passed=false range_gate_reason=no_snapshot range_gate_score=0", symbol, hydrated)
+	}
+	return nil
+}
+
 // resolveStrategyWarmupWaitTimeout 统一解析 strategy 启动时等待 shared warmup 文件的超时时间。
 func resolveStrategyWarmupWaitTimeout(cfg config.Config) time.Duration {
 	timeout := cfg.ClickHouse.Recovery.WarmupWaitTimeout
@@ -104,6 +150,33 @@ func waitForStrategyWarmupReady(sharedWarmupDir, symbol string, timeout, pollInt
 				strings.Join(missingIntervals, ","),
 				timeout,
 			)
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
+// waitForStrategyWarmupIntervalReady 轮询 shared warmup 指定周期目录，直到对应文件就绪或超时。
+func waitForStrategyWarmupIntervalReady(sharedWarmupDir, symbol, interval string, timeout, pollInterval time.Duration) error {
+	if strings.TrimSpace(sharedWarmupDir) == "" || strings.TrimSpace(symbol) == "" || strings.TrimSpace(interval) == "" {
+		return nil
+	}
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	if pollInterval <= 0 {
+		pollInterval = 200 * time.Millisecond
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		ready, err := strategyWarmupIntervalHasFiles(sharedWarmupDir, symbol, interval)
+		if err != nil {
+			return err
+		}
+		if ready {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("wait shared warmup ready timeout for %s %s: timeout=%s", symbol, interval, timeout)
 		}
 		time.Sleep(pollInterval)
 	}

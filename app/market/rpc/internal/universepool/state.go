@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"exchange-system/app/market/rpc/internal/marketstate"
 )
 
 // SymbolLifecycleState 表示某个交易对在动态币池中的生命周期状态。
@@ -37,6 +39,9 @@ type Config struct {
 	BreakoutPreferredSymbols []string
 	BreakoutAtrPctMin        float64
 	BreakoutAtrPctExitMin    float64
+	RangeGateH4AdxMax        float64
+	RangeGateH4EmaCloseMax   float64
+	RangeGateH4ScoreMin      int
 	EvaluateInterval         time.Duration
 	MinActiveDuration        time.Duration
 	MinInactiveDuration      time.Duration
@@ -58,18 +63,20 @@ type WarmupConfig struct {
 
 // Snapshot 表示 selector 评估动态币池时使用的轻量市场快照。
 type Snapshot struct {
-	Symbol     string
-	UpdatedAt  time.Time
-	LastPrice  float64
-	Ema21      float64
-	Ema55      float64
-	Rsi        float64
-	Atr        float64
-	AtrPct     float64
-	Volume24h  float64
-	SpreadBps  float64
-	Healthy    bool
-	LastReason string
+	Symbol            string
+	UpdatedAt         time.Time
+	LastPrice         float64
+	Ema21             float64
+	Ema55             float64
+	Rsi               float64
+	Atr               float64
+	AtrPct            float64
+	Volume24h         float64
+	SpreadBps         float64
+	Healthy           bool
+	LastReason        string
+	RangeGate4H       marketstate.RangeGate
+	RangeGate4HSource string
 }
 
 // RankDetail 表示 Symbol Ranker 对某个候选币产出的基础分与分量拆解。
@@ -124,6 +131,12 @@ type StateVoteDetail struct {
 	RangeMatch         bool        `json:"range_match"`
 	BreakoutMatch      bool        `json:"breakout_match"`
 	TrendMatch         bool        `json:"trend_match"`
+	RangeGateReady     bool        `json:"range_gate_ready"`
+	RangeGatePassed    bool        `json:"range_gate_passed"`
+	RangeGateReason    string      `json:"range_gate_reason,omitempty"`
+	RangeGateScore     int         `json:"range_gate_score,omitempty"`
+	RangeGateUpdatedAt time.Time   `json:"range_gate_updated_at,omitempty"`
+	RangeGateSource    string      `json:"range_gate_source,omitempty"`
 	RankDetail         *RankDetail `json:"rank_detail,omitempty"`
 }
 
