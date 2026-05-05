@@ -12,7 +12,6 @@ SERVICES=(
   "market|app/market/rpc/market.go|app/market/rpc/etc/market.sim.yaml"
   "execution|app/execution/rpc/execution.go|app/execution/rpc/etc/execution.sim.yaml"
   "order|app/order/rpc/order.go|app/order/rpc/etc/order.sim.yaml"
-  "strategy|app/strategy/rpc/strategy.go|app/strategy/rpc/etc/strategy.demo.yaml"
   "gateway|app/api/gateway/main.go|app/api/gateway/etc/gateway.yaml"
 )
 

@@ -19,12 +19,13 @@ import (
 // These rows are both written to local JSONL and sent through Kafka, so the fields below are
 // the main source of truth when debugging whether a kline is complete, tradable, and final.
 type klineLogEntry struct {
-	Symbol    string `json:"symbol"`    // 交易对，如 ETHUSDT
-	Interval  string `json:"interval"`  // K线周期，如 1m/15m/1h/4h
-	OpenTime  string `json:"openTime"`  // 周期开始时间（UTC）
-	CloseTime string `json:"closeTime"` // 周期结束时间（UTC）
-	EventTime string `json:"eventTime"` // market 服务生成这条消息的时间（UTC）
-	IsClosed  bool   `json:"isClosed"`  // 该周期是否已收盘
+	Symbol     string `json:"symbol"`      // 交易对，如 ETHUSDT
+	Interval   string `json:"interval"`    // K线周期，如 1m/15m/1h/4h
+	OpenTimeBj string `json:"openTime_bj"` // 周期开始时间（北京时间）
+	OpenTime   string `json:"openTime"`    // 周期开始时间（UTC）
+	CloseTime  string `json:"closeTime"`   // 周期结束时间（UTC）
+	EventTime  string `json:"eventTime"`   // market 服务生成这条消息的时间（UTC）
+	IsClosed   bool   `json:"isClosed"`    // 该周期是否已收盘
 
 	Open  float64 `json:"open"`  // 开盘价
 	High  float64 `json:"high"`  // 最高价
@@ -299,6 +300,7 @@ func (a *KlineAggregator) writeKlineLog(k *market.Kline, dirtyReason string) {
 	entry := klineLogEntry{
 		Symbol:         k.Symbol,
 		Interval:       k.Interval,
+		OpenTimeBj:     formatKlineLogTimeBJ(time.UnixMilli(k.OpenTime).UTC()),
 		OpenTime:       time.UnixMilli(k.OpenTime).UTC().Format("2006-01-02T15:04:05.000Z"),
 		Open:           k.Open,
 		High:           k.High,
@@ -331,4 +333,9 @@ func (a *KlineAggregator) writeKlineLog(k *market.Kline, dirtyReason string) {
 	if _, err := f.Write(append(data, '\n')); err != nil {
 		log.Printf("[agg-log] write failed: %v", err)
 	}
+}
+
+// formatKlineLogTimeBJ 把 UTC 时间转换为北京时间字符串，供 JSONL 直接排查使用。
+func formatKlineLogTimeBJ(t time.Time) string {
+	return t.In(time.FixedZone("UTC+8", 8*3600)).Format("2006-01-02T15:04:05.000+08:00")
 }

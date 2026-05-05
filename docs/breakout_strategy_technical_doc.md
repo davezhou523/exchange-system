@@ -1,6 +1,6 @@
 # 突破策略 (Breakout Strategy) 技术文档
 
-> 版本: v1 | 目标: 当前 Golang 实现对齐说明 | 实现入口: `app/strategy/rpc/internal/strategy/breakout.go`
+> 版本: v1 | 目标: 当前 Golang 实现对齐说明 | 实现入口: `app/market/rpc/internal/strategy/breakout.go`
 
 ---
 
@@ -141,6 +141,6 @@
 
 ## 七、代码落点
 
-- 实现文件: [breakout.go](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/strategy/breakout.go)
-- 策略主实例: [trend_following.go](file:///Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/internal/strategy/trend_following.go)
+- 实现文件: [breakout.go](file:///Users/bytedance/GolandProjects/exchange-system/app/market/rpc/internal/strategy/breakout.go)
+- 策略主实例: [trend_following.go](file:///Users/bytedance/GolandProjects/exchange-system/app/market/rpc/internal/strategy/trend_following.go)
 - 架构入口说明: [architecture.md](file:///Users/bytedance/GolandProjects/exchange-system/docs/architecture.md)

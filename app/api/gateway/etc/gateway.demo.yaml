@@ -10,7 +10,7 @@ Order:
   Target: 127.0.0.1:9083
 
 Strategy:
-  Target: 127.0.0.1:9081
+  Target: 127.0.0.1:9080
 
 Market:
   Target: 127.0.0.1:9080

@@ -35,6 +35,7 @@ type ServiceContext struct {
 	agg            *aggregator.KlineAggregator
 	universeMgr    *universepool.Manager
 	chWriter       *clickHouseWriter
+	StrategyEngine *StrategyEngine
 	cancel         context.CancelFunc
 }
 
@@ -44,20 +45,25 @@ type snapshotUpdater interface {
 	UpdateSnapshotFromKline(k *market.Kline)
 }
 
-// klineDispatcher 把 websocket 收到的 1m 闭合 K 线同时分发给 UniversePool 和聚合器。
+// klineDispatcher 把 websocket 收到的 1m 闭合 K 线同时分发给 UniversePool、聚合器和策略引擎。
 type klineDispatcher struct {
-	agg         *aggregator.KlineAggregator
-	universeMgr snapshotUpdater
+	agg            *aggregator.KlineAggregator
+	universeMgr    snapshotUpdater
+	strategyEngine *StrategyEngine
 }
 
-// OnKline 在不破坏现有聚合链路的前提下，同步更新动态币池快照缓存。
+// OnKline 在不破坏现有聚合链路的前提下，同步更新动态币池快照缓存，同时将原始 1m K 线传给策略引擎。
 func (d *klineDispatcher) OnKline(ctx context.Context, k *market.Kline) {
 	if d == nil || k == nil {
 		return
 	}
-	// UniversePool 快照属于“观察输入”，优先于聚合发射链路同步更新，避免 warmup 期间出现 snapshot 空窗。
+	// UniversePool 快照属于"观察输入"，优先于聚合发射链路同步更新，避免 warmup 期间出现 snapshot 空窗。
 	if d.universeMgr != nil {
 		d.universeMgr.UpdateSnapshotFromKline(k)
+	}
+	// 原始 1m K 线传给策略引擎（用于 1m 级别信号模式）
+	if d.strategyEngine != nil {
+		d.strategyEngine.OnKline(k)
 	}
 	if d.agg != nil {
 		d.agg.OnKline(ctx, k)
@@ -206,22 +212,56 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		dispatcher.universeMgr = universeMgr
 	}
 
-	if chWriter != nil {
+	// 初始化策略引擎
+	var strategyEngine *StrategyEngine
+	if c.StrategyEngine.Strategies != nil {
+		signalTopic := "signal"
+		if c.Kafka.Topics.Kline != "" {
+			signalTopic = c.Kafka.Topics.Kline
+		}
+		stratProducer, err := kafka.NewProducerWithContext(ctx, c.Kafka.Addrs, signalTopic)
+		if err != nil {
+			log.Printf("[策略引擎] 创建信号生产者失败: %v", err)
+		} else {
+			strategyEngine, err = NewStrategyEngine(&c.StrategyEngine, stratProducer)
+			if err != nil {
+				log.Printf("[策略引擎] 初始化失败: %v", err)
+			} else {
+				strategyEngine.InitStrategies(c.StrategyEngine.Strategies, c.StrategyEngine.Templates)
+				log.Printf("[策略引擎] 启动完成")
+			}
+		}
+	}
+
+	if chWriter != nil || strategyEngine != nil {
 		prevObserver := dispatcher.universeMgr
 		agg.SetEmitObserver(func(k *market.Kline) {
 			if prevObserver != nil {
 				prevObserver.UpdateSnapshotFromKline(k)
 			}
-			chWriter.Enqueue(k)
+			if chWriter != nil {
+				chWriter.Enqueue(k)
+			}
+			if strategyEngine != nil {
+				strategyEngine.OnKline(k)
+			}
 		})
 		if universeMgr != nil {
 			dispatcher.universeMgr = universeMgr
 		}
 	}
+	if strategyEngine != nil {
+		dispatcher.strategyEngine = strategyEngine
+	}
 
 	// 启动阶段主动为已配置交易对创建 worker，并提前拉取 warmup 数据到共享目录。
 	// 这样 strategy 在 market 刚启动时就能读到预热快照，而不是等首条实时 K 线触发懒加载。
 	agg.EnsureWarmupForSymbols(buildBootstrapWarmupSymbols(c))
+	if strategyEngine != nil {
+		if err := hydrateStrategyEngineFromSharedWarmup(c, strategyEngine); err != nil {
+			log.Printf("[策略引擎] 共享 warmup 回灌失败: %v", err)
+		}
+	}
 
 	if err := recoverKlineFactGap(ctx, c, agg, chWriter, warmupper); err != nil {
 		if chWriter != nil {
@@ -249,6 +289,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		agg:            agg,
 		universeMgr:    universeMgr,
 		chWriter:       chWriter,
+		StrategyEngine: strategyEngine,
 		cancel:         cancel,
 	}, nil
 }
@@ -360,6 +401,9 @@ func (s *ServiceContext) Close() error {
 		if err := s.chWriter.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	if s.StrategyEngine != nil {
+		s.StrategyEngine.Close()
 	}
 	return firstErr
 }

@@ -62,6 +62,10 @@ func newRouter(baseDir string) (*Router, error) {
 			{name: "market.universepool.log", patterns: []string{"[universepool]", "[universepool-log]"}},
 			{name: "market.clickhouse.log", patterns: []string{"[clickhouse]"}},
 			{name: "market.kafka.log", patterns: []string{"Market data sent to topic=", "[mock]", "[replay]"}},
+			{name: "market.strategy.log", patterns: []string{"[策略引擎]", "[策略]", "[signal-log]", "[decision-log]", "[decision]"}},
+			{name: "market.strategy.harvestpath.log", patterns: []string{"[harvest-path]"}},
+			{name: "market.strategy.marketstate.log", patterns: []string{"[marketstate-log]"}},
+			{name: "market.strategy.weights.log", patterns: []string{"[weights-log]"}},
 		},
 	}
 	if err := router.rotateFilesIfNeeded(time.Now()); err != nil {

@@ -40,14 +40,14 @@ find /Users/bytedance/GolandProjects/exchange-system/app/market/rpc/data/kline \
 ### strategy 本地 K 线目录
 
 ```bash
-find /Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/data/kline \
+find /Users/bytedance/GolandProjects/exchange-system/app/market/rpc/data/kline \
   -type d \( -name 3m -o -name 5m \) -prune -print
 ```
 
 确认输出无误后执行删除：
 
 ```bash
-find /Users/bytedance/GolandProjects/exchange-system/app/strategy/rpc/data/kline \
+find /Users/bytedance/GolandProjects/exchange-system/app/market/rpc/data/kline \
   -type d \( -name 3m -o -name 5m \) -prune -exec rm -rf {} +
 ```
 

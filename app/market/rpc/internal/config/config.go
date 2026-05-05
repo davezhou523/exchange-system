@@ -105,11 +105,93 @@ type Config struct {
 		Warmup                   universepool.WarmupConfig
 	}
 
+	// StrategyEngine 策略引擎配置，启动策略实例并接收聚合器 K 线。
+	StrategyEngine StrategyEngineConfig `json:",optional"`
+
 	// ClickHouse 配置聚合后的 K 线分析库。
 	ClickHouse ClickHouseConfig
 
 	// Postgres 配置聚合数据扩展落库。
 	Postgres PostgresConfig
+}
+
+// StrategyEngineConfig 定义策略引擎参数。
+type StrategyEngineConfig struct {
+	// 配置列表
+	Strategies []StrategyConfig `json:",optional"`
+	// 模板参数映射
+	Templates map[string]map[string]float64 `json:",optional"`
+	// 信号日志目录
+	SignalLogDir string `json:",default=data/signal"`
+	// HarvestPath LSTM 配置
+	HarvestPathLSTM struct {
+		Enabled      bool   `json:",default=false"`
+		PythonBin    string `json:",optional"`
+		ScriptPath   string `json:",optional"`
+		DataDir      string `json:",optional"`
+		ArtifactsDir string `json:",optional"`
+		TimeoutMs    int64  `json:",default=30000"`
+	}
+	// 市场状态配置
+	MarketState struct {
+		FreshnessWindow   time.Duration `json:",default=3m"`
+		RangeAtrPctMax    float64       `json:",default=0.006"`
+		BreakoutAtrPctMin float64       `json:",default=0.0045"`
+	}
+	// 权重配置
+	Weights struct {
+		DefaultTrendWeight    float64            `json:",default=0.7"`
+		DefaultRangeWeight    float64            `json:",default=0.7"`
+		DefaultBreakoutWeight float64            `json:",default=0.7"`
+		DefaultRiskScale      float64            `json:",default=1.0"`
+		LossStreakThreshold   int                `json:",default=3"`
+		DailyLossSoftLimit    float64            `json:",default=0.05"`
+		DrawdownSoftLimit     float64            `json:",default=0.1"`
+		CoolingPauseDuration  time.Duration      `json:",default=30m"`
+		AtrSpikeRatioMin      float64            `json:",default=1.5"`
+		VolumeSpikeRatioMin   float64            `json:",default=2.0"`
+		CoolingMinSamples     int                `json:",default=3"`
+		TrendStrategyMix      map[string]float64 `json:",optional"`
+		BreakoutStrategyMix   map[string]float64 `json:",optional"`
+		RangeStrategyMix      map[string]float64 `json:",optional"`
+		TrendSymbolWeights    map[string]float64 `json:",optional"`
+		BreakoutSymbolWeights map[string]float64 `json:",optional"`
+		RangeSymbolWeights    map[string]float64 `json:",optional"`
+	}
+	// Universe 选择器配置
+	Universe struct {
+		Enabled            bool          `json:",default=false"`
+		BootstrapDuration  time.Duration `json:",default=5m"`
+		EvaluateInterval   time.Duration `json:",default=30s"`
+		FreshnessWindow    time.Duration `json:",default=3m"`
+		MinEnabledDuration time.Duration `json:",default=5m"`
+		CooldownDuration   time.Duration `json:",default=5m"`
+		RequireFinal       bool          `json:",default=true"`
+		RequireTradable    bool          `json:",default=true"`
+		RequireClean       bool          `json:",default=true"`
+		CandidateSymbols   []string      `json:",optional"`
+		RouterConfig       struct {
+			StaticTemplateMap     map[string]string `json:",optional"`
+			RangeTemplate         string            `json:",optional"`
+			BreakoutTemplate      string            `json:",optional"`
+			BTCTrendTemplate      string            `json:",optional"`
+			BTCTrendAtrPctMax     float64           `json:",optional"`
+			HighBetaSafeTemplate  string            `json:",optional"`
+			HighBetaSafeSymbols   []string          `json:",optional"`
+			HighBetaSafeAtrPct    float64           `json:",optional"`
+			HighBetaDisableAtrPct float64           `json:",optional"`
+		}
+	}
+}
+
+// StrategyConfig 策略实例配置
+type StrategyConfig struct {
+	Name       string `json:",optional"`
+	Symbol     string
+	Enabled    bool
+	Template   string             `json:",optional"`
+	Parameters map[string]float64 `json:",optional"`
+	Overrides  map[string]float64 `json:",optional"`
 }
 
 // IndicatorConfig 每个周期的指标配置

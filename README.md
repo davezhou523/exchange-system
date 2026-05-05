@@ -41,8 +41,7 @@ flowchart LR
 值班速查入口见 [runbook.md](file:///Users/bytedance/GolandProjects/exchange-system/docs/runbook.md)。
 
 ## 服务说明
-- `app/market/rpc`: 行情服务，负责 Binance WebSocket、K 线聚合、指标计算、Kafka 发布
-- `app/strategy/rpc`: 策略服务，消费 K 线/深度数据并生成交易信号
+- `app/market/rpc`: 行情服务，负责 Binance WebSocket、K 线聚合、指标计算，并内嵌策略引擎生成交易信号
 - `app/execution/rpc`: 执行服务，负责风控、幂等、下单、模拟撮合、订单事件发布
 - `app/order/rpc`: 订单服务，负责订单/成交/持仓查询和本地快照
 - `app/api/gateway`: HTTP 网关，对外暴露账户、订单、策略控制接口
@@ -80,8 +79,6 @@ flowchart LR
 - `app/market/rpc/etc/market.dev.yaml`
 - `app/market/rpc/etc/market.sim.yaml`
 - `app/market/rpc/etc/market.prod.yaml`
-- `app/strategy/rpc/etc/strategy.demo.yaml`
-- `app/strategy/rpc/etc/strategy.prod.yaml`
 - `app/execution/rpc/etc/execution.dev.yaml`
 - `app/execution/rpc/etc/execution.sim.yaml`
 - `app/execution/rpc/etc/execution.prod.yaml`
@@ -91,7 +88,6 @@ flowchart LR
 
 说明：
 
-- `strategy` 侧当前仅保留 `strategy.demo.yaml` 和 `strategy.prod.yaml`
 - 推荐后续统一改用 `-f ...*.dev.yaml` / `-f ...*.sim.yaml` / `-f ...*.prod.yaml` 启动
 - `prod` 配置中的 `APIKey`、`SecretKey`、代理等字段默认留空，需要通过你自己的安全方式注入
 
@@ -115,22 +111,16 @@ go run app/market/rpc/market.go -f app/market/rpc/etc/market.sim.yaml
 终端 2：
 
 ```bash
-go run app/strategy/rpc/strategy.go -f app/strategy/rpc/etc/strategy.demo.yaml
+go run app/execution/rpc/execution.go -f app/execution/rpc/etc/execution.sim.yaml
 ```
 
 终端 3：
 
 ```bash
-go run app/execution/rpc/execution.go -f app/execution/rpc/etc/execution.sim.yaml
-```
-
-终端 4：
-
-```bash
 go run app/order/rpc/order.go -f app/order/rpc/etc/order.sim.yaml
 ```
 
-终端 5：
+终端 4：
 
 ```bash
 go run app/api/gateway/main.go -f app/api/gateway/etc/gateway.yaml
@@ -140,7 +130,6 @@ go run app/api/gateway/main.go -f app/api/gateway/etc/gateway.yaml
 如果你希望整套服务都显式使用 `*.demo.yaml`，并让 `Execution/Order` 对接 Binance Demo，可使用 `demo` 组合：
 
 - `market`: `app/market/rpc/etc/market.demo.yaml`
-- `strategy`: `app/strategy/rpc/etc/strategy.demo.yaml`
 - `execution`: `app/execution/rpc/etc/execution.demo.yaml`
 - `order`: `app/order/rpc/etc/order.demo.yaml`
 - `gateway`: `app/api/gateway/etc/gateway.demo.yaml`
@@ -177,7 +166,7 @@ go run app/api/gateway/main.go -f app/api/gateway/etc/gateway.yaml
 ## 环境说明
 ### dev
 - 适合本地调试
-- `strategy` 默认改用 `strategy.demo.yaml`
+- `market` 默认承载策略引擎并使用对应 profile 配置
 - 适合快速验证信号是否能从 Kafka 流转到执行层
 
 ### sim
@@ -273,14 +262,14 @@ grep '\[ws\]\|\[aggregated\]\|\[universepool\]' \
 ## 当前实现与架构文档的差异
 - 架构文档偏“目标形态”，代码配置是“当前可运行形态”
 - 当前真实 topic 名称是 `kline/depth/signal/order`
-- `strategy` 当前不再保留 `strategy.yaml/strategy.sim.yaml/strategy.dev.yaml`
+- 策略运行时已合并进 `market`，不再需要单独启动 `strategy-rpc`
 - `Order` 服务当前将本地 JSONL 视为“每日查询快照”，不是永远追加的事件日志
 - `sim` profile 是当前最适合联调和回归验证的入口
 - `demo` profile 适合验证 Binance Demo 真下单与查询链路
 
 ## 数据目录说明
 - `app/market/rpc/data/kline`: 行情与聚合 K 线日志
-- `app/strategy/rpc/data/signal`: 策略信号日志
+- `data/signal`: `market` 内嵌策略引擎输出的策略信号日志
 - `app/execution/rpc/data/order`: 执行结果日志
 - `app/order/rpc/data/futures`: 订单服务生成的查询快照
 

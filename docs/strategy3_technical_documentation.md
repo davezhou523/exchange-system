@@ -62,7 +62,7 @@ HTTP 请求 → gRPC（zrpc）调用 → execution / strategy / market
 
 ### gRPC 正确使用场景（推荐）
 1️⃣ 控制层（非常适合）
-- 启动策略 / 停止策略 / 查询策略状态（strategy-service）
+- 启动策略 / 停止策略 / 查询策略状态（market-service）
 - 手动下单 / 撤单（execution-service）
 
 2️⃣ 查询接口（同步、可缓存、可限流）
@@ -72,7 +72,7 @@ HTTP 请求 → gRPC（zrpc）调用 → execution / strategy / market
 
 3️⃣ 低频调用（明确超时、幂等、可追踪）
 - 风控检查（risk-service）
-- 配置更新（strategy-service / risk-service）
+- 配置更新（market-service / risk-service）
 
 不建议用 gRPC 承载高频数据流（行情/信号/成交回报）。这类流式数据建议 Kafka 事件总线（可回放、可扩展、多消费者）。
 
@@ -80,7 +80,7 @@ HTTP 请求 → gRPC（zrpc）调用 → execution / strategy / market
 实际上：
 实时数据走 Kafka
 RPC用于“补数据 / 查询”
-#### 2️⃣ strategy-service（核心）
+#### 2️⃣ market-service（核心）
 
 strategy职责：
 订阅 Kafka（kline）
@@ -514,7 +514,7 @@ trigger_score =
 - 插针模型作为 1m/15m 级别的微观结构过滤器，为 15M 入场增加一层保护
 
 #### 推荐接入点
-- strategy-service：负责计算三层模型分数并输出增强信号
+- market-service：负责计算三层模型分数并输出增强信号
 - execution-service：根据收割路径风险调整下单方式、保护单位置和仓位大小
 - gateway：用于可视化展示 `target_zone`、`harvest_path_probability` 和 `expected_sweep_side`
 
@@ -825,11 +825,11 @@ type HarvestPathSignalMessage struct {
 }
 ```
 
-### strategy-service 中的模块拆分建议
+### market-service 中的模块拆分建议
 
 #### 1. 目录建议
 ```text
-app/strategy/rpc/internal/
+app/market/rpc/internal/
   strategy/
     harvestpath/
       detector.go
@@ -874,7 +874,7 @@ app/strategy/rpc/internal/
 
 #### 4. 运行流程建议
 ```text
-步骤1：strategy-service 消费 1m Kline
+步骤1：market-service 消费 1m Kline
 步骤2：更新本地多周期K线缓存
 步骤3：拉取或订阅订单簿快照与最近成交
 步骤4：调用 harvestpath.Detector.Evaluate()

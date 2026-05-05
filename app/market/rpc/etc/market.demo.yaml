@@ -102,3 +102,28 @@ UniversePool:
     Require1hReady: false
     Require4hReady: false
     RequireIndicatorsReady: true
+
+# 策略引擎配置（合并到 market 服务，减少预加载 K 线）
+StrategyEngine:
+  SignalLogDir: data/signal
+  Strategies:
+    - Symbol: ETHUSDT
+      Enabled: true
+      Template: eth-core
+  Templates:
+    eth-core:
+      decision_log_enabled: 1
+      atr_period: 14
+      ema21_period: 21
+      ema55_period: 55
+      rsi_period: 14
+      debug_skip_pullback: 1
+      1m_trading_paused: 1
+  MarketState:
+    FreshnessWindow: 3m
+    RangeAtrPctMax: 0.006
+    BreakoutAtrPctMin: 0.0045
+  Weights:
+    DefaultTrendWeight: 0.7
+    DefaultRangeWeight: 0.7
+    DefaultBreakoutWeight: 0.7

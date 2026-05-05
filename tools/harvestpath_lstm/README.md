@@ -57,7 +57,7 @@ pip install -r tools/harvestpath_lstm/requirements.txt
 
 ```bash
 python3 tools/harvestpath_lstm/train.py \
-  --data-dir app/strategy/rpc/data/kline \
+  --data-dir app/market/rpc/data/kline \
   --symbol ETHUSDT \
   --intervals 1m,5m,15m \
   --window-size 64 \
@@ -96,7 +96,7 @@ python3 tools/harvestpath_lstm/train.py \
 
 ```bash
 python3 tools/harvestpath_lstm/predict.py \
-  --data-dir app/strategy/rpc/data/kline \
+  --data-dir app/market/rpc/data/kline \
   --symbol ETHUSDT
 ```
 
@@ -115,7 +115,7 @@ python3 tools/harvestpath_lstm/predict.py \
 ## 当前定位
 
 - 这是离线训练与离线风险识别版本
-- 还没有直接接入 `strategy-rpc` 的在线决策链
+- 还没有直接接入 `market` 内嵌策略引擎的在线决策链
 - 如果下一步要接入 Go 服务，建议把模型导出成 ONNX 或者先做一个 Python 风险识别 sidecar
 
 ## 先训练出 LSTM artifact：
@@ -123,7 +123,7 @@ python3 tools/harvestpath_lstm/predict.py \
 ```bash
 
 python3 tools/harvestpath_lstm/train.py \
---data-dir app/strategy/rpc/data/kline \
+--data-dir app/market/rpc/data/kline \
 --symbol ETHUSDT \
 --intervals 1m,5m,15m \
 --window-size 64 \

@@ -19,6 +19,7 @@ import (
 	"exchange-system/app/market/rpc/internal/stdlog"
 	"exchange-system/app/market/rpc/internal/svc"
 	"exchange-system/common/pb/market"
+	"exchange-system/common/pb/strategy"
 
 	"github.com/zeromicro/go-zero/core/conf"
 	"github.com/zeromicro/go-zero/core/service"
@@ -88,6 +89,7 @@ func main() {
 
 	s := zrpc.MustNewServer(c.RpcServerConf, func(grpcServer *grpc.Server) {
 		market.RegisterMarketServiceServer(grpcServer, server.NewMarketServiceServer(svcCtx))
+		strategy.RegisterStrategyServiceServer(grpcServer, server.NewStrategyServiceServer(svcCtx))
 
 		if c.Mode == service.DevMode || c.Mode == service.TestMode {
 			reflection.Register(grpcServer)
