@@ -96,4 +96,16 @@ func TestWriteIncludesRouteReason(t *testing.T) {
 	if got := entry["score_source"]; got != "regime_analysis" {
 		t.Fatalf("score_source = %#v, want regime_analysis", got)
 	}
+	if got := entry["template_desc"]; got != "突破核心模板" {
+		t.Fatalf("template_desc = %#v, want 突破核心模板", got)
+	}
+	if got := entry["route_bucket_desc"]; got != "突破策略桶" {
+		t.Fatalf("route_bucket_desc = %#v, want 突破策略桶", got)
+	}
+	if got := entry["route_reason_desc"]; got != "统一判态支持走突破策略桶" {
+		t.Fatalf("route_reason_desc = %#v, want route reason desc", got)
+	}
+	if got := entry["score_source_desc"]; got != "使用 regime analysis 推导的分数作为权重来源" {
+		t.Fatalf("score_source_desc = %#v, want score source desc", got)
+	}
 }

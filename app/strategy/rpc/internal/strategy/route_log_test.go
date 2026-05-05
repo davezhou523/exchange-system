@@ -216,6 +216,102 @@ func TestWriteDecisionLogIncludesRouteContext(t *testing.T) {
 	}
 }
 
+// TestWriteDecisionLogSummaryIncludesRejectReasons 验证决策日志 summary 会把拒绝原因压缩成一行，方便直接扫日志。
+func TestWriteDecisionLogSummaryIncludesRejectReasons(t *testing.T) {
+	dir := t.TempDir()
+	s := NewTrendFollowingStrategy("BTCUSDT", map[string]float64{
+		paramDecisionLogEnabled: 1,
+	}, nil, nil, dir, nil)
+	now := time.Now().UTC()
+	k := &marketpb.Kline{
+		Symbol:     "BTCUSDT",
+		Interval:   "15m",
+		OpenTime:   now.Add(-15 * time.Minute).UnixMilli(),
+		CloseTime:  now.UnixMilli(),
+		IsTradable: true,
+		IsFinal:    true,
+	}
+	s.writeDecisionLogIfEnabled("entry", "skip", "breakout_no_price_break", k, map[string]interface{}{
+		"m15_open_time":         "2026-05-04 16:30:00 UTC",
+		"m15_is_dirty":          false,
+		"m15_dirty_reason":      "clean",
+		"m15_is_tradable":       true,
+		"m15_is_final":          true,
+		"breakout_reject_descs": []string{"价格未突破前高/前低", "量能不足，未达到放量确认条件"},
+		"breakout_reject_codes": []string{"breakout_no_price_break", "breakout_volume_low"},
+	})
+
+	entry := readSingleJSONLine(t, filepath.Join(dir, "decision", "BTCUSDT", now.Format("2006-01-02")+".jsonl"))
+	extras, ok := entry["extras"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("extras = %#v, want object", entry["extras"])
+	}
+	if got := extras["summary"]; got != "m15=final -> reject=价格未突破前高/前低+量能不足，未达到放量确认条件" {
+		t.Fatalf("extras.summary = %#v, want compact reject summary", got)
+	}
+	if got, ok := entry["timestamp_bj"].(string); !ok || got == "" {
+		t.Fatalf("timestamp_bj = %#v, want non-empty beijing time", entry["timestamp_bj"])
+	}
+}
+
+// TestWriteDecisionLogSummaryIncludesGenericRejectReasons 验证通用 reject_descs 也会生成统一的一行 reject 摘要。
+func TestWriteDecisionLogSummaryIncludesGenericRejectReasons(t *testing.T) {
+	dir := t.TempDir()
+	s := NewTrendFollowingStrategy("BTCUSDT", map[string]float64{
+		paramDecisionLogEnabled: 1,
+	}, nil, nil, dir, nil)
+	now := time.Now().UTC()
+	k := &marketpb.Kline{
+		Symbol:     "BTCUSDT",
+		Interval:   "15m",
+		OpenTime:   now.Add(-15 * time.Minute).UnixMilli(),
+		CloseTime:  now.UnixMilli(),
+		IsTradable: true,
+		IsFinal:    true,
+	}
+	s.writeDecisionLogIfEnabled("entry", "skip", "m15_long_structure_missing", k, map[string]interface{}{
+		"m15_open_time":   "2026-05-04 16:30:00 UTC",
+		"m15_is_dirty":    false,
+		"m15_is_tradable": true,
+		"m15_is_final":    true,
+		"reject_descs":    []string{"多头入场时价格未突破近期高点", "多头入场时RSI未上穿50且未达到偏强阈值"},
+		"reject_codes":    []string{"m15_long_structure_missing", "m15_long_rsi_signal_missing"},
+	})
+
+	entry := readSingleJSONLine(t, filepath.Join(dir, "decision", "BTCUSDT", now.Format("2006-01-02")+".jsonl"))
+	extras, ok := entry["extras"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("extras = %#v, want object", entry["extras"])
+	}
+	if got := extras["summary"]; got != "m15=final -> reject=多头入场时价格未突破近期高点+多头入场时RSI未上穿50且未达到偏强阈值" {
+		t.Fatalf("extras.summary = %#v, want generic reject summary", got)
+	}
+}
+
+// TestDescribeTrendM15EntryReject 验证普通趋势 15M 拒绝原因会拆成结构与 RSI 两类细分码。
+func TestDescribeTrendM15EntryReject(t *testing.T) {
+	s := NewTrendFollowingStrategy("BTCUSDT", map[string]float64{
+		paramM15BreakoutLookback: 1,
+		paramM15RsiBiasLong:      52,
+	}, nil, nil, "", nil)
+	s.klines15m = []klineSnapshot{
+		{High: 101, Low: 99, Close: 100, Atr: 1, Rsi: 49},
+		{High: 100.8, Low: 99.2, Close: 100.3, Atr: 1, Rsi: 49.5},
+	}
+	s.latest15m = s.klines15m[len(s.klines15m)-1]
+
+	reject := s.describeTrendM15EntryReject(pullbackLong)
+	if reject.PrimaryCode != "m15_long_structure_missing" {
+		t.Fatalf("PrimaryCode = %q, want m15_long_structure_missing (reject=%+v)", reject.PrimaryCode, reject)
+	}
+	if len(reject.Codes) != 2 {
+		t.Fatalf("Codes = %#v, want 2 reasons", reject.Codes)
+	}
+	if reject.Codes[0] != "m15_long_structure_missing" || reject.Codes[1] != "m15_long_rsi_signal_missing" {
+		t.Fatalf("Codes = %#v, want structure+rsi reasons", reject.Codes)
+	}
+}
+
 // TestUpdateRuntimeConfigPreservesCaches 验证模板切换时原地更新配置不会丢掉已积累的多周期缓存。
 func TestUpdateRuntimeConfigPreservesCaches(t *testing.T) {
 	s := NewTrendFollowingStrategy("BTCUSDT", map[string]float64{

@@ -1,6 +1,13 @@
 package strategy
 
-import "testing"
+import (
+	"context"
+	"path/filepath"
+	"testing"
+	"time"
+
+	marketpb "exchange-system/common/pb/market"
+)
 
 func TestJudgeBreakoutEntryLong(t *testing.T) {
 	s := NewTrendFollowingStrategy("BTCUSDT", map[string]float64{
@@ -55,5 +62,65 @@ func TestJudgeBreakoutEntryRejectsWeakVolume(t *testing.T) {
 	}
 	if stats.VolumeOk {
 		t.Fatalf("VolumeOk = true, want false (stats=%+v)", stats)
+	}
+}
+
+func TestCheckBreakoutEntryConditionsLogsGranularRejectReason(t *testing.T) {
+	dir := t.TempDir()
+	s := NewTrendFollowingStrategy("BTCUSDT", map[string]float64{
+		paramStrategyVariant:        1,
+		paramDecisionLogEnabled:     1,
+		paramBreakoutVolumeRatioMin: 1.5,
+		paramBreakoutEntryBufferATR: 0.1,
+		paramBreakoutRsiLongMin:     55,
+	}, nil, nil, dir, nil)
+
+	s.klines15m = []klineSnapshot{
+		{OpenTime: 1, High: 100, Low: 95, Volume: 100},
+		{OpenTime: 2, High: 101, Low: 96, Volume: 100},
+		{OpenTime: 3, High: 102, Low: 97, Volume: 100},
+		{OpenTime: 4, High: 103, Low: 98, Volume: 100},
+		{OpenTime: 5, High: 104, Low: 99, Volume: 100},
+		{OpenTime: 6, High: 104.5, Low: 100, Volume: 120, Close: 103.8, Rsi: 61, Atr: 2, Ema21: 103, Ema55: 102},
+	}
+	s.latest15m = s.klines15m[len(s.klines15m)-1]
+
+	now := time.Now().UTC()
+	k := &marketpb.Kline{
+		Symbol:     "BTCUSDT",
+		Interval:   "15m",
+		OpenTime:   now.Add(-15 * time.Minute).UnixMilli(),
+		CloseTime:  now.UnixMilli(),
+		IsTradable: true,
+		IsFinal:    true,
+	}
+	if err := s.checkBreakoutEntryConditions(context.Background(), k); err != nil {
+		t.Fatalf("checkBreakoutEntryConditions() error = %v", err)
+	}
+
+	entry := readSingleJSONLine(t, filepath.Join(dir, "decision", "BTCUSDT", now.Format("2006-01-02")+".jsonl"))
+	if got := entry["reason_code"]; got != "breakout_no_price_break" {
+		t.Fatalf("reason_code = %#v, want breakout_no_price_break", got)
+	}
+	if got := entry["reason"]; got != "价格未突破前高/前低" {
+		t.Fatalf("reason = %#v, want granular Chinese description", got)
+	}
+	extras, ok := entry["extras"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("extras = %#v, want object", entry["extras"])
+	}
+	codes, ok := extras["breakout_reject_codes"].([]interface{})
+	if !ok || len(codes) < 2 {
+		t.Fatalf("breakout_reject_codes = %#v, want detailed reject list", extras["breakout_reject_codes"])
+	}
+	if codes[0] != "breakout_no_price_break" || codes[1] != "breakout_volume_low" {
+		t.Fatalf("breakout_reject_codes = %#v, want price break + volume reasons", codes)
+	}
+	descs, ok := extras["breakout_reject_descs"].([]interface{})
+	if !ok || len(descs) < 2 {
+		t.Fatalf("breakout_reject_descs = %#v, want Chinese reject descriptions", extras["breakout_reject_descs"])
+	}
+	if descs[0] != "价格未突破前高/前低" || descs[1] != "量能不足，未达到放量确认条件" {
+		t.Fatalf("breakout_reject_descs = %#v, want translated descriptions", descs)
 	}
 }

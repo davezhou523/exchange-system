@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	marketpb "exchange-system/common/pb/market"
@@ -27,6 +28,13 @@ type breakoutStats struct {
 	Lookback     int
 }
 
+// breakoutRejectDetail 汇总突破策略未开仓时的主原因和全部拦截原因，方便日志直接解释为什么没有成交。
+type breakoutRejectDetail struct {
+	PrimaryCode string
+	Codes       []string
+	Descs       []string
+}
+
 // checkBreakoutEntryConditions 执行 15m Breakout 变体的最小开仓判定。
 func (s *TrendFollowingStrategy) checkBreakoutEntryConditions(ctx context.Context, k *marketpb.Kline) error {
 	if !s.checkRiskLimits() {
@@ -40,7 +48,15 @@ func (s *TrendFollowingStrategy) checkBreakoutEntryConditions(ctx context.Contex
 	}
 	entry, stats := s.judgeBreakoutEntry(m15, s.klines15m, int(s.getParam(paramM15BreakoutLookback, 6)))
 	if entry == entryNone {
-		s.writeDecisionLogIfEnabled("entry", "skip", "breakout_no_entry", k, s.breakoutDecisionExtras("m15", m15, stats))
+		reject := describeBreakoutReject(stats)
+		extras := s.breakoutDecisionExtras("m15", m15, stats)
+		if len(reject.Codes) > 0 {
+			extras["breakout_reject_codes"] = reject.Codes
+		}
+		if len(reject.Descs) > 0 {
+			extras["breakout_reject_descs"] = reject.Descs
+		}
+		s.writeDecisionLogIfEnabled("entry", "skip", reject.PrimaryCode, k, extras)
 		return nil
 	}
 	if s.shouldBlockForHarvestPathRisk(ctx, k, entry) {
@@ -122,6 +138,64 @@ func (s *TrendFollowingStrategy) judgeBreakoutEntry(current klineSnapshot, histo
 		return entryShort, stats
 	}
 	return entryNone, stats
+}
+
+// describeBreakoutReject 根据突破判定统计量生成主拦截原因和完整拒绝原因列表，避免日志只剩 breakout_no_entry 这种粗粒度提示。
+func describeBreakoutReject(stats breakoutStats) breakoutRejectDetail {
+	detail := breakoutRejectDetail{}
+	appendCode := func(code string) {
+		code = strings.TrimSpace(code)
+		if code == "" {
+			return
+		}
+		for _, existing := range detail.Codes {
+			if existing == code {
+				return
+			}
+		}
+		detail.Codes = append(detail.Codes, code)
+		detail.Descs = append(detail.Descs, translateDecisionReason(code))
+	}
+
+	switch {
+	case stats.BreakoutUp:
+		if !stats.VolumeOk {
+			appendCode("breakout_volume_low")
+		}
+		if !stats.LongRSIOk {
+			appendCode("breakout_long_rsi_low")
+		}
+		if !stats.LongEMAOk {
+			appendCode("breakout_long_ema_misaligned")
+		}
+	case stats.BreakoutDown:
+		if !stats.VolumeOk {
+			appendCode("breakout_volume_low")
+		}
+		if !stats.ShortRSIOk {
+			appendCode("breakout_short_rsi_high")
+		}
+		if !stats.ShortEMAOk {
+			appendCode("breakout_short_ema_misaligned")
+		}
+	default:
+		appendCode("breakout_no_price_break")
+		if !stats.VolumeOk {
+			appendCode("breakout_volume_low")
+		}
+		if !stats.LongRSIOk && !stats.ShortRSIOk {
+			appendCode("breakout_rsi_not_ready")
+		}
+		if !stats.LongEMAOk && !stats.ShortEMAOk {
+			appendCode("breakout_ema_misaligned")
+		}
+	}
+
+	if len(detail.Codes) == 0 {
+		appendCode("breakout_no_entry")
+	}
+	detail.PrimaryCode = detail.Codes[0]
+	return detail
 }
 
 // breakoutWindow 返回用于突破判定的历史窗口，并始终排除当前这根 K 线。

@@ -307,7 +307,43 @@ func (s *ServiceContext) updateUniverseSnapshot(kline *market.Kline) {
 	default:
 		return
 	}
-	features := featureengine.BuildFromKline(kline)
+	features, frame, ok := buildUniverseFrameFromKline(kline)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.universeSnapshots == nil {
+		s.universeSnapshots = make(map[string]universe.Snapshot)
+	}
+	snapshot := s.universeSnapshots[kline.Symbol]
+	snapshot = applyUniverseFrameToSnapshot(snapshot, features, frame)
+	s.universeSnapshots[kline.Symbol] = snapshot
+}
+
+// buildUniverseFrameFromKline 把 K 线转换为 Universe 可复用的特征与轻量 frame，避免实时流和 warmup 回填各写一套逻辑。
+func buildUniverseFrameFromKline(kline *market.Kline) (featureengine.Features, universe.KlineFrame, bool) {
+	if kline == nil || strings.TrimSpace(kline.Symbol) == "" {
+		return featureengine.Features{}, universe.KlineFrame{}, false
+	}
+	updatedAt := resolveUniverseFrameUpdatedAt(kline)
+	if updatedAt.IsZero() {
+		return featureengine.Features{}, universe.KlineFrame{}, false
+	}
+	features := featureengine.BuildFromSnapshotValues(
+		kline.Symbol,
+		kline.Interval,
+		kline.Close,
+		kline.Ema21,
+		kline.Ema55,
+		kline.Atr,
+		kline.Rsi,
+		kline.Volume,
+		kline.IsDirty,
+		kline.IsTradable,
+		kline.IsFinal,
+		updatedAt,
+	)
 	frame := universe.KlineFrame{
 		Symbol:      features.Symbol,
 		Interval:    features.Timeframe,
@@ -323,17 +359,39 @@ func (s *ServiceContext) updateUniverseSnapshot(kline *market.Kline) {
 		Ema55:       features.Ema55,
 		Rsi:         features.Rsi,
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	snapshot := s.universeSnapshots[kline.Symbol]
+	return features, frame, true
+}
+
+// resolveUniverseFrameUpdatedAt 为 Universe frame 选择稳定的更新时间，优先事件时间，缺失时退回 close/open time。
+func resolveUniverseFrameUpdatedAt(kline *market.Kline) time.Time {
+	if kline == nil {
+		return time.Time{}
+	}
+	switch {
+	case kline.EventTime > 0:
+		return time.UnixMilli(kline.EventTime).UTC()
+	case kline.CloseTime > 0:
+		return time.UnixMilli(kline.CloseTime).UTC()
+	case kline.OpenTime > 0:
+		return time.UnixMilli(kline.OpenTime).UTC()
+	default:
+		return time.Time{}
+	}
+}
+
+// applyUniverseFrameToSnapshot 把单周期 frame 合并进 Universe 快照，旧 frame 不覆盖更新的运行时快照。
+func applyUniverseFrameToSnapshot(snapshot universe.Snapshot, features featureengine.Features, frame universe.KlineFrame) universe.Snapshot {
 	snapshot.Symbol = features.Symbol
-	switch kline.Interval {
+	switch frame.Interval {
 	case "1m":
+		if snapshot.Kline1m.UpdatedAt.After(frame.UpdatedAt) {
+			return snapshot
+		}
 		snapshot.UpdatedAt = features.UpdatedAt
-		snapshot.LastEventMs = kline.EventTime
-		snapshot.IsDirty = kline.IsDirty
-		snapshot.IsTradable = kline.IsTradable
-		snapshot.IsFinal = kline.IsFinal
+		snapshot.LastEventMs = frame.LastEventMs
+		snapshot.IsDirty = frame.IsDirty
+		snapshot.IsTradable = frame.IsTradable
+		snapshot.IsFinal = frame.IsFinal
 		snapshot.LastInterval = features.Timeframe
 		snapshot.Close = features.Close
 		snapshot.Atr = features.Atr
@@ -342,11 +400,17 @@ func (s *ServiceContext) updateUniverseSnapshot(kline *market.Kline) {
 		snapshot.Ema55 = features.Ema55
 		snapshot.Kline1m = frame
 	case "15m":
+		if snapshot.Kline15m.UpdatedAt.After(frame.UpdatedAt) {
+			return snapshot
+		}
 		snapshot.Kline15m = frame
 	case "1h":
+		if snapshot.Kline1h.UpdatedAt.After(frame.UpdatedAt) {
+			return snapshot
+		}
 		snapshot.Kline1h = frame
 	}
-	s.universeSnapshots[kline.Symbol] = snapshot
+	return snapshot
 }
 
 // runUniverseLoop 周期性运行 Universe 评估和调度逻辑。
@@ -561,6 +625,7 @@ func (s *ServiceContext) ensureStrategyWarmupLoadedLocked(symbol string) {
 	}
 
 	s.strategyWarmup[symbol] = state
+	s.seedUniverseSnapshotsFromWarmupLocked(symbol, state)
 	source := strings.Join(sources, "+")
 	sharedDir := formatStrategyWarmupSharedDir(s.Config.SharedWarmupDir)
 	restoredFromShared := strategyWarmupRestoredFromShared(source)
@@ -584,6 +649,40 @@ func (s *ServiceContext) ensureStrategyWarmupLoadedLocked(symbol string) {
 	logStrategyWarmupDeltaEvent(symbol, source, "1h", state.Klines1h, clickhouseLoaded.Klines1h)
 	logStrategyWarmupDeltaEvent(symbol, source, "15m", state.Klines15m, clickhouseLoaded.Klines15m)
 	logStrategyWarmupDeltaEvent(symbol, source, "1m", state.Klines1m, clickhouseLoaded.Klines1m)
+}
+
+// seedUniverseSnapshotsFromWarmupLocked 用 warmup 恢复出的最新 1m/15m/1h K 线初始化 Universe 快照，避免启动后要等第一根实时高周期 K 线才可融合。
+func (s *ServiceContext) seedUniverseSnapshotsFromWarmupLocked(symbol string, state strategyWarmupState) {
+	if s == nil || strings.TrimSpace(symbol) == "" {
+		return
+	}
+	if s.universeSnapshots == nil {
+		s.universeSnapshots = make(map[string]universe.Snapshot)
+	}
+	snapshot := s.universeSnapshots[symbol]
+	for _, kline := range []*market.Kline{
+		latestStrategyWarmupKlinePtr(state.Klines1m),
+		latestStrategyWarmupKlinePtr(state.Klines15m),
+		latestStrategyWarmupKlinePtr(state.Klines1h),
+	} {
+		features, frame, ok := buildUniverseFrameFromKline(kline)
+		if !ok {
+			continue
+		}
+		snapshot = applyUniverseFrameToSnapshot(snapshot, features, frame)
+	}
+	if snapshot.Symbol != "" {
+		s.universeSnapshots[symbol] = snapshot
+	}
+}
+
+// latestStrategyWarmupKlinePtr 返回某个周期最新一根 K 线的副本指针，避免直接暴露底层切片元素地址。
+func latestStrategyWarmupKlinePtr(klines []market.Kline) *market.Kline {
+	if len(klines) == 0 {
+		return nil
+	}
+	item := klines[len(klines)-1]
+	return &item
 }
 
 // loadStrategyWarmupStateFromClickHouse 从 ClickHouse 的 kline_fact 恢复策略启动所需的最近多周期闭 K 线。
@@ -1398,6 +1497,19 @@ func (s *ServiceContext) evaluateUniverse(now time.Time) {
 			snapshot.Fusion.UpdatedAt = baseEvaluation.Result.UpdatedAt
 			result = baseEvaluation.Result
 			result.Reason = "fallback_1m_only"
+			result.FallbackSource = "1m"
+			result.FallbackMissingIntervals, result.FallbackIntervalReady, result.FallbackIntervalReasons, result.FallbackIntervalAgeSec = buildFallback1mOnlyDetails(
+				now,
+				s.marketStateConfig,
+				baseEvaluation,
+				hasBase,
+				snapshot.Kline1h,
+				h1Evaluation,
+				hasH1,
+				snapshot.Kline15m,
+				m15Evaluation,
+				hasM15,
+			)
 		}
 		if snapshot.Fusion.UpdatedAt.IsZero() {
 			snapshot.Fusion.UpdatedAt = result.UpdatedAt
@@ -1466,6 +1578,141 @@ func (s *ServiceContext) evaluateUniverse(now time.Time) {
 	)
 }
 
+// buildFallback1mOnlyDetails 在多周期融合不可用时，生成 1m 回退所需的逐周期就绪状态和原因。
+func buildFallback1mOnlyDetails(
+	now time.Time,
+	cfg marketstate.Config,
+	base marketstate.Evaluation,
+	hasBase bool,
+	h1Frame universe.KlineFrame,
+	h1 marketstate.Evaluation,
+	hasH1 bool,
+	m15Frame universe.KlineFrame,
+	m15 marketstate.Evaluation,
+	hasM15 bool,
+) ([]string, map[string]bool, map[string]string, map[string]int64) {
+	intervalReady := map[string]bool{
+		"1m":  regimeEvaluationReady(base, hasBase),
+		"1h":  regimeEvaluationReady(h1, hasH1),
+		"15m": regimeEvaluationReady(m15, hasM15),
+	}
+	intervalReasons := map[string]string{
+		"1m":  regimeEvaluationReason(base, hasBase, universe.KlineFrame{}),
+		"1h":  regimeEvaluationReason(h1, hasH1, h1Frame),
+		"15m": regimeEvaluationReason(m15, hasM15, m15Frame),
+	}
+	intervalAgeSec := map[string]int64{
+		"1m":  regimeFrameAgeSeconds(now, base, hasBase, universe.KlineFrame{}),
+		"1h":  regimeFrameAgeSeconds(now, h1, hasH1, h1Frame),
+		"15m": regimeFrameAgeSeconds(now, m15, hasM15, m15Frame),
+	}
+	missingIntervals := make([]string, 0, 2)
+	for _, interval := range []string{"1h", "15m"} {
+		if !intervalReady[interval] {
+			missingIntervals = append(missingIntervals, interval)
+		}
+	}
+	intervalAgeSec = dropNonPositiveIntervalAge(intervalAgeSec)
+	return missingIntervals, intervalReady, intervalReasons, intervalAgeSec
+}
+
+// regimeEvaluationReady 判断某个周期的判态结果是否足以参与多周期融合。
+func regimeEvaluationReady(evaluation marketstate.Evaluation, ok bool) bool {
+	if !ok {
+		return false
+	}
+	return evaluation.Result.State != marketstate.MarketStateUnknown
+}
+
+// regimeEvaluationReason 提取某个周期当前最适合排查的原因码，缺快照时给出统一占位值。
+func regimeEvaluationReason(evaluation marketstate.Evaluation, ok bool, frame universe.KlineFrame) string {
+	if !ok {
+		return explainMissingFrame(frame)
+	}
+	if strings.TrimSpace(evaluation.Result.Reason) != "" {
+		return evaluation.Result.Reason
+	}
+	return "no_results"
+}
+
+// explainMissingFrame 细分 no_frame：区分完全没拿到 KlineFrame 和缺少 UpdatedAt 的异常快照。
+func explainMissingFrame(frame universe.KlineFrame) string {
+	if strings.TrimSpace(frame.Interval) == "" && frame.UpdatedAt.IsZero() && frame.LastEventMs == 0 {
+		return "missing_kline_frame"
+	}
+	if frame.UpdatedAt.IsZero() {
+		return "missing_updated_at"
+	}
+	return "no_frame"
+}
+
+// regimeFrameAgeSeconds 返回某个周期 frame 的 age 秒数，便于 stale_features 现场定位 “now - updated_at”。
+func regimeFrameAgeSeconds(now time.Time, evaluation marketstate.Evaluation, ok bool, frame universe.KlineFrame) int64 {
+	updatedAt := time.Time{}
+	if ok && !evaluation.Analysis.Features.UpdatedAt.IsZero() {
+		updatedAt = evaluation.Analysis.Features.UpdatedAt
+	}
+	if updatedAt.IsZero() {
+		updatedAt = frame.UpdatedAt
+	}
+	if updatedAt.IsZero() {
+		return 0
+	}
+	age := now.Sub(updatedAt).Seconds()
+	if age <= 0 {
+		return 0
+	}
+	return int64(age)
+}
+
+// effectiveMarketStateConfigForInterval 按周期生成判态配置，避免 15m/1h 因统一 3m freshness 窗口被误判 stale。
+func effectiveMarketStateConfigForInterval(cfg marketstate.Config, interval string) marketstate.Config {
+	cfg = marketstate.Config{
+		FreshnessWindow:   cfg.FreshnessWindow,
+		RangeAtrPctMax:    cfg.RangeAtrPctMax,
+		BreakoutAtrPctMin: cfg.BreakoutAtrPctMin,
+	}
+	cfg.FreshnessWindow = marketStateFreshnessWindowForInterval(cfg.FreshnessWindow, interval)
+	return cfg
+}
+
+// marketStateFreshnessWindowForInterval 为不同周期返回更合理的 freshness 窗口。
+//
+// 经验口径：
+// - 1m 继续使用基础窗口（默认 3m），便于快速发现断流/停更。
+// - 15m/1h 等高周期允许 “一个周期 + 基础容忍” 的更新时间漂移，否则绝大部分时间都会被误判 stale。
+func marketStateFreshnessWindowForInterval(base time.Duration, interval string) time.Duration {
+	if base <= 0 {
+		base = 3 * time.Minute
+	}
+	interval = strings.TrimSpace(interval)
+	if interval == "" || interval == "1m" {
+		return base
+	}
+	d, err := time.ParseDuration(interval)
+	if err != nil || d <= 0 {
+		return base
+	}
+	return d + base
+}
+
+// dropNonPositiveIntervalAge 清理无意义的 age 值，避免日志里出现一堆 0。
+func dropNonPositiveIntervalAge(in map[string]int64) map[string]int64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(in))
+	for interval, value := range in {
+		if value > 0 {
+			out[interval] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // evaluateUniverseFrame 把某个周期快照转换成单周期判态结果，避免 evaluateUniverse 内部堆积重复样板代码。
 func evaluateUniverseFrame(now time.Time, frame universe.KlineFrame, cfg marketstate.Config) (marketstate.Evaluation, bool) {
 	input, ok := buildUniverseStateInput(frame)
@@ -1473,7 +1720,8 @@ func evaluateUniverseFrame(now time.Time, frame universe.KlineFrame, cfg markets
 		return marketstate.Evaluation{}, false
 	}
 	features := featureengine.BuildFromSnapshot(input)
-	return marketstate.Evaluate(now, features, cfg), true
+	effectiveCfg := effectiveMarketStateConfigForInterval(cfg, frame.Interval)
+	return marketstate.Evaluate(now, features, effectiveCfg), true
 }
 
 // buildUniverseStateInput 从多周期快照生成统一判态输入，缺少更新时间时直接跳过该周期。

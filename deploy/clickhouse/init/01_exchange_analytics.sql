@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS exchange_analytics.kline_fact
     symbol           LowCardinality(String) COMMENT '交易对标识',
     interval         LowCardinality(String) COMMENT 'K 线周期',
     open_time        DateTime64(3, 'UTC') COMMENT 'K 线开始时间',
+    open_time_bj     DateTime64(3, 'Asia/Shanghai') ALIAS toTimeZone(open_time, 'Asia/Shanghai') COMMENT 'K 线开始时间（北京时间）',
     close_time       DateTime64(3, 'UTC') COMMENT 'K 线结束时间',
     open             Decimal(20, 8) COMMENT '开盘价',
     high             Decimal(20, 8) COMMENT '最高价',
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS exchange_analytics.decision_fact
     is_final     UInt8 COMMENT '决策结果是否最终确定',
     is_tradable  UInt8 COMMENT '当前市场是否允许交易',
     open_time    DateTime64(3, 'UTC') COMMENT '关联 K 线开始时间',
+    open_time_bj DateTime64(3, 'Asia/Shanghai') ALIAS toTimeZone(open_time, 'Asia/Shanghai') COMMENT '关联 K 线开始时间（北京时间）',
     close_time   DateTime64(3, 'UTC') COMMENT '关联 K 线结束时间',
     route_bucket LowCardinality(String) COMMENT '决策路由分桶',
     route_reason LowCardinality(String) COMMENT '决策路由原因',
@@ -59,6 +61,7 @@ SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS exchange_analytics.signal_fact
 (
     event_time        DateTime64(3, 'UTC') COMMENT '信号事件时间',
+    event_time_bj     DateTime64(3, 'Asia/Shanghai') ALIAS toTimeZone(event_time, 'Asia/Shanghai') COMMENT '信号事件时间（北京时间）',
     symbol            LowCardinality(String) COMMENT '交易对标识',
     strategy_id       String COMMENT '策略唯一标识',
     template          LowCardinality(String) COMMENT '策略模板名称',
@@ -86,6 +89,7 @@ SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS exchange_analytics.execution_event_fact
 (
     event_time      DateTime64(3, 'UTC') COMMENT '执行事件时间',
+    event_time_bj   DateTime64(3, 'Asia/Shanghai') ALIAS toTimeZone(event_time, 'Asia/Shanghai') COMMENT '执行事件时间（北京时间）',
     account_id      String COMMENT '账户唯一标识',
     symbol          LowCardinality(String) COMMENT '交易对标识',
     strategy_id     String COMMENT '策略唯一标识',
@@ -113,6 +117,7 @@ SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS exchange_analytics.order_event_fact
 (
     event_time         DateTime64(3, 'UTC') COMMENT '订单事件时间',
+    event_time_bj      DateTime64(3, 'Asia/Shanghai') ALIAS toTimeZone(event_time, 'Asia/Shanghai') COMMENT '订单事件时间（北京时间）',
     account_id         String COMMENT '账户唯一标识',
     symbol             LowCardinality(String) COMMENT '交易对标识',
     order_id           String COMMENT '交易所订单标识',
@@ -140,6 +145,7 @@ SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS exchange_analytics.position_cycle_fact
 (
     open_time                 DateTime64(3, 'UTC') COMMENT '仓位周期开始时间',
+    open_time_bj              DateTime64(3, 'Asia/Shanghai') ALIAS toTimeZone(open_time, 'Asia/Shanghai') COMMENT '仓位周期开始时间（北京时间）',
     close_time                Nullable(DateTime64(3, 'UTC')) COMMENT '仓位周期结束时间',
     account_id                String COMMENT '账户唯一标识',
     symbol                    LowCardinality(String) COMMENT '交易对标识',

@@ -218,8 +218,9 @@ func TestUpsertStrategyLockedHydratesWarmupHistoryOnEnable(t *testing.T) {
 		Config: config.Config{
 			SignalLogDir: "data/signal",
 		},
-		strategies:     map[string]*strategyengine.TrendFollowingStrategy{},
-		strategyWarmup: map[string]strategyWarmupState{},
+		strategies:        map[string]*strategyengine.TrendFollowingStrategy{},
+		strategyWarmup:    map[string]strategyWarmupState{},
+		universeSnapshots: map[string]universe.Snapshot{},
 	}
 	svcCtx.strategyWarmup["BTCUSDT"] = strategyWarmupState{
 		Klines4h: []marketpb.Kline{
@@ -237,28 +238,47 @@ func TestUpsertStrategyLockedHydratesWarmupHistoryOnEnable(t *testing.T) {
 		},
 		Klines1h: []marketpb.Kline{
 			{
-				Symbol:   "BTCUSDT",
-				Interval: "1h",
-				IsClosed: true,
-				OpenTime: time.Date(2026, 5, 3, 8, 0, 0, 0, time.UTC).UnixMilli(),
-				Close:    100,
-				Ema21:    99,
-				Ema55:    98,
-				Rsi:      52,
-				Atr:      1.2,
+				Symbol:    "BTCUSDT",
+				Interval:  "1h",
+				IsClosed:  true,
+				OpenTime:  time.Date(2026, 5, 3, 8, 0, 0, 0, time.UTC).UnixMilli(),
+				CloseTime: time.Date(2026, 5, 3, 8, 59, 59, 0, time.UTC).UnixMilli(),
+				EventTime: time.Date(2026, 5, 3, 9, 0, 0, 0, time.UTC).UnixMilli(),
+				Close:     100,
+				Ema21:     99,
+				Ema55:     98,
+				Rsi:       52,
+				Atr:       1.2,
 			},
 		},
 		Klines15m: []marketpb.Kline{
 			{
-				Symbol:   "BTCUSDT",
-				Interval: "15m",
-				IsClosed: true,
-				OpenTime: time.Date(2026, 5, 3, 8, 45, 0, 0, time.UTC).UnixMilli(),
-				Close:    101,
-				Ema21:    100,
-				Ema55:    99,
-				Rsi:      55,
-				Atr:      0.8,
+				Symbol:    "BTCUSDT",
+				Interval:  "15m",
+				IsClosed:  true,
+				OpenTime:  time.Date(2026, 5, 3, 8, 45, 0, 0, time.UTC).UnixMilli(),
+				CloseTime: time.Date(2026, 5, 3, 8, 59, 59, 0, time.UTC).UnixMilli(),
+				EventTime: time.Date(2026, 5, 3, 9, 0, 0, 0, time.UTC).UnixMilli(),
+				Close:     101,
+				Ema21:     100,
+				Ema55:     99,
+				Rsi:       55,
+				Atr:       0.8,
+			},
+		},
+		Klines1m: []marketpb.Kline{
+			{
+				Symbol:    "BTCUSDT",
+				Interval:  "1m",
+				IsClosed:  true,
+				OpenTime:  time.Date(2026, 5, 3, 8, 59, 0, 0, time.UTC).UnixMilli(),
+				CloseTime: time.Date(2026, 5, 3, 8, 59, 59, 0, time.UTC).UnixMilli(),
+				EventTime: time.Date(2026, 5, 3, 9, 0, 0, 0, time.UTC).UnixMilli(),
+				Close:     101.2,
+				Ema21:     100.5,
+				Ema55:     99.7,
+				Rsi:       57,
+				Atr:       0.3,
 			},
 		},
 	}
@@ -283,6 +303,63 @@ func TestUpsertStrategyLockedHydratesWarmupHistoryOnEnable(t *testing.T) {
 	}
 	if got.HistoryLen("15m") != 1 {
 		t.Fatalf("HistoryLen(15m) = %d, want 1", got.HistoryLen("15m"))
+	}
+	snapshot, ok := svcCtx.universeSnapshots["BTCUSDT"]
+	if !ok {
+		t.Fatal("universeSnapshots[BTCUSDT] missing, want warmup-seeded snapshot")
+	}
+	if snapshot.Kline1h.Interval != "1h" || snapshot.Kline15m.Interval != "15m" || snapshot.Kline1m.Interval != "1m" {
+		t.Fatalf("snapshot frames = %+v, want seeded 1h/15m/1m frames", snapshot)
+	}
+	if snapshot.UpdatedAt.IsZero() || snapshot.Kline1h.UpdatedAt.IsZero() || snapshot.Kline15m.UpdatedAt.IsZero() {
+		t.Fatalf("snapshot updated_at = %+v, want non-zero seeded times", snapshot)
+	}
+}
+
+func TestEvaluateUniverseFrameUsesPerIntervalFreshnessWindow(t *testing.T) {
+	now := time.Date(2026, 5, 3, 9, 0, 0, 0, time.UTC)
+	cfg := marketstate.Config{FreshnessWindow: 3 * time.Minute, RangeAtrPctMax: 0.0015, BreakoutAtrPctMin: 0.006}
+
+	// 15m: 10 分钟前更新仍应认为 fresh（15m+3m 容忍），不应落到 stale_features。
+	e15, ok := evaluateUniverseFrame(now, universe.KlineFrame{
+		Symbol:     "ETHUSDT",
+		Interval:   "15m",
+		UpdatedAt:  now.Add(-10 * time.Minute),
+		IsTradable: true,
+		IsFinal:    true,
+		Close:      100,
+		Ema21:      99,
+		Ema55:      98,
+		Atr:        0.8,
+		Rsi:        55,
+		Volume:     10,
+	}, cfg)
+	if !ok {
+		t.Fatal("evaluateUniverseFrame(15m) ok=false, want true")
+	}
+	if e15.Result.Reason == "stale_features" {
+		t.Fatalf("15m reason=%q, want not stale_features", e15.Result.Reason)
+	}
+
+	// 1m: 4 分钟前更新应认为 stale（基础窗口 3m）。
+	e1, ok := evaluateUniverseFrame(now, universe.KlineFrame{
+		Symbol:     "ETHUSDT",
+		Interval:   "1m",
+		UpdatedAt:  now.Add(-4 * time.Minute),
+		IsTradable: true,
+		IsFinal:    true,
+		Close:      100,
+		Ema21:      99,
+		Ema55:      98,
+		Atr:        0.8,
+		Rsi:        55,
+		Volume:     10,
+	}, cfg)
+	if !ok {
+		t.Fatal("evaluateUniverseFrame(1m) ok=false, want true")
+	}
+	if e1.Result.Reason != "stale_features" {
+		t.Fatalf("1m reason=%q, want stale_features", e1.Result.Reason)
 	}
 }
 
@@ -698,4 +775,52 @@ func ioReadAllForTest(r *http.Request) ([]byte, error) {
 	}
 	defer r.Body.Close()
 	return io.ReadAll(r.Body)
+}
+
+// TestBuildFallback1mOnlyDetailsIncludesMissingIntervals 验证 fallback_1m_only 会明确标出缺失周期及原因，便于现场直接定位 15m/1h 哪个没就绪。
+func TestBuildFallback1mOnlyDetailsIncludesMissingIntervals(t *testing.T) {
+	now := time.Date(2026, 5, 4, 15, 29, 26, 0, time.UTC)
+	base := marketstate.Evaluation{
+		Result: marketstate.Result{
+			State:  marketstate.MarketStateTrendUp,
+			Reason: "ema_bull_alignment",
+		},
+	}
+	h1 := marketstate.Evaluation{
+		Result: marketstate.Result{
+			State:  marketstate.MarketStateUnknown,
+			Reason: "missing_trend_features",
+		},
+	}
+	m15 := marketstate.Evaluation{
+		Result: marketstate.Result{
+			State:  marketstate.MarketStateRange,
+			Reason: "atr_pct_low",
+		},
+	}
+
+	missing, ready, reasons, ages := buildFallback1mOnlyDetails(
+		now,
+		marketstate.Config{FreshnessWindow: 3 * time.Minute},
+		base,
+		true,
+		universe.KlineFrame{},
+		h1,
+		true,
+		universe.KlineFrame{},
+		m15,
+		true,
+	)
+	if len(missing) != 1 || missing[0] != "1h" {
+		t.Fatalf("missing_intervals = %#v, want [1h]", missing)
+	}
+	if !ready["1m"] || ready["1h"] || !ready["15m"] {
+		t.Fatalf("interval_ready = %#v, want 1m=true 1h=false 15m=true", ready)
+	}
+	if reasons["1h"] != "missing_trend_features" || reasons["15m"] != "atr_pct_low" || reasons["1m"] != "ema_bull_alignment" {
+		t.Fatalf("interval_reasons = %#v, want detailed reasons", reasons)
+	}
+	if ages != nil && len(ages) != 0 {
+		t.Fatalf("interval_age_sec = %#v, want empty when no UpdatedAt", ages)
+	}
 }

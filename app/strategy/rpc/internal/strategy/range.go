@@ -85,7 +85,10 @@ func (s *TrendFollowingStrategy) checkRangeEntryConditions(ctx context.Context, 
 	}
 	entry, stats := s.judgeRangeEntry(m15, s.klines15m, int(s.getParam(paramRangeLookback, 8)))
 	if entry == entryNone {
-		s.writeDecisionLogIfEnabled("entry", "skip", "range_no_entry", k, s.rangeDecisionExtras("m15", m15, stats))
+		reject := s.describeRangeEntryReject(stats)
+		extras := s.rangeDecisionExtras("m15", m15, stats)
+		reject.applyToExtras(extras)
+		s.writeDecisionLogIfEnabled("entry", "skip", reject.PrimaryCode, k, extras)
 		return nil
 	}
 	if s.shouldBlockForHarvestPathRisk(ctx, k, entry) {
@@ -110,7 +113,10 @@ func (s *TrendFollowingStrategy) checkRangeEntryConditions1m(ctx context.Context
 	}
 	entry, stats := s.judgeRangeEntry(m1, s.klines1m, int(s.getParam(paramRangeLookback, 8)))
 	if entry == entryNone {
-		s.writeDecisionLogIfEnabled("entry", "skip", "range_no_entry", k, s.rangeDecisionExtras("m1", m1, stats))
+		reject := s.describeRangeEntryReject(stats)
+		extras := s.rangeDecisionExtras("m1", m1, stats)
+		reject.applyToExtras(extras)
+		s.writeDecisionLogIfEnabled("entry", "skip", reject.PrimaryCode, k, extras)
 		return nil
 	}
 	if s.shouldBlockForHarvestPathRisk(ctx, k, entry) {
@@ -543,6 +549,118 @@ func (s *TrendFollowingStrategy) rangeNotReadyExtras(prefix string, snap klineSn
 	appendSnapshotExtras(extras, "h4", s.latest4h)
 	appendSnapshotExtras(extras, "h1", s.latest1h)
 	return extras
+}
+
+// describeRangeEntryReject 提炼震荡策略未开仓的主原因与补充原因，统一输出为 reject 列表摘要。
+func (s *TrendFollowingStrategy) describeRangeEntryReject(stats rangeStats) *decisionRejectDetail {
+	detail := newDecisionRejectDetail()
+	if !stats.H4OscillationOK {
+		detail.append("range_h4_oscillation_missing")
+		return detail
+	}
+	if !stats.H1AdxOk {
+		detail.append("range_h1_adx_too_high")
+	}
+	if !stats.H1BollWidthOk {
+		detail.append("range_h1_boll_too_wide")
+	}
+	if !stats.H1RangeOK {
+		if detail.PrimaryCode == "" {
+			detail.append("range_no_entry")
+		}
+		return detail
+	}
+	if !stats.H1BollWidthMinOk {
+		detail.append("range_h1_boll_too_narrow")
+	}
+	switch stats.H1Zone {
+	case "lower", "breakout_down":
+		s.appendRangeLongRejects(detail, stats)
+	case "upper", "breakout_up":
+		s.appendRangeShortRejects(detail, stats)
+	default:
+		detail.append("range_h1_middle_zone")
+	}
+	if detail.PrimaryCode == "" {
+		detail.append("range_no_entry")
+	}
+	return detail
+}
+
+// appendRangeLongRejects 聚焦做多方向，把真正阻止区间反转做多的条件整理成稳定的原因码。
+func (s *TrendFollowingStrategy) appendRangeLongRejects(detail *decisionRejectDetail, stats rangeStats) {
+	if detail == nil {
+		return
+	}
+	if !stats.H1RsiLongOk {
+		detail.append("range_long_h1_rsi_blocked")
+	}
+	if !stats.H4TrendLongOk {
+		detail.append("range_long_h4_trend_blocked")
+	}
+	if s.getParam(paramRangeH1CandleFilter, 1) > 0 && !stats.H1CandleLongOk {
+		detail.append("range_long_h1_candle_blocked")
+	}
+	if !stats.LongRSIOk {
+		detail.append("range_long_rsi_signal_missing")
+	}
+	if !stats.LongRSITurnOk {
+		detail.append("range_long_rsi_turn_missing")
+	}
+	if s.getParam(paramRangeRequireBBBounce, 1) > 0 && !stats.LongHasBBBounce {
+		detail.append("range_long_bb_bounce_missing")
+	}
+	if stats.LongSignalCount < int(s.getParam(paramRangeSignalMinCount, 2)) {
+		detail.append("range_long_signal_count_low")
+	}
+	switch stats.H1Zone {
+	case "lower":
+		if !stats.NearRangeLow {
+			detail.append("range_long_not_near_low")
+		}
+	case "breakout_down":
+		if s.getParam(paramRangeFakeBreakout, 1) <= 0 || !stats.LongHasBBBounce {
+			detail.append("range_long_fake_breakout_not_confirmed")
+		}
+	}
+}
+
+// appendRangeShortRejects 聚焦做空方向，把真正阻止区间反转做空的条件整理成稳定的原因码。
+func (s *TrendFollowingStrategy) appendRangeShortRejects(detail *decisionRejectDetail, stats rangeStats) {
+	if detail == nil {
+		return
+	}
+	if !stats.H1RsiShortOk {
+		detail.append("range_short_h1_rsi_blocked")
+	}
+	if !stats.H4TrendShortOk {
+		detail.append("range_short_h4_trend_blocked")
+	}
+	if s.getParam(paramRangeH1CandleFilter, 1) > 0 && !stats.H1CandleShortOk {
+		detail.append("range_short_h1_candle_blocked")
+	}
+	if !stats.ShortRSIOk {
+		detail.append("range_short_rsi_signal_missing")
+	}
+	if !stats.ShortRSITurnOk {
+		detail.append("range_short_rsi_turn_missing")
+	}
+	if s.getParam(paramRangeRequireBBBounce, 1) > 0 && !stats.ShortHasBBBounce {
+		detail.append("range_short_bb_bounce_missing")
+	}
+	if stats.ShortSignalCount < int(s.getParam(paramRangeSignalMinCount, 2)) {
+		detail.append("range_short_signal_count_low")
+	}
+	switch stats.H1Zone {
+	case "upper":
+		if !stats.NearRangeHigh {
+			detail.append("range_short_not_near_high")
+		}
+	case "breakout_up":
+		if s.getParam(paramRangeFakeBreakout, 1) <= 0 || !stats.ShortHasBBBounce {
+			detail.append("range_short_fake_breakout_not_confirmed")
+		}
+	}
 }
 
 // calculateBollinger 计算指定窗口的布林中轨、上轨和下轨。

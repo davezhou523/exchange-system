@@ -27,11 +27,16 @@ type Features = featureengine.Features
 
 // Result 表示一次市场状态识别的结构化输出。
 type Result struct {
-	Symbol     string
-	State      MarketState
-	Confidence float64
-	Reason     string
-	UpdatedAt  time.Time
+	Symbol                   string
+	State                    MarketState
+	Confidence               float64
+	Reason                   string
+	UpdatedAt                time.Time
+	FallbackSource           string
+	FallbackMissingIntervals []string
+	FallbackIntervalReady    map[string]bool
+	FallbackIntervalReasons  map[string]string
+	FallbackIntervalAgeSec   map[string]int64
 }
 
 // AggregateResult 表示一轮全市场状态聚合后的结构化输出。

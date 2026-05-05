@@ -94,6 +94,29 @@ func TestJudgeRangeEntryRejectsWithoutRsiTurn(t *testing.T) {
 	}
 }
 
+// TestDescribeRangeEntryRejectLongTurnMissing 验证震荡做多被拒时，会优先给出 RSI 未拐头的细分原因。
+func TestDescribeRangeEntryRejectLongTurnMissing(t *testing.T) {
+	s := newRangeTestStrategy()
+	s.klines4h = buildH4RangeHistory()
+	s.latest4h = s.klines4h[len(s.klines4h)-1]
+	s.klines1h = buildH1RangeHistory()
+	s.latest1h = s.klines1h[len(s.klines1h)-1]
+	s.klines15m = buildM15LongNoTurnHistory()
+	s.latest15m = s.klines15m[len(s.klines15m)-1]
+
+	got, stats := s.judgeRangeEntry(s.latest15m, s.klines15m, 20)
+	if got != entryNone {
+		t.Fatalf("judgeRangeEntry() = %v, want entryNone (stats=%+v)", got, stats)
+	}
+	reject := s.describeRangeEntryReject(stats)
+	if reject.PrimaryCode != "range_long_rsi_turn_missing" {
+		t.Fatalf("PrimaryCode = %q, want range_long_rsi_turn_missing (reject=%+v)", reject.PrimaryCode, reject)
+	}
+	if len(reject.Codes) == 0 || reject.Codes[0] != "range_long_rsi_turn_missing" {
+		t.Fatalf("Codes = %#v, want range_long_rsi_turn_missing first", reject.Codes)
+	}
+}
+
 // TestJudgeRangeEntryAllowsFakeBreakoutLong 验证跌破 1H 下轨但 4H 仍属震荡时，可按假突破反向做多。
 func TestJudgeRangeEntryAllowsFakeBreakoutLong(t *testing.T) {
 	s := newRangeTestStrategy()
@@ -129,6 +152,24 @@ func TestJudgeRangeEntryRejectsWhenSignalsBelowMinimum(t *testing.T) {
 	}
 	if stats.LongSignalCount >= 2 {
 		t.Fatalf("LongSignalCount = %d, want < 2 (stats=%+v)", stats.LongSignalCount, stats)
+	}
+}
+
+// TestDescribeRangeEntryRejectMiddleZone 验证区间中部无反转位时，会输出统一的中部区间拒绝原因。
+func TestDescribeRangeEntryRejectMiddleZone(t *testing.T) {
+	reject := newRangeTestStrategy().describeRangeEntryReject(rangeStats{
+		H4OscillationOK:  true,
+		H1RangeOK:        true,
+		H1AdxOk:          true,
+		H1BollWidthOk:    true,
+		H1BollWidthMinOk: true,
+		H1Zone:           "middle",
+	})
+	if reject.PrimaryCode != "range_h1_middle_zone" {
+		t.Fatalf("PrimaryCode = %q, want range_h1_middle_zone (reject=%+v)", reject.PrimaryCode, reject)
+	}
+	if len(reject.Descs) != 1 || reject.Descs[0] != "价格位于1小时区间中部，未到边缘反转位" {
+		t.Fatalf("Descs = %#v, want middle-zone desc", reject.Descs)
 	}
 }
 

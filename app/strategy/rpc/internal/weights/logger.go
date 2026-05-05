@@ -16,20 +16,25 @@ type LogState struct {
 }
 
 type logEntry struct {
-	Timestamp      string  `json:"timestamp"`
-	Symbol         string  `json:"symbol"`
-	Template       string  `json:"template,omitempty"`
-	RouteBucket    string  `json:"route_bucket,omitempty"`
-	RouteReason    string  `json:"route_reason,omitempty"`
-	Score          float64 `json:"score,omitempty"`
-	ScoreSource    string  `json:"score_source,omitempty"`
-	BucketBudget   float64 `json:"bucket_budget,omitempty"`
-	StrategyWeight float64 `json:"strategy_weight"`
-	SymbolWeight   float64 `json:"symbol_weight"`
-	RiskScale      float64 `json:"risk_scale"`
-	PositionBudget float64 `json:"position_budget"`
-	TradingPaused  bool    `json:"trading_paused"`
-	PauseReason    string  `json:"pause_reason,omitempty"`
+	Timestamp       string  `json:"timestamp"`
+	Symbol          string  `json:"symbol"`
+	Template        string  `json:"template,omitempty"`
+	TemplateDesc    string  `json:"template_desc,omitempty"`
+	RouteBucket     string  `json:"route_bucket,omitempty"`
+	RouteBucketDesc string  `json:"route_bucket_desc,omitempty"`
+	RouteReason     string  `json:"route_reason,omitempty"`
+	RouteReasonDesc string  `json:"route_reason_desc,omitempty"`
+	Score           float64 `json:"score,omitempty"`
+	ScoreSource     string  `json:"score_source,omitempty"`
+	ScoreSourceDesc string  `json:"score_source_desc,omitempty"`
+	BucketBudget    float64 `json:"bucket_budget,omitempty"`
+	StrategyWeight  float64 `json:"strategy_weight"`
+	SymbolWeight    float64 `json:"symbol_weight"`
+	RiskScale       float64 `json:"risk_scale"`
+	PositionBudget  float64 `json:"position_budget"`
+	TradingPaused   bool    `json:"trading_paused"`
+	PauseReason     string  `json:"pause_reason,omitempty"`
+	PauseReasonDesc string  `json:"pause_reason_desc,omitempty"`
 }
 
 type metaLogEntry struct {
@@ -85,20 +90,25 @@ func (l *LogState) Write(baseDir string, rec Recommendation, now time.Time) {
 	}
 
 	entry := logEntry{
-		Timestamp:      formatLogTime(now),
-		Symbol:         rec.Symbol,
-		Template:       rec.Template,
-		RouteBucket:    rec.Bucket,
-		RouteReason:    rec.RouteReason,
-		Score:          roundFloat(rec.Score),
-		ScoreSource:    rec.ScoreSource,
-		BucketBudget:   roundFloat(rec.BucketBudget),
-		StrategyWeight: roundFloat(rec.StrategyWeight),
-		SymbolWeight:   roundFloat(rec.SymbolWeight),
-		RiskScale:      roundFloat(rec.RiskScale),
-		PositionBudget: roundFloat(rec.PositionBudget),
-		TradingPaused:  rec.TradingPaused,
-		PauseReason:    rec.PauseReason,
+		Timestamp:       formatLogTime(now),
+		Symbol:          rec.Symbol,
+		Template:        rec.Template,
+		TemplateDesc:    describeTemplate(rec.Template),
+		RouteBucket:     rec.Bucket,
+		RouteBucketDesc: describeRouteBucket(rec.Bucket),
+		RouteReason:     rec.RouteReason,
+		RouteReasonDesc: describeRouteReason(rec.RouteReason),
+		Score:           roundFloat(rec.Score),
+		ScoreSource:     rec.ScoreSource,
+		ScoreSourceDesc: describeScoreSource(rec.ScoreSource),
+		BucketBudget:    roundFloat(rec.BucketBudget),
+		StrategyWeight:  roundFloat(rec.StrategyWeight),
+		SymbolWeight:    roundFloat(rec.SymbolWeight),
+		RiskScale:       roundFloat(rec.RiskScale),
+		PositionBudget:  roundFloat(rec.PositionBudget),
+		TradingPaused:   rec.TradingPaused,
+		PauseReason:     rec.PauseReason,
+		PauseReasonDesc: describeRouteReason(rec.PauseReason),
 	}
 	b, err := json.Marshal(entry)
 	if err != nil {
@@ -263,4 +273,76 @@ func formatLogTime(t time.Time) string {
 
 func roundFloat(v float64) float64 {
 	return float64(int(v*10000)) / 10000
+}
+
+// describeTemplate 把策略模板名转换成中文说明，便于直接理解当前 symbol 实际落到的模板角色。
+func describeTemplate(template string) string {
+	switch template {
+	case "":
+		return ""
+	case "range-core":
+		return "震荡核心模板"
+	case "breakout-core":
+		return "突破核心模板"
+	case "eth-core":
+		return "ETH 基础模板"
+	case "btc-core":
+		return "BTC 基础模板"
+	case "btc-trend":
+		return "BTC 趋势模板"
+	default:
+		return template
+	}
+}
+
+// describeRouteBucket 把策略桶英文码转换成中文说明，便于快速看懂当前落到哪一类策略池。
+func describeRouteBucket(bucket string) string {
+	switch bucket {
+	case "":
+		return ""
+	case "trend":
+		return "趋势策略桶"
+	case "breakout":
+		return "突破策略桶"
+	case "range":
+		return "震荡策略桶"
+	default:
+		return bucket
+	}
+}
+
+// describeRouteReason 把路由原因和暂停原因英文码转换成中文说明，减少排查时来回翻文档。
+func describeRouteReason(reason string) string {
+	switch reason {
+	case "":
+		return ""
+	case "market_state_trend":
+		return "统一判态支持走趋势策略桶"
+	case "market_state_breakout":
+		return "统一判态支持走突破策略桶"
+	case "market_state_range":
+		return "统一判态支持走震荡策略桶"
+	case "market_cooling_pause":
+		return "市场进入冷静期，暂时暂停交易"
+	case "risk_limit_triggered":
+		return "触发风险限制，暂时暂停交易"
+	default:
+		return reason
+	}
+}
+
+// describeScoreSource 把权重分数来源码转换成中文说明，便于判断当前预算是来自 symbol score 还是分析兜底。
+func describeScoreSource(source string) string {
+	switch source {
+	case "":
+		return ""
+	case "symbol_score":
+		return "使用 symbol score 作为权重分数来源"
+	case "regime_analysis":
+		return "使用 regime analysis 推导的分数作为权重来源"
+	case "default":
+		return "未命中特殊分数来源，使用默认分数"
+	default:
+		return source
+	}
 }

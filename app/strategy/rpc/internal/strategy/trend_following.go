@@ -1227,6 +1227,65 @@ func (s *TrendFollowingStrategy) judge15MEntry(pullback pullbackResult) entrySig
 	return entryNone
 }
 
+// describeTrendM15EntryReject 解释趋势策略 15M 入场未通过的具体原因，避免日志只剩一个 m15_no_entry。
+func (s *TrendFollowingStrategy) describeTrendM15EntryReject(pullback pullbackResult) *decisionRejectDetail {
+	detail := newDecisionRejectDetail()
+	m15 := s.latest15m
+	if m15.Rsi == 0 || m15.Atr == 0 {
+		detail.append("m15_not_ready_atr_0")
+		return detail
+	}
+
+	lookback := int(s.getParam(paramM15BreakoutLookback, 6))
+	if len(s.klines15m) <= 1 {
+		detail.append("m15_history_insufficient")
+		return detail
+	}
+	start := len(s.klines15m) - 1 - lookback
+	if start < 0 {
+		start = 0
+	}
+	recentHigh := s.klines15m[start].High
+	recentLow := s.klines15m[start].Low
+	for i := start + 1; i < len(s.klines15m)-1; i++ {
+		if s.klines15m[i].High > recentHigh {
+			recentHigh = s.klines15m[i].High
+		}
+		if s.klines15m[i].Low < recentLow {
+			recentLow = s.klines15m[i].Low
+		}
+	}
+	prevRsi := 0.0
+	if len(s.klines15m) >= 2 {
+		prevRsi = s.klines15m[len(s.klines15m)-2].Rsi
+	}
+	rsiBiasLong := s.getParam(paramM15RsiBiasLong, 52)
+	rsiBiasShort := s.getParam(paramM15RsiBiasShort, 48)
+
+	switch pullback {
+	case pullbackLong:
+		if !(m15.Close > recentHigh) {
+			detail.append("m15_long_structure_missing")
+		}
+		if !(m15.Rsi > 50 && prevRsi <= 50) && !(m15.Rsi >= rsiBiasLong) {
+			detail.append("m15_long_rsi_signal_missing")
+		}
+	case pullbackShort:
+		if !(m15.Close < recentLow) {
+			detail.append("m15_short_structure_missing")
+		}
+		if !(m15.Rsi < 50 && prevRsi >= 50) && !(m15.Rsi <= rsiBiasShort) {
+			detail.append("m15_short_rsi_signal_missing")
+		}
+	default:
+		detail.append("m15_no_entry")
+	}
+	if detail.PrimaryCode == "" {
+		detail.append("m15_no_entry")
+	}
+	return detail
+}
+
 // ---------------------------------------------------------------------------
 // 入场条件检查
 // ---------------------------------------------------------------------------
@@ -1276,12 +1335,15 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 			if entry == entryNone {
 				log.Printf("[策略] %s 15M无入场 | pullback=%v RSI=%.2f ATR=%.2f",
 					s.symbol, pullback, m15.Rsi, m15.Atr)
-				s.writeDecisionLogIfEnabled("entry", "skip", "m15_no_entry", k, map[string]interface{}{
+				reject := s.describeTrendM15EntryReject(pullback)
+				extras := map[string]interface{}{
 					"trend":    stringTrend(trend),
 					"pullback": stringPullback(pullback),
 					"m15_rsi":  m15.Rsi,
 					"m15_atr":  m15.Atr,
-				})
+				}
+				reject.applyToExtras(extras)
+				s.writeDecisionLogIfEnabled("entry", "skip", reject.PrimaryCode, k, extras)
 				return nil
 			}
 		}
@@ -1352,12 +1414,14 @@ func (s *TrendFollowingStrategy) checkEntryConditions(ctx context.Context, k *ma
 	if entry == entryNone {
 		log.Printf("[策略] %s 15M无入场 | pullback=%v RSI=%.2f ATR=%.2f",
 			s.symbol, pullback, s.latest15m.Rsi, s.latest15m.Atr)
+		reject := s.describeTrendM15EntryReject(pullback)
 		extras := map[string]interface{}{
 			"trend":    stringTrend(trend),
 			"pullback": stringPullback(pullback),
 		}
+		reject.applyToExtras(extras)
 		appendSnapshotExtras(extras, "m15", s.latest15m)
-		s.writeDecisionLogIfEnabled("entry", "skip", "m15_no_entry", k, extras)
+		s.writeDecisionLogIfEnabled("entry", "skip", reject.PrimaryCode, k, extras)
 		return nil
 	}
 	if s.shouldBlockForHarvestPathRisk(ctx, k, entry) {
@@ -2923,6 +2987,7 @@ func round2(v float64) float64 {
 
 type decisionLogEntry struct {
 	Timestamp   string                 `json:"timestamp"`
+	TimestampBj string                 `json:"timestamp_bj,omitempty"`
 	Symbol      string                 `json:"symbol"`
 	Interval    string                 `json:"interval"`
 	Stage       string                 `json:"stage"`    // entry / exit
@@ -2941,6 +3006,13 @@ type decisionLogEntry struct {
 
 type orderedDecisionExtras struct {
 	values map[string]interface{}
+}
+
+// decisionRejectDetail 汇总一次入场被拦截时的主原因和全部原因，供不同策略变体复用统一 reject 摘要。
+type decisionRejectDetail struct {
+	PrimaryCode string
+	Codes       []string
+	Descs       []string
 }
 
 func newOrderedDecisionExtras(extras map[string]interface{}) *orderedDecisionExtras {
@@ -3045,7 +3117,22 @@ func buildDecisionExtrasSummary(values map[string]interface{}) string {
 			parts = append(parts, part)
 		}
 	}
+	if part := buildDecisionRejectSummary(values); part != "" {
+		parts = append(parts, part)
+	}
 	return strings.Join(parts, " -> ")
+}
+
+// buildDecisionRejectSummary 从结构化 extras 中提炼“为什么被跳过”的一句话摘要，减少排查时展开 JSON 的次数。
+func buildDecisionRejectSummary(values map[string]interface{}) string {
+	rejectDescs := stringListFromExtras(values["reject_descs"])
+	if len(rejectDescs) == 0 {
+		rejectDescs = stringListFromExtras(values["breakout_reject_descs"])
+	}
+	if len(rejectDescs) == 0 {
+		return ""
+	}
+	return "reject=" + strings.Join(rejectDescs, "+")
 }
 
 func buildTimeframeSummary(prefix string, values map[string]interface{}) string {
@@ -3102,6 +3189,71 @@ func stringFromExtras(v interface{}) string {
 	return s
 }
 
+// stringListFromExtras 把 extras 中的字符串数组统一转换成 []string，兼容运行时 map 和测试反序列化后的 []interface{}。
+func stringListFromExtras(v interface{}) []string {
+	switch items := v.(type) {
+	case []string:
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			item = strings.TrimSpace(item)
+			if item != "" {
+				out = append(out, item)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			text, ok := item.(string)
+			if !ok {
+				continue
+			}
+			text = strings.TrimSpace(text)
+			if text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// newDecisionRejectDetail 创建一个可去重收集原因码/中文说明的 reject detail 容器。
+func newDecisionRejectDetail() *decisionRejectDetail {
+	return &decisionRejectDetail{}
+}
+
+// append 把新的拒绝原因加入 detail，并自动补齐中文说明和主原因。
+func (d *decisionRejectDetail) append(code string) {
+	if d == nil {
+		return
+	}
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return
+	}
+	for _, existing := range d.Codes {
+		if existing == code {
+			return
+		}
+	}
+	d.Codes = append(d.Codes, code)
+	d.Descs = append(d.Descs, translateDecisionReason(code))
+	if d.PrimaryCode == "" {
+		d.PrimaryCode = code
+	}
+}
+
+// applyToExtras 把 reject 详情写回决策 extras，供 summary 和下游排查复用。
+func (d *decisionRejectDetail) applyToExtras(extras map[string]interface{}) {
+	if d == nil || len(d.Codes) == 0 || extras == nil {
+		return
+	}
+	extras["reject_codes"] = append([]string(nil), d.Codes...)
+	extras["reject_descs"] = append([]string(nil), d.Descs...)
+}
+
 func decisionLogLevel(decision, reason string) string {
 	switch reason {
 	case "risk_limits_block", "harvest_path_block":
@@ -3125,6 +3277,15 @@ func formatDecisionLogTime(t time.Time) string {
 		return t.Format("2006-01-02 15:04:05 UTC")
 	}
 	return t.Format("2006-01-02 15:04:05.000 UTC")
+}
+
+// formatDecisionLogTimeBJ 把 UTC 时间转换成北京时间，方便线上直接按东八区核对日志。
+func formatDecisionLogTimeBJ(t time.Time) string {
+	t = t.UTC().Add(8 * time.Hour)
+	if t.Nanosecond()/int(time.Millisecond) == 0 {
+		return t.Format("2006-01-02 15:04:05 UTC+8")
+	}
+	return t.Format("2006-01-02 15:04:05.000 UTC+8")
 }
 
 func (s *TrendFollowingStrategy) writeDecisionLogIfEnabled(stage, decision, reason string, k *marketpb.Kline, extras map[string]interface{}) {
@@ -3165,6 +3326,7 @@ func (s *TrendFollowingStrategy) writeDecisionLogIfEnabled(stage, decision, reas
 	orderedExtras := newOrderedDecisionExtras(s.enrichDecisionExtrasWithRoute(extras))
 	entry := decisionLogEntry{
 		Timestamp:   formatDecisionLogTime(now),
+		TimestampBj: formatDecisionLogTimeBJ(now),
 		Symbol:      s.symbol,
 		Interval:    k.Interval,
 		Stage:       stage,
@@ -3328,6 +3490,52 @@ func translateDecisionReason(reason string) string {
 		return "1分钟震荡指标未就绪"
 	case "range_no_entry":
 		return "震荡策略未满足入场条件"
+	case "range_h4_oscillation_missing":
+		return "4小时震荡评分不足，暂不做区间反转"
+	case "range_h1_adx_too_high":
+		return "1小时ADX偏高，当前更像趋势而非震荡"
+	case "range_h1_boll_too_wide":
+		return "1小时布林带过宽，区间约束不足"
+	case "range_h1_boll_too_narrow":
+		return "1小时布林带过窄，波动空间不足"
+	case "range_h1_middle_zone":
+		return "价格位于1小时区间中部，未到边缘反转位"
+	case "range_long_h1_rsi_blocked":
+		return "1小时RSI过滤阻止做多"
+	case "range_long_h4_trend_blocked":
+		return "4小时方向过滤阻止做多"
+	case "range_long_h1_candle_blocked":
+		return "1小时K线方向未支持做多"
+	case "range_long_rsi_signal_missing":
+		return "做多侧RSI超卖/反弹信号不足"
+	case "range_long_rsi_turn_missing":
+		return "做多侧RSI尚未拐头向上"
+	case "range_long_bb_bounce_missing":
+		return "做多侧未出现下轨回收确认"
+	case "range_long_signal_count_low":
+		return "做多侧信号数量不足"
+	case "range_long_not_near_low":
+		return "价格未贴近区间下沿"
+	case "range_long_fake_breakout_not_confirmed":
+		return "下破区间后未满足假突破反向做多条件"
+	case "range_short_h1_rsi_blocked":
+		return "1小时RSI过滤阻止做空"
+	case "range_short_h4_trend_blocked":
+		return "4小时方向过滤阻止做空"
+	case "range_short_h1_candle_blocked":
+		return "1小时K线方向未支持做空"
+	case "range_short_rsi_signal_missing":
+		return "做空侧RSI超买/回落信号不足"
+	case "range_short_rsi_turn_missing":
+		return "做空侧RSI尚未拐头向下"
+	case "range_short_bb_bounce_missing":
+		return "做空侧未出现上轨回收确认"
+	case "range_short_signal_count_low":
+		return "做空侧信号数量不足"
+	case "range_short_not_near_high":
+		return "价格未贴近区间上沿"
+	case "range_short_fake_breakout_not_confirmed":
+		return "上破区间后未满足假突破反向做空条件"
 	case "m15_not_ready_atr_0":
 		return "15分钟指标未就绪，ATR为0"
 	case "harvest_path_block":
@@ -3342,6 +3550,34 @@ func translateDecisionReason(reason string) string {
 		return "1小时没有满足回调条件"
 	case "m15_no_entry":
 		return "15分钟没有满足入场条件"
+	case "m15_history_insufficient":
+		return "15分钟历史K线不足，无法判断突破"
+	case "m15_long_structure_missing":
+		return "多头入场时价格未突破近期高点"
+	case "m15_long_rsi_signal_missing":
+		return "多头入场时RSI未上穿50且未达到偏强阈值"
+	case "m15_short_structure_missing":
+		return "空头入场时价格未跌破近期低点"
+	case "m15_short_rsi_signal_missing":
+		return "空头入场时RSI未下穿50且未达到偏弱阈值"
+	case "breakout_no_entry":
+		return "突破策略未满足入场条件"
+	case "breakout_no_price_break":
+		return "价格未突破前高/前低"
+	case "breakout_volume_low":
+		return "量能不足，未达到放量确认条件"
+	case "breakout_long_rsi_low":
+		return "多头突破时 RSI 不够强"
+	case "breakout_short_rsi_high":
+		return "空头突破时 RSI 不够弱"
+	case "breakout_rsi_not_ready":
+		return "RSI 条件未满足"
+	case "breakout_long_ema_misaligned":
+		return "多头突破时均线结构未对齐"
+	case "breakout_short_ema_misaligned":
+		return "空头突破时均线结构未对齐"
+	case "breakout_ema_misaligned":
+		return "均线结构未对齐"
 	case "open_signal_sent":
 		return "已发送开仓信号"
 	default:
