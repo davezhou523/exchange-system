@@ -35,6 +35,10 @@ type Router struct {
 	config    RouterConfig
 }
 
+type accountInfoBySymbolProvider interface {
+	GetAccountInfoBySymbol(ctx context.Context, symbol string) (*AccountResult, error)
+}
+
 // NewRouter 创建下单路由器
 func NewRouter(config RouterConfig) *Router {
 	return &Router{
@@ -129,6 +133,18 @@ func (r *Router) GetAccountInfo(ctx context.Context) (*AccountResult, error) {
 	ex, err := r.Route("")
 	if err != nil {
 		return nil, err
+	}
+	return ex.GetAccountInfo(ctx)
+}
+
+// GetAccountInfoForSymbol 获取指定交易对的账户信息，支持交易所按 symbol 精确查询仓位。
+func (r *Router) GetAccountInfoForSymbol(ctx context.Context, symbol string) (*AccountResult, error) {
+	ex, err := r.Route(symbol)
+	if err != nil {
+		return nil, err
+	}
+	if provider, ok := ex.(accountInfoBySymbolProvider); ok {
+		return provider.GetAccountInfoBySymbol(ctx, symbol)
 	}
 	return ex.GetAccountInfo(ctx)
 }

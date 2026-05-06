@@ -69,7 +69,7 @@ services:
       - kafka-net
 
   clickhouse:
-    image: docker.1ms.run/clickhouse:24.3
+    image: clickhouse/clickhouse-server:24.3
     container_name: clickhouse
     hostname: clickhouse
     ports:
@@ -93,7 +93,7 @@ services:
       - kafka-net
 
   postgres:
-    image: docker.1ms.run/postgres:15.8-alpine
+    image: postgres:15.8-alpine
     container_name: postgres
     hostname: postgres
     ports:

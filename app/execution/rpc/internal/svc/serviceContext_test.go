@@ -1,13 +1,63 @@
 package svc
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"exchange-system/app/execution/rpc/internal/exchange"
+	"exchange-system/app/execution/rpc/internal/position"
 	strategypb "exchange-system/common/pb/strategy"
 )
+
+type mockAccountExchange struct {
+	account          *exchange.AccountResult
+	accountBySymbol  map[string]*exchange.AccountResult
+	requestedSymbols []string
+}
+
+// CreateOrder 实现 exchange.Exchange 接口，测试里不会实际使用。
+func (m *mockAccountExchange) CreateOrder(ctx context.Context, param exchange.CreateOrderParam) (*exchange.OrderResult, error) {
+	return nil, nil
+}
+
+// CancelOrder 实现 exchange.Exchange 接口，测试里不会实际使用。
+func (m *mockAccountExchange) CancelOrder(ctx context.Context, param exchange.CancelOrderParam) (*exchange.OrderResult, error) {
+	return nil, nil
+}
+
+// QueryOrder 实现 exchange.Exchange 接口，测试里不会实际使用。
+func (m *mockAccountExchange) QueryOrder(ctx context.Context, param exchange.QueryOrderParam) (*exchange.OrderResult, error) {
+	return nil, nil
+}
+
+// GetAccountInfo 返回默认账户快照，供无 symbol 查询场景复用。
+func (m *mockAccountExchange) GetAccountInfo(ctx context.Context) (*exchange.AccountResult, error) {
+	if m.account != nil {
+		return m.account, nil
+	}
+	return &exchange.AccountResult{}, nil
+}
+
+// GetAccountInfoBySymbol 返回指定交易对的账户快照，并记录请求的 symbol，便于断言走了按 symbol 查询。
+func (m *mockAccountExchange) GetAccountInfoBySymbol(ctx context.Context, symbol string) (*exchange.AccountResult, error) {
+	m.requestedSymbols = append(m.requestedSymbols, symbol)
+	if m.accountBySymbol != nil {
+		if account, ok := m.accountBySymbol[symbol]; ok {
+			return account, nil
+		}
+	}
+	return m.GetAccountInfo(ctx)
+}
+
+// SetStopLossTakeProfit 实现 exchange.Exchange 接口，测试里不会实际使用。
+func (m *mockAccountExchange) SetStopLossTakeProfit(ctx context.Context, symbol string, positionSide string, quantity float64, stopLossPrice float64, takeProfitPrices []float64) (*exchange.ProtectionSetupResult, error) {
+	return nil, nil
+}
+
+// Name 返回测试交易所名称。
+func (m *mockAccountExchange) Name() string { return "mock" }
 
 func TestBuildOrderEventIncludesSignalReasonAndHarvestPathMeta(t *testing.T) {
 	t.Parallel()
@@ -180,5 +230,113 @@ func TestResolveProtectionQuantityFallsBackToRequestedQuantity(t *testing.T) {
 	got := resolveProtectionQuantity(&exchange.OrderResult{ExecutedQuantity: 0}, 0.2)
 	if got != 0.2 {
 		t.Fatalf("resolveProtectionQuantity() = %.4f, want 0.2000", got)
+	}
+}
+
+func TestResolveCloseQuantityUsesExchangePositionWhenLocalMissing(t *testing.T) {
+	t.Parallel()
+
+	mockEx := &mockAccountExchange{
+		accountBySymbol: map[string]*exchange.AccountResult{
+			"ETHUSDT": {
+				Positions: []exchange.PositionInfo{
+					{Symbol: "ETHUSDT", PositionAmount: 1.1607, PositionSide: "LONG", MarkPrice: 2390.85},
+				},
+			},
+		},
+	}
+	router := exchange.NewRouter(exchange.RouterConfig{Strategy: exchange.RouteDirect, DefaultExchange: "mock"})
+	router.Register("mock", mockEx)
+
+	svcCtx := &ServiceContext{
+		router:     router,
+		posManager: position.NewManager(),
+	}
+
+	got, err := svcCtx.resolveCloseQuantity(context.Background(), "ETHUSDT", "LONG", 1.1607)
+	if err != nil {
+		t.Fatalf("resolveCloseQuantity() error = %v", err)
+	}
+	if got != 1.1607 {
+		t.Fatalf("resolveCloseQuantity() = %.4f, want 1.1607", got)
+	}
+	if len(mockEx.requestedSymbols) != 1 || mockEx.requestedSymbols[0] != "ETHUSDT" {
+		t.Fatalf("requested symbols = %#v, want [ETHUSDT]", mockEx.requestedSymbols)
+	}
+	if pos, ok := svcCtx.posManager.GetPosition("ETHUSDT"); !ok || pos.PositionAmount != 1.1607 {
+		t.Fatalf("position after resolveCloseQuantity = %+v, want amount 1.1607", pos)
+	}
+}
+
+func TestUpdatePositionStateAfterFillPartialCloseSyncsExchangeRemaining(t *testing.T) {
+	t.Parallel()
+
+	mockEx := &mockAccountExchange{
+		accountBySymbol: map[string]*exchange.AccountResult{
+			"ETHUSDT": {
+				Positions: []exchange.PositionInfo{
+					{Symbol: "ETHUSDT", PositionAmount: 0.7597, PositionSide: "LONG", MarkPrice: 2390.85},
+				},
+			},
+		},
+	}
+	router := exchange.NewRouter(exchange.RouterConfig{Strategy: exchange.RouteDirect, DefaultExchange: "mock"})
+	router.Register("mock", mockEx)
+
+	svcCtx := &ServiceContext{
+		router:     router,
+		posManager: position.NewManager(),
+	}
+
+	svcCtx.updatePositionStateAfterFill(context.Background(), "ETHUSDT", "PARTIAL_CLOSE", &exchange.OrderResult{
+		Symbol:           "ETHUSDT",
+		Side:             exchange.SideSell,
+		PositionSide:     exchange.PosLong,
+		ExecutedQuantity: 0.4010,
+		AvgPrice:         2390.85,
+	}, "trend-following-ETHUSDT", 0, nil)
+
+	pos, ok := svcCtx.posManager.GetPosition("ETHUSDT")
+	if !ok {
+		t.Fatal("GetPosition() ok = false, want true")
+	}
+	if pos.PositionAmount != 0.7597 {
+		t.Fatalf("position amount = %.4f, want 0.7597", pos.PositionAmount)
+	}
+}
+
+func TestCurrentLocalPositionForLog(t *testing.T) {
+	t.Parallel()
+
+	manager := position.NewManager()
+	if got := currentLocalPositionForLog(manager, "ETHUSDT"); got != "none" {
+		t.Fatalf("currentLocalPositionForLog() = %q, want none", got)
+	}
+
+	manager.UpdateFromExchange(&exchange.AccountResult{
+		Positions: []exchange.PositionInfo{
+			{Symbol: "ETHUSDT", PositionAmount: 0.7597, EntryPrice: 2390.85, MarkPrice: 2390.85},
+		},
+	})
+	if got := currentLocalPositionForLog(manager, "ETHUSDT"); got != "0.7597" {
+		t.Fatalf("currentLocalPositionForLog() = %q, want 0.7597", got)
+	}
+}
+
+func TestExchangePositionAmountForLog(t *testing.T) {
+	t.Parallel()
+
+	account := &exchange.AccountResult{
+		Positions: []exchange.PositionInfo{
+			{Symbol: "ETHUSDT", PositionAmount: 0.7597, PositionSide: "LONG"},
+			{Symbol: "BTCUSDT", PositionAmount: 0.2, PositionSide: "LONG"},
+		},
+	}
+	got, ok := exchangePositionAmountForLog(account, "ETHUSDT")
+	if !ok {
+		t.Fatal("exchangePositionAmountForLog() ok = false, want true")
+	}
+	if got != 0.7597 {
+		t.Fatalf("exchangePositionAmountForLog() = %.4f, want 0.7597", got)
 	}
 }

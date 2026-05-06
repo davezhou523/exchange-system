@@ -442,8 +442,8 @@ func (s *ServiceContext) handleFilledOrder(sig *strategypb.Signal, orderResult *
 		Indicators:      cloneIndicators(sig.GetIndicators()),
 	})
 
-	// 更新仓位管理器
-	s.posManager.UpdateFromOrder(orderResult, strategyID, stopLoss, takeProfits)
+	// 更新仓位管理器。减仓成交优先回拉交易所真实仓位，避免本地账本缺失时把 PARTIAL_CLOSE 误记成清仓。
+	s.updatePositionStateAfterFill(context.Background(), symbol, signalType, orderResult, strategyID, stopLoss, takeProfits)
 
 	// 发布订单结果到 Kafka
 	orderEvent := s.buildOrderEvent(sig, orderResult)
@@ -487,6 +487,74 @@ func resolveProtectionQuantity(orderResult *exchange.OrderResult, requestedQty f
 		return orderResult.ExecutedQuantity
 	}
 	return requestedQty
+}
+
+// updatePositionStateAfterFill 在订单成交后刷新本地仓位账本。
+// 对 reduce-only 成交优先按交易所真实仓位同步，只有同步失败时才回退到本地增量更新。
+func (s *ServiceContext) updatePositionStateAfterFill(ctx context.Context, symbol, signalType string, orderResult *exchange.OrderResult, strategyID string, stopLoss float64, takeProfits []float64) {
+	if s == nil || s.posManager == nil || orderResult == nil {
+		return
+	}
+	normalizedSignalType := strings.ToUpper(strings.TrimSpace(signalType))
+	if normalizedSignalType == "PARTIAL_CLOSE" || normalizedSignalType == "CLOSE" {
+		if s.syncPositionFromExchangeBySymbol(ctx, symbol) {
+			return
+		}
+	}
+	s.posManager.UpdateFromOrder(orderResult, strategyID, normalizedSignalType, stopLoss, takeProfits)
+}
+
+// syncPositionFromExchangeBySymbol 按交易对从交易所回拉仓位真相，用于 reduce-only 成交后的账本修正。
+func (s *ServiceContext) syncPositionFromExchangeBySymbol(ctx context.Context, symbol string) bool {
+	if s == nil || s.router == nil || s.posManager == nil || strings.TrimSpace(symbol) == "" {
+		return false
+	}
+	beforeLocal := currentLocalPositionForLog(s.posManager, symbol)
+	account, err := s.router.GetAccountInfoForSymbol(ctx, symbol)
+	if err != nil {
+		log.Printf("[仓位管理] 回拉交易所仓位失败 | symbol=%s error=%v", symbol, err)
+		return false
+	}
+	exchangeQty, exchangeFound := exchangePositionAmountForLog(account, symbol)
+	s.posManager.UpdateFromExchange(account)
+	log.Printf("[仓位管理] 交易所同步 | symbol=%s before_local=%s exchange_qty=%s", symbol, beforeLocal, formatPositionAmountForLog(exchangeQty, exchangeFound))
+	return true
+}
+
+// currentLocalPositionForLog 返回当前本地仓位的日志文本，便于 reduce-only 同步时快速对比前后差异。
+func currentLocalPositionForLog(manager *position.Manager, symbol string) string {
+	if manager == nil {
+		return "none"
+	}
+	if pos, ok := manager.GetPosition(symbol); ok {
+		return formatPositionAmountForLog(pos.PositionAmount, true)
+	}
+	return "none"
+}
+
+// exchangePositionAmountForLog 汇总交易所账户快照中指定交易对的净持仓数量，便于和本地账本直接对比。
+func exchangePositionAmountForLog(account *exchange.AccountResult, symbol string) (float64, bool) {
+	if account == nil {
+		return 0, false
+	}
+	total := 0.0
+	found := false
+	for _, pos := range account.Positions {
+		if !strings.EqualFold(strings.TrimSpace(pos.Symbol), symbol) || pos.PositionAmount == 0 {
+			continue
+		}
+		total += pos.PositionAmount
+		found = true
+	}
+	return total, found
+}
+
+// formatPositionAmountForLog 把仓位数量统一格式化成日志友好的文本，无仓位时输出 none。
+func formatPositionAmountForLog(amount float64, ok bool) string {
+	if !ok {
+		return "none"
+	}
+	return fmt.Sprintf("%.4f", amount)
 }
 
 // resultStatus 提供保护单结果的安全状态读取，避免日志打印时空指针。
@@ -714,7 +782,7 @@ func (s *ServiceContext) currentHarvestPathMeta(symbol, side string) *orderlog.H
 
 // resolveCloseQuantity 根据当前交易所仓位和策略请求的平仓数量，计算本次 reduce-only 应实际下发的数量。
 func (s *ServiceContext) resolveCloseQuantity(ctx context.Context, symbol, side string, requestedQty float64) (float64, error) {
-	account, err := s.router.GetAccountInfo(ctx)
+	account, err := s.router.GetAccountInfoForSymbol(ctx, symbol)
 	if err != nil {
 		return 0, fmt.Errorf("get account info: %v", err)
 	}

@@ -3,6 +3,7 @@ package position
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"exchange-system/app/execution/rpc/internal/exchange"
@@ -104,8 +105,8 @@ func (m *Manager) UpdateFromExchange(account *exchange.AccountResult) {
 	}
 }
 
-// UpdateFromOrder 根据订单成交结果更新仓位
-func (m *Manager) UpdateFromOrder(result *exchange.OrderResult, strategyID string, stopLoss float64, takeProfits []float64) {
+// UpdateFromOrder 根据订单成交结果更新仓位，reduce-only 场景在本地无持仓时会等待交易所同步，避免误删仓位。
+func (m *Manager) UpdateFromOrder(result *exchange.OrderResult, strategyID, signalType string, stopLoss float64, takeProfits []float64) {
 	if result == nil || result.Symbol == "" {
 		return
 	}
@@ -115,7 +116,12 @@ func (m *Manager) UpdateFromOrder(result *exchange.OrderResult, strategyID strin
 
 	symbol := result.Symbol
 	pos, ok := m.positions[symbol]
+	normalizedSignalType := strings.ToUpper(strings.TrimSpace(signalType))
 	if !ok {
+		if normalizedSignalType == "PARTIAL_CLOSE" || normalizedSignalType == "CLOSE" {
+			log.Printf("[仓位管理] 忽略减仓成交 | symbol=%s strategy=%s signal_type=%s 本地无持仓基数，等待交易所同步", symbol, strategyID, normalizedSignalType)
+			return
+		}
 		pos = &PositionState{
 			Symbol:      symbol,
 			StrategyID:  strategyID,
@@ -144,7 +150,7 @@ func (m *Manager) UpdateFromOrder(result *exchange.OrderResult, strategyID strin
 	}
 
 	// 清仓
-	if newAmt == 0 {
+	if abs64(newAmt) < 1e-9 {
 		delete(m.positions, symbol)
 		log.Printf("[仓位管理] 清仓 | symbol=%s strategy=%s", symbol, strategyID)
 		return
