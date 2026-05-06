@@ -465,12 +465,13 @@ func (s *ServiceContext) handleFilledOrder(sig *strategypb.Signal, orderResult *
 			if targetPositionSide == "" || targetPositionSide == string(exchange.PosBoth) {
 				targetPositionSide = string(mapSideToPositionSide(sig.GetSide()))
 			}
-			result, err := s.router.SetStopLossTakeProfit(context.Background(), symbol, targetPositionSide, quantity, stopLoss, takeProfits)
+			protectionQuantity := resolveProtectionQuantity(orderResult, quantity)
+			result, err := s.router.SetStopLossTakeProfit(context.Background(), symbol, targetPositionSide, protectionQuantity, stopLoss, takeProfits)
 			protectionResult = result
 			if err != nil {
 				log.Printf("[信号] 设置止损止盈失败 | symbol=%s status=%s reason=%s error=%v", symbol, resultStatus(result), resultReason(result), err)
 			} else {
-				log.Printf("[信号] 止损止盈设置成功 | symbol=%s positionSide=%s status=%s reason=%s 止损=%.2f 止盈=%v", symbol, targetPositionSide, resultStatus(result), resultReason(result), stopLoss, takeProfits)
+				log.Printf("[信号] 止损止盈设置成功 | symbol=%s positionSide=%s protection_qty=%.4f status=%s reason=%s 止损=%.2f 止盈=%v", symbol, targetPositionSide, protectionQuantity, resultStatus(result), resultReason(result), stopLoss, takeProfits)
 			}
 		}
 	}
@@ -478,6 +479,14 @@ func (s *ServiceContext) handleFilledOrder(sig *strategypb.Signal, orderResult *
 	// 记录订单执行结果日志，包含保护单下发结果，方便后续查询与排障。
 	s.logger.LogOrder(sig, orderResult, quantity, s.currentHarvestPathMeta(symbol, string(orderResult.PositionSide)), protectionResult)
 	s.recordFilledOrderAnalytics(sig, orderResult, quantity, signalType == "CLOSE" || signalType == "PARTIAL_CLOSE")
+}
+
+// resolveProtectionQuantity 选择保护单应使用的数量，优先取真实成交量，避免信号原始数量与持仓不一致。
+func resolveProtectionQuantity(orderResult *exchange.OrderResult, requestedQty float64) float64 {
+	if orderResult != nil && orderResult.ExecutedQuantity > 0 {
+		return orderResult.ExecutedQuantity
+	}
+	return requestedQty
 }
 
 // resultStatus 提供保护单结果的安全状态读取，避免日志打印时空指针。

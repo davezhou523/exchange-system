@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -34,13 +35,26 @@ func TestSetStopLossTakeProfitUsesAlgoOrderClosePosition(t *testing.T) {
 	t.Parallel()
 
 	var requests []url.Values
+	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/fapi/v1/openOrders":
 			_ = json.NewEncoder(w).Encode([]any{})
+		case "/sapi/v1/algo/futures/openOrders":
+			_ = json.NewEncoder(w).Encode(map[string]any{"orders": []any{}})
 		case "/fapi/v1/exchangeInfo":
 			_, _ = w.Write([]byte(`{"symbols":[{"symbol":"SOLUSDT","quantityPrecision":3}]}`))
+		case "/fapi/v3/positionRisk":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"symbol":       "SOLUSDT",
+					"positionAmt":  "4.9575",
+					"positionSide": "LONG",
+					"markPrice":    "83.70",
+				},
+			})
 		case "/fapi/v1/algoOrder":
+			paths = append(paths, r.URL.Path)
 			requests = append(requests, r.URL.Query())
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"symbol":       "SOLUSDT",
@@ -63,6 +77,11 @@ func TestSetStopLossTakeProfitUsesAlgoOrderClosePosition(t *testing.T) {
 	}
 	if len(requests) != 2 {
 		t.Fatalf("request count = %d, want 2", len(requests))
+	}
+	for _, path := range paths {
+		if path != "/fapi/v1/algoOrder" {
+			t.Fatalf("algo path = %q, want /fapi/v1/algoOrder", path)
+		}
 	}
 	if got := requests[0].Get("closePosition"); got != "true" {
 		t.Fatalf("stop loss closePosition = %q, want true", got)
@@ -90,21 +109,34 @@ func TestSetStopLossTakeProfitUsesAlgoOrderClosePosition(t *testing.T) {
 	}
 }
 
-// TestSetStopLossTakeProfitFallsBackToReduceOnlyQuantity 验证 closePosition 失败时会回退到 quantity + reduceOnly。
-func TestSetStopLossTakeProfitFallsBackToReduceOnlyQuantity(t *testing.T) {
+// TestSetStopLossTakeProfitFallsBackToQuantityWithoutReduceOnlyInHedgeMode 验证双向持仓模式下回退到数量模式时不会再附带 reduceOnly。
+func TestSetStopLossTakeProfitFallsBackToQuantityWithoutReduceOnlyInHedgeMode(t *testing.T) {
 	t.Parallel()
 
 	var requests []url.Values
+	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/fapi/v1/openOrders":
 			_ = json.NewEncoder(w).Encode([]any{})
+		case "/sapi/v1/algo/futures/openOrders":
+			_ = json.NewEncoder(w).Encode(map[string]any{"orders": []any{}})
 		case "/fapi/v1/exchangeInfo":
 			_, _ = w.Write([]byte(`{"symbols":[{"symbol":"SOLUSDT","quantityPrecision":3}]}`))
+		case "/fapi/v3/positionRisk":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"symbol":       "SOLUSDT",
+					"positionAmt":  "4.9575",
+					"positionSide": "LONG",
+					"markPrice":    "83.70",
+				},
+			})
 		case "/fapi/v1/algoOrder":
+			paths = append(paths, r.URL.Path)
 			requests = append(requests, r.URL.Query())
 			if r.URL.Query().Get("closePosition") == "true" {
-				http.Error(w, `{"code":-2021,"msg":"closePosition rejected"}`, http.StatusBadRequest)
+				http.Error(w, `{"code":-2010,"msg":"closePosition rejected"}`, http.StatusBadRequest)
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -126,13 +158,68 @@ func TestSetStopLossTakeProfitFallsBackToReduceOnlyQuantity(t *testing.T) {
 	if len(requests) != 2 {
 		t.Fatalf("request count = %d, want 2", len(requests))
 	}
+	for _, path := range paths {
+		if path != "/fapi/v1/algoOrder" {
+			t.Fatalf("algo path = %q, want /fapi/v1/algoOrder", path)
+		}
+	}
 	if got := requests[1].Get("quantity"); got != "4.957" {
 		t.Fatalf("fallback quantity = %q, want 4.957", got)
 	}
-	if got := requests[1].Get("reduceOnly"); got != "TRUE" {
-		t.Fatalf("fallback reduceOnly = %q, want TRUE", got)
+	if got := requests[1].Get("reduceOnly"); got != "" {
+		t.Fatalf("fallback reduceOnly = %q, want empty", got)
 	}
 	if result == nil || result.StopLoss == nil || result.StopLoss.OrderID != "77" {
 		t.Fatalf("result = %+v, want fallback stop loss order id 77", result)
+	}
+}
+
+// TestSetStopLossTakeProfitRejectsOutOfBoundsTriggerReadable 验证触发价越界时会直接返回可读错误，不再继续提交保护单。
+func TestSetStopLossTakeProfitRejectsOutOfBoundsTriggerReadable(t *testing.T) {
+	t.Parallel()
+
+	algoRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/fapi/v1/openOrders":
+			_ = json.NewEncoder(w).Encode([]any{})
+		case "/sapi/v1/algo/futures/openOrders":
+			_ = json.NewEncoder(w).Encode(map[string]any{"orders": []any{}})
+		case "/fapi/v1/exchangeInfo":
+			_, _ = w.Write([]byte(`{"symbols":[{"symbol":"SOLUSDT","quantityPrecision":3}]}`))
+		case "/fapi/v3/positionRisk":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"symbol":       "SOLUSDT",
+					"positionAmt":  "4.9575",
+					"positionSide": "LONG",
+					"markPrice":    "83.70",
+				},
+			})
+		case "/fapi/v1/algoOrder":
+			algoRequests++
+			http.Error(w, `{"code":-2021,"msg":"Order would immediately trigger."}`, http.StatusBadRequest)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewBinanceClient(server.URL, "key", "secret", "", 1)
+	result, err := client.SetStopLossTakeProfit(context.Background(), "SOLUSDT", string(PosLong), 4.9575, 84.00, nil)
+	if err == nil {
+		t.Fatal("SetStopLossTakeProfit() error = nil, want readable trigger error")
+	}
+	if algoRequests != 0 {
+		t.Fatalf("algo request count = %d, want 0 when trigger is out of bounds", algoRequests)
+	}
+	if result == nil || result.StopLoss == nil {
+		t.Fatalf("result = %+v, want stop loss failure detail", result)
+	}
+	if !strings.Contains(result.StopLoss.Reason, "触发价越界") {
+		t.Fatalf("stop loss reason = %q, want readable trigger error", result.StopLoss.Reason)
+	}
+	if !strings.Contains(result.StopLoss.Reason, "必须低于当前标记价 83.70") {
+		t.Fatalf("stop loss reason = %q, want mark price detail", result.StopLoss.Reason)
 	}
 }

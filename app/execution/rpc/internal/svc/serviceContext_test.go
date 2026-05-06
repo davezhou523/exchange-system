@@ -164,3 +164,21 @@ func TestBuildOrderEventIncludesSignalReasonAndHarvestPathMeta(t *testing.T) {
 		t.Fatalf("unexpected signal_reason tags: %#v", tags)
 	}
 }
+
+func TestResolveProtectionQuantityPrefersExecutedQuantity(t *testing.T) {
+	t.Parallel()
+
+	got := resolveProtectionQuantity(&exchange.OrderResult{ExecutedQuantity: 0.1234}, 0.2)
+	if got != 0.1234 {
+		t.Fatalf("resolveProtectionQuantity() = %.4f, want 0.1234", got)
+	}
+}
+
+func TestResolveProtectionQuantityFallsBackToRequestedQuantity(t *testing.T) {
+	t.Parallel()
+
+	got := resolveProtectionQuantity(&exchange.OrderResult{ExecutedQuantity: 0}, 0.2)
+	if got != 0.2 {
+		t.Fatalf("resolveProtectionQuantity() = %.4f, want 0.2000", got)
+	}
+}

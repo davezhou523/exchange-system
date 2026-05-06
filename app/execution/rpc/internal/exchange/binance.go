@@ -285,6 +285,7 @@ func (c *BinanceClient) SetStopLossTakeProfit(ctx context.Context, symbol string
 	}
 
 	normalizedQty, qtyPrecision, qtyErr := c.normalizeProtectionQuantity(ctx, symbol, quantity)
+	currentMarkPrice, _ := c.getProtectionReferenceMarkPrice(ctx, symbol, positionSide)
 
 	if leg := result.StopLoss; leg != nil && leg.Requested {
 		resp, err := c.createAlgoConditionalOrder(ctx, algoConditionalOrderRequest{
@@ -293,6 +294,7 @@ func (c *BinanceClient) SetStopLossTakeProfit(ctx context.Context, symbol string
 			PositionSide:      positionSide,
 			OrderType:         "STOP_MARKET",
 			TriggerPrice:      leg.TriggerPrice,
+			CurrentMarkPrice:  currentMarkPrice,
 			Quantity:          normalizedQty,
 			QuantityPrecision: qtyPrecision,
 			QuantityErr:       qtyErr,
@@ -315,6 +317,7 @@ func (c *BinanceClient) SetStopLossTakeProfit(ctx context.Context, symbol string
 			PositionSide:      positionSide,
 			OrderType:         "TAKE_PROFIT_MARKET",
 			TriggerPrice:      leg.TriggerPrice,
+			CurrentMarkPrice:  currentMarkPrice,
 			Quantity:          normalizedQty,
 			QuantityPrecision: qtyPrecision,
 			QuantityErr:       qtyErr,
@@ -430,6 +433,7 @@ type algoConditionalOrderRequest struct {
 	PositionSide      string
 	OrderType         string
 	TriggerPrice      float64
+	CurrentMarkPrice  float64
 	Quantity          float64
 	QuantityPrecision int
 	QuantityErr       error
@@ -450,6 +454,9 @@ func (c *BinanceClient) createAlgoConditionalOrder(ctx context.Context, req algo
 	if req.TriggerPrice <= 0 {
 		return nil, fmt.Errorf("trigger price must be positive")
 	}
+	if err := validateAlgoConditionalOrderTrigger(req); err != nil {
+		return nil, err
+	}
 
 	attempts := []algoConditionalOrderAttempt{
 		{
@@ -469,6 +476,9 @@ func (c *BinanceClient) createAlgoConditionalOrder(ctx context.Context, req algo
 		resp, err := c.submitAlgoConditionalOrder(ctx, attempt.Query)
 		if err == nil {
 			return resp, nil
+		}
+		if isImmediateTriggerError(err) {
+			return nil, formatImmediateTriggerError(req, err)
 		}
 		errors = append(errors, attempt.Name+": "+err.Error())
 	}
@@ -602,25 +612,127 @@ func buildAlgoConditionalOrderQuery(req algoConditionalOrderRequest, closePositi
 		q.Set("closePosition", "true")
 	} else if req.Quantity > 0 && req.QuantityPrecision >= 0 {
 		q.Set("quantity", fmt.Sprintf("%.*f", req.QuantityPrecision, req.Quantity))
-		q.Set("reduceOnly", "TRUE")
+		if shouldSendAlgoReduceOnly(req.PositionSide) {
+			q.Set("reduceOnly", "TRUE")
+		}
 	}
 	q.Set("recvWindow", "5000")
 	return q
 }
 
-// submitAlgoConditionalOrder 提交 Binance 条件单，并兼容当前已知的两个路径命名。
+// submitAlgoConditionalOrder 提交 Binance 条件单，统一使用当前可用的 Binance Futures Algo 路径。
 func (c *BinanceClient) submitAlgoConditionalOrder(ctx context.Context, q url.Values) (*binanceAlgoOrderResponse, error) {
-	paths := []string{"/fapi/v1/algoOrder", "/fapi/v1/algo/order"}
-	var errors []string
-	for _, path := range paths {
-		var resp binanceAlgoOrderResponse
-		if err := c.doSignedRequest(ctx, http.MethodPost, path, q, &resp); err != nil {
-			errors = append(errors, path+": "+err.Error())
-			continue
-		}
-		return &resp, nil
+	var resp binanceAlgoOrderResponse
+	if err := c.doSignedRequest(ctx, http.MethodPost, "/fapi/v1/algoOrder", q, &resp); err != nil {
+		return nil, fmt.Errorf("/fapi/v1/algoOrder: %w", err)
 	}
-	return nil, fmt.Errorf("%s", strings.Join(errors, "; "))
+	return &resp, nil
+}
+
+// shouldSendAlgoReduceOnly 判断条件单数量回退时是否需要携带 reduceOnly。
+// Binance 在双向持仓模式（LONG/SHORT）下不接受该参数，只在单向持仓/BOTH 时附带。
+func shouldSendAlgoReduceOnly(positionSide string) bool {
+	positionSide = strings.ToUpper(strings.TrimSpace(positionSide))
+	return positionSide == "" || positionSide == string(PosBoth)
+}
+
+// validateAlgoConditionalOrderTrigger 基于当前标记价格预校验保护单触发方向，避免提交后立刻被交易所拒绝。
+func validateAlgoConditionalOrderTrigger(req algoConditionalOrderRequest) error {
+	if req.CurrentMarkPrice <= 0 || req.TriggerPrice <= 0 {
+		return nil
+	}
+	mustBeAbove, ok := protectionTriggerMustBeAboveMark(req.PositionSide, req.Side, req.OrderType)
+	if !ok {
+		return nil
+	}
+	if mustBeAbove && req.TriggerPrice <= req.CurrentMarkPrice {
+		return fmt.Errorf("触发价越界: %s 触发价 %.2f 必须高于当前标记价 %.2f，否则会立即触发", protectionOrderLabel(req.PositionSide, req.OrderType), req.TriggerPrice, req.CurrentMarkPrice)
+	}
+	if !mustBeAbove && req.TriggerPrice >= req.CurrentMarkPrice {
+		return fmt.Errorf("触发价越界: %s 触发价 %.2f 必须低于当前标记价 %.2f，否则会立即触发", protectionOrderLabel(req.PositionSide, req.OrderType), req.TriggerPrice, req.CurrentMarkPrice)
+	}
+	return nil
+}
+
+// protectionTriggerMustBeAboveMark 返回当前保护单触发价相对标记价应该处于哪一侧。
+// `true` 表示必须高于标记价，`false` 表示必须低于标记价。
+func protectionTriggerMustBeAboveMark(positionSide, side, orderType string) (bool, bool) {
+	positionSide = strings.ToUpper(strings.TrimSpace(positionSide))
+	side = strings.ToUpper(strings.TrimSpace(side))
+	orderType = strings.ToUpper(strings.TrimSpace(orderType))
+	switch positionSide {
+	case string(PosLong):
+		if orderType == "STOP_MARKET" {
+			return false, true
+		}
+		if orderType == "TAKE_PROFIT_MARKET" {
+			return true, true
+		}
+	case string(PosShort):
+		if orderType == "STOP_MARKET" {
+			return true, true
+		}
+		if orderType == "TAKE_PROFIT_MARKET" {
+			return false, true
+		}
+	}
+	if side == string(SideSell) {
+		if orderType == "STOP_MARKET" {
+			return false, true
+		}
+		if orderType == "TAKE_PROFIT_MARKET" {
+			return true, true
+		}
+	}
+	if side == string(SideBuy) {
+		if orderType == "STOP_MARKET" {
+			return true, true
+		}
+		if orderType == "TAKE_PROFIT_MARKET" {
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// protectionOrderLabel 生成保护单的可读标签，便于直接定位是哪一侧的哪一类保护单越界。
+func protectionOrderLabel(positionSide, orderType string) string {
+	positionSide = strings.ToUpper(strings.TrimSpace(positionSide))
+	orderType = strings.ToUpper(strings.TrimSpace(orderType))
+	if positionSide == "" {
+		positionSide = string(PosBoth)
+	}
+	switch orderType {
+	case "STOP_MARKET":
+		return positionSide + " 止损单"
+	case "TAKE_PROFIT_MARKET":
+		return positionSide + " 止盈单"
+	default:
+		return positionSide + " 条件单"
+	}
+}
+
+// isImmediateTriggerError 判断交易所是否明确返回“会立即触发”，这类错误不适合继续做数量模式回退。
+func isImmediateTriggerError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, `"code":-2021`) || strings.Contains(msg, "order would immediately trigger")
+}
+
+// formatImmediateTriggerError 把交易所原始 -2021 错误转成可读文案，方便直接看到触发价和标记价的相对关系。
+func formatImmediateTriggerError(req algoConditionalOrderRequest, err error) error {
+	if req.CurrentMarkPrice > 0 {
+		mustBeAbove, ok := protectionTriggerMustBeAboveMark(req.PositionSide, req.Side, req.OrderType)
+		if ok {
+			if mustBeAbove {
+				return fmt.Errorf("触发价越界: %s 触发价 %.2f 必须高于当前标记价 %.2f，交易所返回 would immediately trigger: %v", protectionOrderLabel(req.PositionSide, req.OrderType), req.TriggerPrice, req.CurrentMarkPrice, err)
+			}
+			return fmt.Errorf("触发价越界: %s 触发价 %.2f 必须低于当前标记价 %.2f，交易所返回 would immediately trigger: %v", protectionOrderLabel(req.PositionSide, req.OrderType), req.TriggerPrice, req.CurrentMarkPrice, err)
+		}
+	}
+	return fmt.Errorf("触发价越界: %s 触发价 %.2f 可能已经跨过当前标记价，交易所返回 would immediately trigger: %v", protectionOrderLabel(req.PositionSide, req.OrderType), req.TriggerPrice, err)
 }
 
 // firstPositivePrice 返回第一档有效止盈价，保持当前“只挂首档止盈”的语义。
@@ -1003,6 +1115,35 @@ func (c *BinanceClient) getPositionRisk(ctx context.Context, symbol string) ([]b
 		return nil, err
 	}
 	return fallback, nil
+}
+
+// getProtectionReferenceMarkPrice 获取保护单校验使用的标记价格，优先取目标持仓方向的 positionRisk。
+func (c *BinanceClient) getProtectionReferenceMarkPrice(ctx context.Context, symbol, positionSide string) (float64, error) {
+	positionRisks, err := c.getPositionRisk(ctx, symbol)
+	if err != nil {
+		return 0, err
+	}
+	normalizedSide := strings.ToUpper(strings.TrimSpace(positionSide))
+	fallbackPrice := 0.0
+	for _, item := range positionRisks {
+		if !strings.EqualFold(item.Symbol, symbol) {
+			continue
+		}
+		price := parseFloat(item.MarkPrice)
+		if price <= 0 {
+			continue
+		}
+		if fallbackPrice == 0 {
+			fallbackPrice = price
+		}
+		if normalizedSide == "" || normalizedSide == string(PosBoth) || strings.EqualFold(item.PositionSide, normalizedSide) {
+			return price, nil
+		}
+	}
+	if fallbackPrice > 0 {
+		return fallbackPrice, nil
+	}
+	return 0, fmt.Errorf("mark price unavailable for %s/%s", symbol, normalizedSide)
 }
 
 func buildAccountPositionMap(positions []binancePositionResp) map[string]PositionInfo {
