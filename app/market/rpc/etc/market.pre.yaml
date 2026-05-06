@@ -1,0 +1,130 @@
+Name: market-rpc
+ListenOn: 0.0.0.0:9080
+Mode: dev
+Log:
+  Level: info
+  Mode: file
+Kafka:
+  Addrs:
+    - 127.0.0.1:9092
+    - 127.0.0.1:29092
+    - 127.0.0.1:39092
+  Topics:
+    Kline: kline
+    Depth: ""
+    Signal: signal
+
+KlineLogDir: data/kline
+SharedWarmupDir: runtime/shared/kline/warmup
+WarmupCleanupOnStartup: true
+WatermarkDelay: 1s
+MaxWatermarkBufferAge: 5m
+IndicatorMode: closed
+EmitMode: watermark
+WarmupPages: 3
+
+Indicators:
+  Ema21Period: 21
+  Ema55Period: 55
+  RsiPeriod: 14
+  AtrPeriod: 14
+
+WorkerGC:
+  GCInterval: 5m
+  MaxIdleTime: 30m
+
+IntervalIndicators:
+  1m: { Ema21Period: 21, Ema55Period: 55, RsiPeriod: 14, AtrPeriod: 14 }
+  3m: { Ema21Period: 21, Ema55Period: 55, RsiPeriod: 14, AtrPeriod: 14 }
+  5m: { Ema21Period: 21, Ema55Period: 55, RsiPeriod: 14, AtrPeriod: 14 }
+  15m: { Ema21Period: 21, Ema55Period: 55, RsiPeriod: 14, AtrPeriod: 14 }
+  1h: { Ema21Period: 21, Ema55Period: 55, RsiPeriod: 14, AtrPeriod: 14 }
+  4h: { Ema21Period: 21, Ema55Period: 55, RsiPeriod: 14, AtrPeriod: 14 }
+
+Binance:
+  WebSocketURL: wss://fstream.binance.com
+  Symbols:
+    - ETHUSDT
+  Intervals:
+    - 1m
+  Proxy: ""
+
+ClickHouse:
+  Enabled: true
+  Endpoint: http://127.0.0.1:8123
+  Database: exchange_analytics
+  Username: default
+  Password: ""
+  Source: market-rpc
+  Timeout: 3s
+  QueueSize: 2048
+  FlushInterval: 1s
+  Recovery:
+    Enabled: true
+    QueryTimeout: 15s
+    WarmupWaitTimeout: 2m
+    PageLimit: 1500
+    DeleteOverlap: true
+    OverlapWindow: 3m
+
+Postgres:
+  Enabled: false
+  DSN: "postgres://exchange:exchange@127.0.0.1:5432/exchange_core?sslmode=disable"
+  AccountID: exchange-demo
+  MaxOpenConns: 10
+  MaxIdleConns: 5
+  ConnMaxLifetime: 30m
+
+UniversePool:
+  Enabled: true
+  LogDir: data/universepool
+  CandidateSymbols:
+    - ETHUSDT
+  AllowList: []
+  BlockList: []
+  TrendPreferredSymbols:
+    - ETHUSDT
+  RangePreferredSymbols:
+    - ETHUSDT
+  BreakoutPreferredSymbols:
+    - ETHUSDT
+  BreakoutAtrPctMin: 0.0045
+  BreakoutAtrPctExitMin: 0.0040
+  EvaluateInterval: 30s
+  MinActiveDuration: 1h
+  MinInactiveDuration: 1h
+  CooldownDuration: 1h
+  AddScoreThreshold: 0.75
+  RemoveScoreThreshold: 0.55
+  Warmup:
+    Enabled: true
+    Min1mBars: 5
+    Require15mReady: false
+    Require1hReady: false
+    Require4hReady: false
+    RequireIndicatorsReady: true
+
+# 策略引擎配置（合并到 market 服务，减少预加载 K 线）
+StrategyEngine:
+  SignalLogDir: data/signal
+  Strategies:
+    - Symbol: ETHUSDT
+      Enabled: true
+      Template: eth-core
+  Templates:
+    eth-core:
+      decision_log_enabled: 1
+      atr_period: 14
+      ema21_period: 21
+      ema55_period: 55
+      rsi_period: 14
+      debug_skip_pullback: 1
+      1m_trading_paused: 1
+  MarketState:
+    FreshnessWindow: 3m
+    RangeAtrPctMax: 0.006
+    BreakoutAtrPctMin: 0.0045
+  Weights:
+    DefaultTrendWeight: 0.7
+    DefaultRangeWeight: 0.7
+    DefaultBreakoutWeight: 0.7
