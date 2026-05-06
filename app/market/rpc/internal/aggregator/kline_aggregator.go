@@ -5,6 +5,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -205,7 +206,7 @@ func NewKlineAggregator(intervals []IntervalDef, producer KafkaProducer, klineLo
 		maxWorkerIdleTime:     30 * time.Minute,
 		asyncSendQueue:        make(chan *market.Kline, 4096),
 	}
-	a.kafkaSendEnabled.Store(true)
+	a.kafkaSendEnabled.Store(hasKafkaProducer(producer))
 
 	// 启动异步 Kafka 发送协程
 	a.asyncSenderWg.Add(1)
@@ -314,6 +315,20 @@ func (a *KlineAggregator) SetKafkaSendEnabled(enabled bool) {
 		return
 	}
 	a.kafkaSendEnabled.Store(enabled)
+}
+
+// hasKafkaProducer 判断当前 producer 是否可用，兼容 typed nil 的接口值。
+func hasKafkaProducer(p KafkaProducer) bool {
+	if p == nil {
+		return false
+	}
+	v := reflect.ValueOf(p)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return !v.IsNil()
+	default:
+		return true
+	}
 }
 
 // calcHistoryBufferSize 根据指标参数动态计算 ring buffer 容量。

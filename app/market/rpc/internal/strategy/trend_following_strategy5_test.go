@@ -1,6 +1,9 @@
 package strategy
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // buildTestKlineSnapshots 按给定收盘价构造一组简化K线，便于在单测中复用趋势/动量计算。
 func buildTestKlineSnapshots(closes []float64) []klineSnapshot {
@@ -166,5 +169,34 @@ func TestEvaluateTrendExitDecisionReturnsPartialCloseAtPlus3R(t *testing.T) {
 	}
 	if s.pos.stopLoss != s.pos.entryPrice {
 		t.Fatalf("stopLoss = %.2f, want %.2f after breakeven move", s.pos.stopLoss, s.pos.entryPrice)
+	}
+}
+
+// TestEvaluateTrendExitDecisionFormatsEmaBreakReasonReadable 验证 EMA 破位平仓文案里价格与 EMA 指标值之间会保留空格，便于日志直接阅读。
+func TestEvaluateTrendExitDecisionFormatsEmaBreakReasonReadable(t *testing.T) {
+	s := NewTrendFollowingStrategy("ETHUSDT", map[string]float64{}, nil, nil, "", nil)
+	s.pos = position{
+		side:          sideLong,
+		entryMode:     entryModePullback,
+		entryPrice:    2400,
+		quantity:      1.16,
+		stopLoss:      2369.33,
+		takeProfit1:   2380.26,
+		takeProfit2:   2402.13,
+		atr:           7.3,
+		breakBelowCnt: 1,
+	}
+
+	decision := s.evaluateTrendExitDecision(klineSnapshot{
+		Close: 2382.23,
+		Ema21: 2397.40,
+		Atr:   10.18,
+	}, 6, 2, 2, 0.3, "15m")
+
+	if decision.SignalType != "CLOSE" {
+		t.Fatalf("SignalType = %q, want CLOSE", decision.SignalType)
+	}
+	if !strings.Contains(decision.Reason, "价格 2382.23 < EMA21 2397.40") {
+		t.Fatalf("Reason = %q, want readable EMA spacing", decision.Reason)
 	}
 }

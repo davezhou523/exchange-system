@@ -2015,7 +2015,7 @@ func (s *TrendFollowingStrategy) evaluateTrendExitDecision(snap klineSnapshot, h
 				if s.pos.breakBelowCnt >= exitConfirmBars {
 					return trendExitDecision{
 						Action:          "SELL",
-						Reason:          fmt.Sprintf("[%s] 多头EMA破位：价格%.2f < EMA21%.2f - 缓冲%.2f（连续%d根确认）", interval, price, snap.Ema21, buffer, s.pos.breakBelowCnt),
+						Reason:          fmt.Sprintf("[%s] 多头EMA破位：价格 %.2f < EMA21 %.2f - 缓冲 %.2f（连续 %d 根确认）", interval, price, snap.Ema21, buffer, s.pos.breakBelowCnt),
 						SignalType:      "CLOSE",
 						Quantity:        s.pos.quantity,
 						ExitReasonKind:  "final_close",
@@ -2032,7 +2032,7 @@ func (s *TrendFollowingStrategy) evaluateTrendExitDecision(snap klineSnapshot, h
 				if s.pos.breakAboveCnt >= exitConfirmBars {
 					return trendExitDecision{
 						Action:          "BUY",
-						Reason:          fmt.Sprintf("[%s] 空头EMA破位：价格%.2f > EMA21%.2f + 缓冲%.2f（连续%d根确认）", interval, price, snap.Ema21, buffer, s.pos.breakAboveCnt),
+						Reason:          fmt.Sprintf("[%s] 空头EMA破位：价格 %.2f > EMA21 %.2f + 缓冲 %.2f（连续 %d 根确认）", interval, price, snap.Ema21, buffer, s.pos.breakAboveCnt),
 						SignalType:      "CLOSE",
 						Quantity:        s.pos.quantity,
 						ExitReasonKind:  "final_close",

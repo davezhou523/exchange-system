@@ -125,6 +125,9 @@ func (a *KlineAggregator) asyncKafkaSender() {
 			if !ok {
 				return // channel closed, 退出
 			}
+			if !hasKafkaProducer(a.producer) {
+				continue
+			}
 			if err := a.producer.SendMarketData(context.Background(), k); err != nil {
 				a.metrics.KafkaSendErrors.Add(1)
 				log.Printf("[aggregator] async send failed: %s %s | err=%v", k.Interval, k.Symbol, err)
@@ -147,6 +150,9 @@ func (a *KlineAggregator) asyncKafkaSender() {
 				case k, ok := <-a.asyncSendQueue:
 					if !ok {
 						return
+					}
+					if !hasKafkaProducer(a.producer) {
+						continue
 					}
 					if err := a.producer.SendMarketData(context.Background(), k); err != nil {
 						a.metrics.KafkaSendErrors.Add(1)
