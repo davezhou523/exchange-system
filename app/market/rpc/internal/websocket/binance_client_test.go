@@ -72,3 +72,58 @@ func TestBuildStreamURLSkipsDepthWhenProducerIsTypedNil(t *testing.T) {
 		t.Fatalf("buildStreamURL() = %s, should not contain depth stream for typed nil producer", got)
 	}
 }
+
+func TestHandleMessageKlineWithoutKafkaProducerStillFeedsAggregator(t *testing.T) {
+	aggregator := &mockAggregator{}
+	client := NewBinanceWebSocketClient(
+		"wss://fstream.binance.com",
+		"",
+		[]string{"ETHUSDT"},
+		[]string{"1m"},
+		nil,
+		nil,
+		aggregator,
+	)
+
+	payload := []byte(`{
+		"stream":"ethusdt@kline_1m",
+		"data":{
+			"e":"kline",
+			"E":1710000000202,
+			"s":"ETHUSDT",
+			"k":{
+				"t":1710000000000,
+				"T":1710000059999,
+				"s":"ETHUSDT",
+				"i":"1m",
+				"o":"3000.10",
+				"c":"3001.20",
+				"h":"3002.00",
+				"l":"2999.80",
+				"v":"123.45",
+				"x":true,
+				"f":100,
+				"L":200,
+				"n":50,
+				"q":"370000.00",
+				"V":"60.00",
+				"Q":"180000.00"
+			}
+		}
+	}`)
+	if _, err := client.handleMessage(context.Background(), payload); err != nil {
+		t.Fatalf("handleMessage() error = %v", err)
+	}
+	if aggregator.last == nil {
+		t.Fatal("aggregator last = nil, want closed 1m kline")
+	}
+}
+
+type mockAggregator struct {
+	last *market.Kline
+}
+
+// OnKline 验证 websocket 在未配置 Kafka producer 时仍能把 1m 闭 K 线喂给进程内聚合链路。
+func (m *mockAggregator) OnKline(_ context.Context, k *market.Kline) {
+	m.last = k
+}

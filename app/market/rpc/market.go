@@ -14,7 +14,6 @@ import (
 
 	"exchange-system/app/market/rpc/internal/aggregator"
 	"exchange-system/app/market/rpc/internal/config"
-	"exchange-system/app/market/rpc/internal/kafka"
 	"exchange-system/app/market/rpc/internal/server"
 	"exchange-system/app/market/rpc/internal/stdlog"
 	"exchange-system/app/market/rpc/internal/svc"
@@ -30,12 +29,12 @@ import (
 
 var (
 	configFile   = flag.String("f", "etc/market.demo.yaml", "the config file")
-	mockKafka    = flag.Bool("mock-kafka", false, "mock kafka producer")
-	mockCount    = flag.Int("mock-count", 200, "mock kafka producer send count")
-	mockInterval = flag.Duration("mock-interval", 0, "mock kafka producer send interval (0 means align to kline tf)")
+	mockKafka    = flag.Bool("mock-kafka", false, "mock local kline feed")
+	mockCount    = flag.Int("mock-count", 200, "mock local kline feed count")
+	mockInterval = flag.Duration("mock-interval", 0, "mock local kline feed interval (0 means align to kline tf)")
 	mockSymbol   = flag.String("mock-symbol", "MOCKUSDT", "mock kline symbol")
 	mockKlineTF  = flag.String("mock-interval-tf", "1m", "mock kline interval(tf)")
-	replayFile   = flag.String("replay", "", "replay 1m kline log file (jsonl) and produce 15m/1h/4h aggregated klines to kafka")
+	replayFile   = flag.String("replay", "", "replay 1m kline log file (jsonl) and feed 15m/1h/4h aggregated klines locally")
 	replaySpeed  = flag.Duration("replay-speed", 0, "replay interval between klines (0 = no delay)")
 )
 
@@ -152,19 +151,19 @@ func runMockKafkaProducer(c config.Config, count int, interval time.Duration, sy
 	if err != nil {
 		return err
 	}
-
-	producer, err := kafka.NewProducer(c.Kafka.Addrs, c.Kafka.Topics.Kline)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = producer.Close()
-	}()
+	agg := aggregator.NewKlineAggregator(aggregator.StandardIntervals, nil, c.KlineLogDir, 0, aggregator.IndicatorParams{
+		Ema21Period: c.Indicators.Ema21Period,
+		Ema55Period: c.Indicators.Ema55Period,
+		RsiPeriod:   c.Indicators.RsiPeriod,
+		AtrPeriod:   c.Indicators.AtrPeriod,
+	})
+	agg.SetKafkaSendEnabled(false)
+	defer agg.Stop()
 
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	base := 1000.0
 
-	log.Printf("[mock] producing kline batch: brokers=%v topic=%s count=%d interval=%s symbol=%s tf=%s", c.Kafka.Addrs, c.Kafka.Topics.Kline, count, interval, symbol, tf)
+	log.Printf("[mock] feeding local kline batch: count=%d interval=%s symbol=%s tf=%s", count, interval, symbol, tf)
 
 	for i := 0; i < count; i++ {
 		now := time.Now()
@@ -192,11 +191,9 @@ func runMockKafkaProducer(c config.Config, count int, interval time.Duration, sy
 			IsClosed:  true,
 		}
 
-		if err := producer.SendMarketData(context.Background(), k); err != nil {
-			return err
-		}
+		agg.OnKline(context.Background(), k)
 
-		log.Printf("[mock] sent %d/%d: symbol=%s tf=%s close=%.4f openTime=%d closeTime=%d", i+1, count, k.Symbol, k.Interval, k.Close, k.OpenTime, k.CloseTime)
+		log.Printf("[mock] fed %d/%d: symbol=%s tf=%s close=%.4f openTime=%d closeTime=%d", i+1, count, k.Symbol, k.Interval, k.Close, k.OpenTime, k.CloseTime)
 		base = close_
 
 		if interval > 0 {
@@ -254,24 +251,18 @@ func runReplayKlineLog(c config.Config, path string, speed time.Duration) error 
 		// treat as single file
 		matches = []string{path}
 	}
-
-	producer, err := kafka.NewProducer(c.Kafka.Addrs, c.Kafka.Topics.Kline)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = producer.Close() }()
-
-	agg := aggregator.NewKlineAggregator(aggregator.StandardIntervals, producer, "", 0, aggregator.IndicatorParams{
+	agg := aggregator.NewKlineAggregator(aggregator.StandardIntervals, nil, c.KlineLogDir, 0, aggregator.IndicatorParams{
 		Ema21Period: 21,
 		Ema55Period: 55,
 		RsiPeriod:   14,
 		AtrPeriod:   14,
 	})
+	agg.SetKafkaSendEnabled(false)
 	ctx := context.Background()
 
 	totalSent := 0
 	for _, fp := range matches {
-		sent, err := replayKlineFile(ctx, fp, speed, producer, agg)
+		sent, err := replayKlineFile(ctx, fp, speed, agg)
 		if err != nil {
 			return err
 		}
@@ -283,7 +274,7 @@ func runReplayKlineLog(c config.Config, path string, speed time.Duration) error 
 	return nil
 }
 
-func replayKlineFile(ctx context.Context, path string, speed time.Duration, producer *kafka.Producer, agg *aggregator.KlineAggregator) (int, error) {
+func replayKlineFile(ctx context.Context, path string, speed time.Duration, agg *aggregator.KlineAggregator) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, fmt.Errorf("open %s: %v", path, err)
@@ -341,12 +332,7 @@ func replayKlineFile(ctx context.Context, path string, speed time.Duration, prod
 			IsClosed:    true,
 		}
 
-		// send raw 1m to kafka
-		if err := producer.SendMarketData(ctx, k); err != nil {
-			log.Printf("[replay] kafka send failed: %v", err)
-		}
-
-		// feed aggregator to produce 15m/1h/4h
+		// feed aggregator to produce 15m/1h/4h locally
 		agg.OnKline(ctx, k)
 
 		sent++

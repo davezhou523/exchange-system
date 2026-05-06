@@ -165,6 +165,9 @@ func NewBinanceWebSocketClient(baseURL, proxyURL string, symbols, intervals []st
 	if !hasKafkaProducer(depthProducer) {
 		depthProducer = nil
 	}
+	if !hasKafkaProducer(producer) {
+		producer = nil
+	}
 
 	return &BinanceWebSocketClient{
 		baseURL:       baseURL,
@@ -469,8 +472,10 @@ func (c *BinanceWebSocketClient) handleMessage(ctx context.Context, message []by
 			// 不再写入根级别日志（klineLogDir/SYMBOL/YYYY-MM-DD.jsonl）
 			// 1m K线经 aggregator 指标计算后会写入 klineLogDir/SYMBOL/1m/YYYY-MM-DD.jsonl，避免重复
 
-			if err := c.producer.SendMarketData(ctx, &k); err != nil {
-				return stats, fmt.Errorf("failed to send kline to Kafka: %v", err)
+			if hasKafkaProducer(c.producer) {
+				if err := c.producer.SendMarketData(ctx, &k); err != nil {
+					return stats, fmt.Errorf("failed to send kline to Kafka: %v", err)
+				}
 			}
 			if c.aggregator != nil {
 				c.aggregator.OnKline(ctx, &k)

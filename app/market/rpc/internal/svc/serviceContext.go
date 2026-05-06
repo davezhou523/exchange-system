@@ -89,17 +89,14 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 			return nil, err
 		}
 	}
-
-	producer, err := kafka.NewProducerWithContext(ctx, c.Kafka.Addrs, c.Kafka.Topics.Kline)
-	if err != nil {
-		cancel()
-		return nil, err
-	}
+	// 开发阶段已不再通过 kline topic 驱动内嵌策略，直接关闭运行时 K 线 Kafka 广播，
+	// 仅保留进程内 dispatcher -> universepool/strategy/aggregator 链路与本地 jsonl/CK 输出。
+	var producer *kafka.Producer
+	var err error
 	var depthProducer *kafka.Producer
 	if c.Kafka.Topics.Depth != "" {
 		depthProducer, err = kafka.NewProducerWithContext(ctx, c.Kafka.Addrs, c.Kafka.Topics.Depth)
 		if err != nil {
-			_ = producer.Close()
 			cancel()
 			return nil, err
 		}
@@ -111,6 +108,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		RsiPeriod:   c.Indicators.RsiPeriod,
 		AtrPeriod:   c.Indicators.AtrPeriod,
 	})
+	agg.SetKafkaSendEnabled(false)
 	// SharedWarmupDir 供 strategy 等下游服务读取预热快照，避免复用消费验证目录。
 	agg.SetSharedWarmupDir(c.SharedWarmupDir)
 
@@ -284,7 +282,6 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		if depthProducer != nil {
 			_ = depthProducer.Close()
 		}
-		_ = producer.Close()
 		agg.Stop()
 		cancel()
 		return nil, err
