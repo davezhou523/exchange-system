@@ -19,6 +19,7 @@ type LogState struct {
 
 type logEntry struct {
 	Timestamp                    string            `json:"timestamp"`
+	TimestampBJ                  string            `json:"timestamp_bj"`
 	Symbol                       string            `json:"symbol"`
 	State                        MarketState       `json:"state"`
 	StateDesc                    string            `json:"state_desc,omitempty"`
@@ -46,6 +47,7 @@ type logEntry struct {
 
 type metaLogEntry struct {
 	Timestamp        string            `json:"timestamp"`
+	TimestampBJ      string            `json:"timestamp_bj"`
 	CandidateCount   int               `json:"candidate_count"`
 	ResultCount      int               `json:"result_count"`
 	HealthyCount     int               `json:"healthy_count"`
@@ -99,6 +101,7 @@ func (l *LogState) Write(baseDir string, features Features, result Result, now t
 
 	entry := logEntry{
 		Timestamp:                    formatLogTime(now),
+		TimestampBJ:                  formatLogTimeBJ(now),
 		Symbol:                       result.Symbol,
 		State:                        result.State,
 		StateDesc:                    describeMarketState(result.State),
@@ -141,6 +144,8 @@ func (l *LogState) WriteMeta(baseDir string, entry metaLogEntry, now time.Time) 
 	if l == nil || baseDir == "" {
 		return
 	}
+	entry.Timestamp = formatLogTime(now)
+	entry.TimestampBJ = formatLogTimeBJ(now)
 	dateStr := now.UTC().Format("2006-01-02")
 	dir := filepath.Join(baseDir, "marketstate", "_meta")
 
@@ -201,6 +206,7 @@ func BuildMetaLogEntry(now time.Time, features map[string]Features, analyses map
 	aggregate := Aggregate(now, analyses, results)
 	entry := metaLogEntry{
 		Timestamp:        formatLogTime(now),
+		TimestampBJ:      formatLogTimeBJ(now),
 		CandidateCount:   len(results),
 		ResultCount:      len(results),
 		HealthyCount:     aggregate.HealthyCount,
@@ -444,6 +450,15 @@ func formatLogTime(t time.Time) string {
 		return t.Format("2006-01-02 15:04:05 UTC")
 	}
 	return t.Format("2006-01-02 15:04:05.000 UTC")
+}
+
+// formatLogTimeBJ 把日志时间统一格式化为北京时间字符串，便于直接对照东八区的运行窗口。
+func formatLogTimeBJ(t time.Time) string {
+	bj := t.UTC().In(time.FixedZone("CST", 8*3600))
+	if bj.Nanosecond()/int(time.Millisecond) == 0 {
+		return bj.Format("2006-01-02 15:04:05 CST")
+	}
+	return bj.Format("2006-01-02 15:04:05.000 CST")
 }
 
 func roundFloat(v float64) float64 {

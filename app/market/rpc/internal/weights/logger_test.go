@@ -39,6 +39,9 @@ func TestBuildMetaLogEntryIncludesMatchCountsAndStrategyMix(t *testing.T) {
 	if got := entry.MatchCounts["trend_up"]; got != 2 {
 		t.Fatalf("match_counts[trend_up] = %d, want 2", got)
 	}
+	if entry.TimestampBJ == "" {
+		t.Fatalf("timestamp_bj = %q, want non-empty beijing time", entry.TimestampBJ)
+	}
 	if got := entry.MatchCounts["breakout"]; got != 1 {
 		t.Fatalf("match_counts[breakout] = %d, want 1", got)
 	}
@@ -92,6 +95,9 @@ func TestWriteIncludesRouteReason(t *testing.T) {
 	}
 	if got := entry["route_reason"]; got != "market_state_breakout" {
 		t.Fatalf("route_reason = %#v, want market_state_breakout", got)
+	}
+	if got, ok := entry["timestamp_bj"].(string); !ok || got == "" {
+		t.Fatalf("timestamp_bj = %#v, want non-empty beijing time", entry["timestamp_bj"])
 	}
 	if got := entry["score_source"]; got != "regime_analysis" {
 		t.Fatalf("score_source = %#v, want regime_analysis", got)

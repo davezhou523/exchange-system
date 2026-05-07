@@ -71,6 +71,9 @@ func TestWriteSignalLogIncludesRouteContext(t *testing.T) {
 	if got := weightsValue["bucket_budget"]; got != float64(0.7) {
 		t.Fatalf("weights.bucket_budget = %#v, want 0.7", got)
 	}
+	if got, ok := entry["timestamp_bj"].(string); !ok || got == "" {
+		t.Fatalf("timestamp_bj = %#v, want non-empty beijing time", entry["timestamp_bj"])
+	}
 }
 
 // TestEnrichSignalWithRouteContext 验证实际发出的 signal payload 顶层会补齐 route 解释字段。

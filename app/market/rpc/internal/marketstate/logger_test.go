@@ -39,6 +39,9 @@ func TestBuildMetaLogEntryIncludesChineseDescriptions(t *testing.T) {
 	if entry.GlobalStateDesc != "震荡" {
 		t.Fatalf("global_state_desc = %q, want %q", entry.GlobalStateDesc, "震荡")
 	}
+	if entry.TimestampBJ == "" {
+		t.Fatalf("timestamp_bj = %q, want non-empty beijing time", entry.TimestampBJ)
+	}
 	if entry.GlobalReasonDesc != "全局状态由命中面最强的形态主导" {
 		t.Fatalf("global_reason_desc = %q, want dominant_match_surface description", entry.GlobalReasonDesc)
 	}
@@ -101,6 +104,9 @@ func TestWriteIncludesFallbackIntervalDetails(t *testing.T) {
 	}
 	if got := entry["fallback_source_desc"]; got != "1m" {
 		t.Fatalf("fallback_source_desc = %#v, want 1m", got)
+	}
+	if got, ok := entry["timestamp_bj"].(string); !ok || got == "" {
+		t.Fatalf("timestamp_bj = %#v, want non-empty beijing time", entry["timestamp_bj"])
 	}
 	missing, ok := entry["fallback_missing_intervals"].([]interface{})
 	if !ok || len(missing) != 1 || missing[0] != "1h" {

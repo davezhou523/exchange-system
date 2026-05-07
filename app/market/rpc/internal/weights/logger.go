@@ -17,6 +17,7 @@ type LogState struct {
 
 type logEntry struct {
 	Timestamp       string  `json:"timestamp"`
+	TimestampBJ     string  `json:"timestamp_bj"`
 	Symbol          string  `json:"symbol"`
 	Template        string  `json:"template,omitempty"`
 	TemplateDesc    string  `json:"template_desc,omitempty"`
@@ -39,6 +40,7 @@ type logEntry struct {
 
 type metaLogEntry struct {
 	Timestamp           string             `json:"timestamp"`
+	TimestampBJ         string             `json:"timestamp_bj"`
 	SymbolCount         int                `json:"symbol_count"`
 	RecommendationCount int                `json:"recommendation_count"`
 	PausedCount         int                `json:"paused_count"`
@@ -91,6 +93,7 @@ func (l *LogState) Write(baseDir string, rec Recommendation, now time.Time) {
 
 	entry := logEntry{
 		Timestamp:       formatLogTime(now),
+		TimestampBJ:     formatLogTimeBJ(now),
 		Symbol:          rec.Symbol,
 		Template:        rec.Template,
 		TemplateDesc:    describeTemplate(rec.Template),
@@ -125,6 +128,8 @@ func (l *LogState) WriteMeta(baseDir string, entry metaLogEntry, now time.Time) 
 	if l == nil || baseDir == "" {
 		return
 	}
+	entry.Timestamp = formatLogTime(now)
+	entry.TimestampBJ = formatLogTimeBJ(now)
 	dateStr := now.UTC().Format("2006-01-02")
 	dir := filepath.Join(baseDir, "weights", "_meta")
 
@@ -184,6 +189,7 @@ func (l *LogState) Close() error {
 func BuildMetaLogEntry(out Output, symbolCount int, marketState string, marketStateSource string, now time.Time) metaLogEntry {
 	entry := metaLogEntry{
 		Timestamp:           formatLogTime(now),
+		TimestampBJ:         formatLogTimeBJ(now),
 		SymbolCount:         symbolCount,
 		RecommendationCount: len(out.Recommendations),
 		MarketPaused:        out.MarketPaused,
@@ -269,6 +275,15 @@ func formatLogTime(t time.Time) string {
 		return t.Format("2006-01-02 15:04:05 UTC")
 	}
 	return t.Format("2006-01-02 15:04:05.000 UTC")
+}
+
+// formatLogTimeBJ 把日志时间统一格式化为北京时间字符串，便于直接核对线上路由切换时刻。
+func formatLogTimeBJ(t time.Time) string {
+	bj := t.UTC().In(time.FixedZone("CST", 8*3600))
+	if bj.Nanosecond()/int(time.Millisecond) == 0 {
+		return bj.Format("2006-01-02 15:04:05 CST")
+	}
+	return bj.Format("2006-01-02 15:04:05.000 CST")
 }
 
 func roundFloat(v float64) float64 {

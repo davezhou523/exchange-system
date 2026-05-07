@@ -70,6 +70,7 @@ func NewLogger(signalLogDir, orderLogDir string) *Logger {
 // SignalLogEntry 信号日志条目
 type SignalLogEntry struct {
 	Timestamp    string             `json:"timestamp"`
+	TimestampBJ  string             `json:"timestamp_bj"`
 	StrategyID   string             `json:"strategy_id"`
 	Symbol       string             `json:"symbol"`
 	SignalType   string             `json:"signal_type"`
@@ -153,9 +154,11 @@ func (l *Logger) LogSignal(sig *strategypb.Signal) {
 	if l == nil || l.signalLogDir == "" {
 		return
 	}
+	now := time.Now().UTC()
 
 	entry := SignalLogEntry{
-		Timestamp:    time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		Timestamp:    formatJSONLTimestampUTC(now),
+		TimestampBJ:  formatJSONLTimestampBJ(now),
 		StrategyID:   sig.GetStrategyId(),
 		Symbol:       sig.GetSymbol(),
 		SignalType:   sig.GetSignalType(),
@@ -183,6 +186,7 @@ func (l *Logger) LogSignal(sig *strategypb.Signal) {
 // OrderLogEntry 订单日志条目
 type OrderLogEntry struct {
 	Timestamp                   string             `json:"timestamp"`
+	TimestampBJ                 string             `json:"timestamp_bj"`
 	SignalType                  string             `json:"signal_type"`
 	StrategyID                  string             `json:"strategy_id"`
 	Symbol                      string             `json:"symbol"`
@@ -227,9 +231,11 @@ func (l *Logger) LogOrder(sig *strategypb.Signal, result *exchange.OrderResult, 
 	if l == nil || l.orderLogDir == "" {
 		return
 	}
+	now := time.Now().UTC()
 
 	entry := OrderLogEntry{
-		Timestamp:       time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		Timestamp:       formatJSONLTimestampUTC(now),
+		TimestampBJ:     formatJSONLTimestampBJ(now),
 		SignalType:      sig.GetSignalType(),
 		StrategyID:      sig.GetStrategyId(),
 		Symbol:          result.Symbol,
@@ -265,9 +271,11 @@ func (l *Logger) LogOrderFailure(sig *strategypb.Signal, status exchange.OrderSt
 	if l == nil || l.orderLogDir == "" || sig == nil {
 		return
 	}
+	now := time.Now().UTC()
 
 	entry := OrderLogEntry{
-		Timestamp:     time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		Timestamp:     formatJSONLTimestampUTC(now),
+		TimestampBJ:   formatJSONLTimestampBJ(now),
 		SignalType:    sig.GetSignalType(),
 		StrategyID:    sig.GetStrategyId(),
 		Symbol:        sig.GetSymbol(),
@@ -285,7 +293,7 @@ func (l *Logger) LogOrderFailure(sig *strategypb.Signal, status exchange.OrderSt
 		Reason:        ComposeHarvestPathReason(errorMessage, harvestPath),
 		SignalReason:  signalReasonEntryFromPB(sig.GetSignalReason()),
 		ErrorMessage:  errorMessage,
-		TransactTime:  formatMillisTime(time.Now().UnixMilli()),
+		TransactTime:  formatMillisTime(now.UnixMilli()),
 	}
 	applyHarvestPathMeta(&entry, harvestPath)
 
@@ -568,6 +576,16 @@ func formatMillisTime(ms int64) string {
 		return ""
 	}
 	return time.UnixMilli(ms).UTC().Format("2006-01-02 15:04:05")
+}
+
+// formatJSONLTimestampUTC 统一输出 JSONL 日志里的 UTC 时间，保持现有毫秒精度与 Z 后缀格式。
+func formatJSONLTimestampUTC(t time.Time) string {
+	return t.UTC().Format("2006-01-02T15:04:05.000Z")
+}
+
+// formatJSONLTimestampBJ 统一输出 JSONL 日志里的北京时间，便于值班时直接按东八区核对执行时序。
+func formatJSONLTimestampBJ(t time.Time) string {
+	return t.UTC().In(time.FixedZone("CST", 8*3600)).Format("2006-01-02T15:04:05.000+08:00")
 }
 
 // formatNumbers 将日志条目中的浮点数格式化为2位小数

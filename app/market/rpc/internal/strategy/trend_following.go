@@ -2987,6 +2987,7 @@ func (s *TrendFollowingStrategy) sendSignal(ctx context.Context, signal map[stri
 // signalLogEntry 定义结构化的信号日志格式
 type signalLogEntry struct {
 	Timestamp    string                   `json:"timestamp"`
+	TimestampBj  string                   `json:"timestamp_bj,omitempty"`
 	Symbol       string                   `json:"symbol"`
 	Interval     string                   `json:"interval"`
 	OpenTime     string                   `json:"open_time"`
@@ -3349,6 +3350,7 @@ func (s *TrendFollowingStrategy) writeSignalLog(signal map[string]interface{}, k
 
 	entry := signalLogEntry{
 		Timestamp:    formatDecisionLogTime(now),
+		TimestampBj:  formatDecisionLogTimeBJ(now),
 		Symbol:       s.symbol,
 		Interval:     interval,
 		OpenTime:     formatDecisionLogTime(time.UnixMilli(k.OpenTime).UTC()),
