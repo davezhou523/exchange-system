@@ -25,7 +25,7 @@ Exchange:
     Testnet: true
     APIKey: "EyYZXotRJaaXeycqfwLaDYBREyLTyNQK8lCuZKilieOg5gBgKGnpbdXBSMN7eMjJ"
     SecretKey: "69wfjz9tkqUykbwlla6HUYcCKuVtRKvOEYoCUC1BdA0dYChSOccJpI1xnUpId0UP"
-    Proxy: ""
+    Proxy: "socks5://127.0.0.1:1080"
 
 
 Risk:
