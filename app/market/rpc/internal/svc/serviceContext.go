@@ -45,11 +45,22 @@ type snapshotUpdater interface {
 	UpdateSnapshotFromKline(k *market.Kline)
 }
 
+// replayableKlineAggregator 抽象聚合器最小能力，便于 dispatcher 统一透传实时 1m 和缺口回灌。
+type replayableKlineAggregator interface {
+	// OnKline 处理实时闭合 1m K 线。
+	OnKline(ctx context.Context, k *market.Kline)
+	// ReplayKline 按阻塞方式回放缺失 1m K 线，避免补数时丢数据。
+	ReplayKline(ctx context.Context, k *market.Kline)
+}
+
 // klineDispatcher 把 websocket 收到的 1m 闭合 K 线同时分发给 UniversePool、聚合器和策略引擎。
 type klineDispatcher struct {
-	agg            *aggregator.KlineAggregator
+	agg            replayableKlineAggregator
 	universeMgr    snapshotUpdater
 	strategyEngine *StrategyEngine
+	warmupper      aggregator.HistoryWarmupper
+	last1mMu       sync.Mutex
+	last1mOpenTime map[string]int64
 }
 
 // resolveStrategySignalTopic 统一决定策略信号发送到哪个 Kafka topic，避免误发到 K 线 topic。
@@ -66,6 +77,7 @@ func (d *klineDispatcher) OnKline(ctx context.Context, k *market.Kline) {
 	if d == nil || k == nil {
 		return
 	}
+	d.recoverMissing1mKlines(ctx, k)
 	// UniversePool 快照属于"观察输入"，优先于聚合发射链路同步更新，避免 warmup 期间出现 snapshot 空窗。
 	if d.universeMgr != nil {
 		d.universeMgr.UpdateSnapshotFromKline(k)
@@ -76,6 +88,116 @@ func (d *klineDispatcher) OnKline(ctx context.Context, k *market.Kline) {
 	}
 	if d.agg != nil {
 		d.agg.OnKline(ctx, k)
+	}
+	d.recordLatest1mOpenTime(k)
+}
+
+// recoverMissing1mKlines 检测实时 1m 是否发生跳分钟；若发现缺口，则通过 REST 拉取缺失 K 线并阻塞回灌到聚合器。
+func (d *klineDispatcher) recoverMissing1mKlines(ctx context.Context, k *market.Kline) {
+	if d == nil || d.agg == nil || d.warmupper == nil || k == nil {
+		return
+	}
+	if !k.IsClosed || strings.TrimSpace(k.Interval) != "1m" {
+		return
+	}
+
+	symbol := strings.ToUpper(strings.TrimSpace(k.Symbol))
+	if symbol == "" || k.OpenTime <= 0 {
+		return
+	}
+
+	prevOpenTime := d.latest1mOpenTime(symbol)
+	if prevOpenTime <= 0 {
+		return
+	}
+	expectedOpenTime := prevOpenTime + oneMinuteMillis
+	if k.OpenTime <= expectedOpenTime {
+		return
+	}
+
+	missingStart := expectedOpenTime
+	missingEnd := k.OpenTime - oneMinuteMillis
+	missingCount := int((missingEnd-missingStart)/oneMinuteMillis) + 1
+	log.Printf("[kline gap] symbol=%s expected_open=%s current_open=%s missing_count=%d missing_from=%s missing_to=%s status=detected",
+		symbol,
+		formatRecoveryTime(expectedOpenTime),
+		formatRecoveryTime(k.OpenTime),
+		missingCount,
+		formatRecoveryTime(missingStart),
+		formatRecoveryTime(missingEnd),
+	)
+
+	recoveryCtx := ctx
+	if recoveryCtx == nil {
+		recoveryCtx = context.Background()
+	}
+	timeoutCtx, cancel := context.WithTimeout(recoveryCtx, 15*time.Second)
+	defer cancel()
+
+	klines, err := fetchRecoveryKlines(timeoutCtx, d.warmupper, symbol, missingStart, missingEnd, 1500)
+	if err != nil {
+		log.Printf("[kline gap] symbol=%s expected_open=%s current_open=%s missing_count=%d missing_from=%s missing_to=%s status=fetch_failed err=%v",
+			symbol,
+			formatRecoveryTime(expectedOpenTime),
+			formatRecoveryTime(k.OpenTime),
+			missingCount,
+			formatRecoveryTime(missingStart),
+			formatRecoveryTime(missingEnd),
+			err)
+		return
+	}
+	if len(klines) == 0 {
+		log.Printf("[kline gap] symbol=%s expected_open=%s current_open=%s missing_count=%d missing_from=%s missing_to=%s status=fetch_empty",
+			symbol,
+			formatRecoveryTime(expectedOpenTime),
+			formatRecoveryTime(k.OpenTime),
+			missingCount,
+			formatRecoveryTime(missingStart),
+			formatRecoveryTime(missingEnd))
+		return
+	}
+	for _, replayKline := range klines {
+		d.agg.ReplayKline(timeoutCtx, replayKline)
+	}
+	log.Printf("[kline gap] symbol=%s expected_open=%s current_open=%s missing_count=%d missing_from=%s missing_to=%s replayed_count=%d status=replayed",
+		symbol,
+		formatRecoveryTime(expectedOpenTime),
+		formatRecoveryTime(k.OpenTime),
+		missingCount,
+		formatRecoveryTime(missingStart),
+		formatRecoveryTime(missingEnd),
+		len(klines))
+}
+
+// latest1mOpenTime 返回指定交易对最近一次已处理的 1m 开盘时间。
+func (d *klineDispatcher) latest1mOpenTime(symbol string) int64 {
+	if d == nil || symbol == "" {
+		return 0
+	}
+	d.last1mMu.Lock()
+	defer d.last1mMu.Unlock()
+	if d.last1mOpenTime == nil {
+		return 0
+	}
+	return d.last1mOpenTime[symbol]
+}
+
+// recordLatest1mOpenTime 记录最新的实时 1m 开盘时间，供下一根 K 线检测是否跳分钟。
+func (d *klineDispatcher) recordLatest1mOpenTime(k *market.Kline) {
+	if d == nil || k == nil || !k.IsClosed || strings.TrimSpace(k.Interval) != "1m" {
+		return
+	}
+	symbol := strings.ToUpper(strings.TrimSpace(k.Symbol))
+	if symbol == "" || k.OpenTime <= 0 {
+		return
+	}
+	d.last1mMu.Lock()
+	defer d.last1mMu.Unlock()
+	if d.last1mOpenTime == nil {
+		d.last1mOpenTime = make(map[string]int64)
+	}
+	if k.OpenTime > d.last1mOpenTime[symbol] {
+		d.last1mOpenTime[symbol] = k.OpenTime
 	}
 }
 
@@ -175,7 +297,8 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	agg.ValidateConfig()
 
 	dispatcher := &klineDispatcher{
-		agg: agg,
+		agg:       agg,
+		warmupper: warmupper,
 	}
 
 	wsClient := websocket.NewBinanceWebSocketClient(

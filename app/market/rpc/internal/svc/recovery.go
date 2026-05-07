@@ -283,19 +283,32 @@ func fetchRecoveryKlines(ctx context.Context, warmupper aggregator.HistoryWarmup
 
 	result := make([]*market.Kline, 0, 512)
 	nextStart := startOpenTime
+	totalMissingCount := recoveryWindowCount(startOpenTime, endOpenTime)
 	page := 0
 	for nextStart <= endOpenTime {
 		page++
 		pageStartedAt := time.Now()
-		log.Printf("[market recovery] step=fetch_gap_page status=begin symbol=%s page=%d from=%s to=%s limit=%d",
-			symbol, page, formatRecoveryTime(nextStart), formatRecoveryTime(endOpenTime), pageLimit)
+		log.Printf("[market recovery] step=fetch_gap_page status=begin symbol=%s expected_open=%s current_open=%s missing_count=%d page=%d from=%s to=%s limit=%d",
+			symbol,
+			formatRecoveryTime(startOpenTime),
+			formatRecoveryTime(endOpenTime),
+			totalMissingCount,
+			page,
+			formatRecoveryTime(nextStart),
+			formatRecoveryTime(endOpenTime),
+			pageLimit)
 		rows, err := warmupper.FetchKlinesRange(ctx, symbol, "1m", nextStart, endOpenTime, pageLimit)
 		if err != nil {
 			return nil, err
 		}
 		if len(rows) == 0 {
-			log.Printf("[market recovery] step=fetch_gap_page status=done symbol=%s page=%d rows=0 elapsed=%s",
-				symbol, page, time.Since(pageStartedAt).Round(time.Millisecond))
+			log.Printf("[market recovery] step=fetch_gap_page status=done symbol=%s expected_open=%s current_open=%s missing_count=%d page=%d rows=0 elapsed=%s",
+				symbol,
+				formatRecoveryTime(startOpenTime),
+				formatRecoveryTime(endOpenTime),
+				totalMissingCount,
+				page,
+				time.Since(pageStartedAt).Round(time.Millisecond))
 			break
 		}
 
@@ -316,8 +329,16 @@ func fetchRecoveryKlines(ctx context.Context, warmupper aggregator.HistoryWarmup
 			pageCount++
 			lastOpenTime = kline.OpenTime
 		}
-		log.Printf("[market recovery] step=fetch_gap_page status=done symbol=%s page=%d rows=%d accepted=%d lastOpen=%s elapsed=%s",
-			symbol, page, len(rows), pageCount, formatRecoveryTime(lastOpenTime), time.Since(pageStartedAt).Round(time.Millisecond))
+		log.Printf("[market recovery] step=fetch_gap_page status=done symbol=%s expected_open=%s current_open=%s missing_count=%d page=%d rows=%d accepted=%d last_open=%s elapsed=%s",
+			symbol,
+			formatRecoveryTime(startOpenTime),
+			formatRecoveryTime(endOpenTime),
+			totalMissingCount,
+			page,
+			len(rows),
+			pageCount,
+			formatRecoveryTime(lastOpenTime),
+			time.Since(pageStartedAt).Round(time.Millisecond))
 
 		if lastOpenTime == 0 {
 			break
@@ -404,16 +425,27 @@ func replayRecoveryKlines(ctx context.Context, agg *aggregator.KlineAggregator, 
 	if agg == nil || len(klines) == 0 {
 		return nil
 	}
+	expectedOpenTime := klines[0].OpenTime
+	currentOpenTime := klines[len(klines)-1].OpenTime
+	missingCount := len(klines)
 
 	firstCtx := ctx
 	if firstCtx == nil {
 		firstCtx = context.Background()
 	}
-	log.Printf("[market recovery] step=replay_first_kline status=begin symbol=%s open=%s",
-		symbol, formatRecoveryTime(klines[0].OpenTime))
+	log.Printf("[market recovery] step=replay_first_kline status=begin symbol=%s expected_open=%s current_open=%s missing_count=%d open=%s",
+		symbol,
+		formatRecoveryTime(expectedOpenTime),
+		formatRecoveryTime(currentOpenTime),
+		missingCount,
+		formatRecoveryTime(klines[0].OpenTime))
 	agg.ReplayKline(firstCtx, klines[0])
-	log.Printf("[market recovery] step=replay_first_kline status=done symbol=%s open=%s",
-		symbol, formatRecoveryTime(klines[0].OpenTime))
+	log.Printf("[market recovery] step=replay_first_kline status=done symbol=%s expected_open=%s current_open=%s missing_count=%d open=%s",
+		symbol,
+		formatRecoveryTime(expectedOpenTime),
+		formatRecoveryTime(currentOpenTime),
+		missingCount,
+		formatRecoveryTime(klines[0].OpenTime))
 	log.Printf("[market recovery] step=wait_warmup status=begin symbol=%s timeout=%s",
 		symbol, warmupWaitTimeout)
 	waitStartedAt := time.Now()
@@ -426,11 +458,25 @@ func replayRecoveryKlines(ctx context.Context, agg *aggregator.KlineAggregator, 
 	for index, kline := range klines[1:] {
 		agg.ReplayKline(firstCtx, kline)
 		if (index+2)%500 == 0 || index == len(klines)-2 {
-			log.Printf("[market recovery] step=replay_progress symbol=%s replayed=%d total=%d currentOpen=%s",
-				symbol, index+2, len(klines), formatRecoveryTime(kline.OpenTime))
+			log.Printf("[market recovery] step=replay_progress status=running symbol=%s expected_open=%s current_open=%s missing_count=%d replayed=%d total=%d progress_open=%s",
+				symbol,
+				formatRecoveryTime(expectedOpenTime),
+				formatRecoveryTime(currentOpenTime),
+				missingCount,
+				index+2,
+				len(klines),
+				formatRecoveryTime(kline.OpenTime))
 		}
 	}
 	return nil
+}
+
+// recoveryWindowCount 返回指定 1m 补数窗口理论上包含的 K 线根数，便于启动补数日志与运行时 gap 日志统一口径。
+func recoveryWindowCount(startOpenTime, endOpenTime int64) int {
+	if startOpenTime <= 0 || endOpenTime < startOpenTime {
+		return 0
+	}
+	return int((endOpenTime-startOpenTime)/oneMinuteMillis) + 1
 }
 
 // waitRecoveryWarmupReady 等待指定交易对完成 warmup，避免补数期间 pending 队列溢出。
